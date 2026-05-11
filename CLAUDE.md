@@ -10,7 +10,7 @@ Azure-native automated portfolio analysis and paper trade execution pipeline. Si
 - **FMP (Financial Modeling Prep)** for fundamentals, earnings, ETF look-through, congressional trades, stock news — free tier, 250 req/day
 - **FRED** for macro indicators (18 series: US + international) — free, no practical limit
 - **Polygon.io** for EOD prices — free tier, 5 calls/min
-- **New York Times API** for economic/editorial news — free, 500 req/day
+- **Finnhub** for financial market news and company news — free tier, 60 calls/min
 - **Azure AI Search** (Free tier) for semantic memory recall — Phase 1.5, after 60-90 days of data
 
 ## Tech stack
@@ -67,12 +67,12 @@ portfolio-automation/
 ```
 
 ## Key Vault secrets (11 total)
-EtradeConsumerKey, EtradeConsumerSecret, EtradeAccessToken, EtradeAccessTokenSecret, FmpApiKey, FredApiKey, PolygonApiKey, AlpacaApiKey, AlpacaApiSecret, AnthropicApiKey (if not using Foundry), NytApiKey
+EtradeConsumerKey, EtradeConsumerSecret, EtradeAccessToken, EtradeAccessTokenSecret, FmpApiKey, FredApiKey, PolygonApiKey, AlpacaApiKey, AlpacaApiSecret, AnthropicApiKey (if not using Foundry), FinnhubApiKey
 
 ## Data flow — Phase 1
 1. Timer fires collector at 06:00 ET weekdays (NCRONTAB: `0 0 6 * * 1-5`)
 2. Collector reads secrets from Key Vault via Managed Identity
-3. Collector calls E*TRADE (positions, balances, option chains), FMP (fundamentals, earnings, congressional trades, ETF data, news), FRED (18 macro series), Polygon (EOD prices), NYT (economic news)
+3. Collector calls E*TRADE (positions, balances, option chains), FMP (fundamentals, earnings, congressional trades, ETF data, stock news), FRED (18 macro series), Polygon (EOD prices), Finnhub (market news, company news)
 4. Collector writes full JSON snapshot to `daily-snapshots/YYYY-MM-DD.json` blob
 5. Collector writes denormalized rows to 6 Table Storage tables (PortfolioHistory, FundamentalsHistory, MacroHistory, ETFLookthroughHistory, SentimentHistory, TradeHistory)
 6. Blob trigger fires analyzer
