@@ -1,0 +1,49 @@
+param location string
+param functionAppName string
+param appServicePlanName string
+param storageAccountName string
+param appInsightsConnectionString string
+param keyVaultUri string
+
+resource appServicePlan 'Microsoft.Web/serverfarms@2023-12-01' = {
+  name: appServicePlanName
+  location: location
+  kind: 'linux'
+  sku: {
+    name: 'Y1'      // Consumption — pay per execution, ~$0 at 22 runs/month
+    tier: 'Dynamic'
+  }
+  properties: {
+    reserved: true  // required for Linux
+  }
+}
+
+resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
+  name: functionAppName
+  location: location
+  kind: 'functionapp,linux'
+  identity: {
+    type: 'SystemAssigned'  // managed identity — no credentials in code
+  }
+  properties: {
+    serverFarmId: appServicePlan.id
+    httpsOnly: true
+    siteConfig: {
+      linuxFxVersion: 'Python|3.11'
+      ftpsState: 'Disabled'
+      minTlsVersion: '1.2'
+      appSettings: [
+        { name: 'FUNCTIONS_EXTENSION_VERSION',         value: '~4' }
+        { name: 'FUNCTIONS_WORKER_RUNTIME',             value: 'python' }
+        { name: 'PYTHON_ISOLATE_WORKER_DEPENDENCIES',   value: '1' }
+        { name: 'AzureWebJobsStorage__accountName',     value: storageAccountName }
+        { name: 'AzureWebJobsStorage__credential',      value: 'managedidentity' }
+        { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsightsConnectionString }
+        { name: 'KEY_VAULT_URI', value: keyVaultUri }
+      ]
+    }
+  }
+}
+
+output principalId string = functionApp.identity.principalId
+output functionAppName string = functionApp.name
