@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.43.8.12551",
-      "templateHash": "10024023853178978469"
+      "templateHash": "14932532173766121615"
     }
   },
   "parameters": {
@@ -139,7 +139,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.43.8.12551",
-              "templateHash": "3063574422648529238"
+              "templateHash": "13845320606393057193"
             }
           },
           "parameters": {
@@ -173,7 +173,7 @@
                 "supportsHttpsTrafficOnly": true,
                 "minimumTlsVersion": "TLS1_2",
                 "allowBlobPublicAccess": false,
-                "allowSharedKeyAccess": false
+                "allowSharedKeyAccess": true
               }
             },
             {
@@ -237,7 +237,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.43.8.12551",
-              "templateHash": "5652113747060418994"
+              "templateHash": "5650295671147862625"
             }
           },
           "parameters": {
@@ -263,7 +263,6 @@
                 "enableRbacAuthorization": true,
                 "enableSoftDelete": true,
                 "softDeleteRetentionInDays": 7,
-                "enablePurgeProtection": false,
                 "publicNetworkAccess": "Enabled"
               }
             }
@@ -321,7 +320,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.43.8.12551",
-              "templateHash": "6973332366322417639"
+              "templateHash": "7594363210781563838"
             }
           },
           "parameters": {
@@ -352,8 +351,8 @@
               "location": "[parameters('location')]",
               "kind": "linux",
               "sku": {
-                "name": "Y1",
-                "tier": "Dynamic"
+                "name": "B1",
+                "tier": "Basic"
               },
               "properties": {
                 "reserved": true
@@ -395,6 +394,14 @@
                     {
                       "name": "AzureWebJobsStorage__credential",
                       "value": "managedidentity"
+                    },
+                    {
+                      "name": "WEBSITE_CONTENTAZUREFILECONNECTIONSTRING",
+                      "value": "[format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix=core.windows.net', parameters('storageAccountName'), listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2023-05-01').keys[0].value)]"
+                    },
+                    {
+                      "name": "WEBSITE_CONTENTSHARE",
+                      "value": "[toLower(parameters('functionAppName'))]"
                     },
                     {
                       "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",

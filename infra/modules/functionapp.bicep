@@ -5,6 +5,15 @@ param storageAccountName string
 param appInsightsConnectionString string
 param keyVaultUri string
 
+// Shared key needed only for WEBSITE_CONTENTAZUREFILECONNECTIONSTRING (Azure Files host share).
+// All application data access uses managed identity via AzureWebJobsStorage__ identity-based connection.
+resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
+  name: storageAccountName
+}
+
+var storageKey = storageAccount.listKeys().keys[0].value
+var storageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${storageAccountName};AccountKey=${storageKey};EndpointSuffix=core.windows.net'
+
 resource appServicePlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   name: appServicePlanName
   location: location
@@ -33,13 +42,15 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
       ftpsState: 'Disabled'
       minTlsVersion: '1.2'
       appSettings: [
-        { name: 'FUNCTIONS_EXTENSION_VERSION',         value: '~4' }
-        { name: 'FUNCTIONS_WORKER_RUNTIME',             value: 'python' }
-        { name: 'PYTHON_ISOLATE_WORKER_DEPENDENCIES',   value: '1' }
-        { name: 'AzureWebJobsStorage__accountName',     value: storageAccountName }
-        { name: 'AzureWebJobsStorage__credential',      value: 'managedidentity' }
-        { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsightsConnectionString }
-        { name: 'KEY_VAULT_URI', value: keyVaultUri }
+        { name: 'FUNCTIONS_EXTENSION_VERSION',              value: '~4' }
+        { name: 'FUNCTIONS_WORKER_RUNTIME',                  value: 'python' }
+        { name: 'PYTHON_ISOLATE_WORKER_DEPENDENCIES',        value: '1' }
+        { name: 'AzureWebJobsStorage__accountName',          value: storageAccountName }
+        { name: 'AzureWebJobsStorage__credential',           value: 'managedidentity' }
+        { name: 'WEBSITE_CONTENTAZUREFILECONNECTIONSTRING',  value: storageConnectionString }
+        { name: 'WEBSITE_CONTENTSHARE',                      value: toLower(functionAppName) }
+        { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING',     value: appInsightsConnectionString }
+        { name: 'KEY_VAULT_URI',                             value: keyVaultUri }
       ]
     }
   }

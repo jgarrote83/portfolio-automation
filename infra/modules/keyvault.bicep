@@ -13,7 +13,6 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     enableRbacAuthorization: true  // RBAC only, no legacy access policies
     enableSoftDelete: true
     softDeleteRetentionInDays: 7   // minimum allowed
-    enablePurgeProtection: false   // not needed for personal project
     publicNetworkAccess: 'Enabled'
   }
 }

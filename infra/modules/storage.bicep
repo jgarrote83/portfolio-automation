@@ -18,7 +18,7 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     supportsHttpsTrafficOnly: true
     minimumTlsVersion: 'TLS1_2'
     allowBlobPublicAccess: false
-    allowSharedKeyAccess: false    // managed identity only — no connection strings
+    allowSharedKeyAccess: true     // required: Functions Linux Consumption needs shared key for Azure Files host share
   }
 }
 

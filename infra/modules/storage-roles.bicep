@@ -29,10 +29,10 @@ resource queueContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' =
 
 // Storage Table Data Contributor — for our 6 Table Storage tables
 resource tableContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(storageAccount.id, principalId, '0a9a7e0f-af71-4fde-9194-84e0c8f05c2e')
+  name: guid(storageAccount.id, principalId, '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3')
   scope: storageAccount
   properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '0a9a7e0f-af71-4fde-9194-84e0c8f05c2e')
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3')
     principalId: principalId
     principalType: 'ServicePrincipal'
   }
