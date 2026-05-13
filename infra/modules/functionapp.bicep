@@ -51,6 +51,7 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'WEBSITE_CONTENTSHARE',                      value: toLower(functionAppName) }
         { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING',     value: appInsightsConnectionString }
         { name: 'KEY_VAULT_URI',                             value: keyVaultUri }
+        { name: 'STORAGE_ACCOUNT_NAME',                      value: storageAccountName }
       ]
     }
   }

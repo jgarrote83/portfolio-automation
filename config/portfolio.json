@@ -1,0 +1,14 @@
+{
+  "_comment": "Fallback portfolio used when E*TRADE credentials are not yet in Key Vault. Update with real holdings before first run.",
+  "positions": [
+    { "ticker": "IDVO", "quantity": 100, "market_value": 2500.00, "cost_basis": 2400.00, "day_gain": 0, "total_gain": 100.00, "security_type": "EQ" },
+    { "ticker": "IDMO", "quantity": 100, "market_value": 3000.00, "cost_basis": 2900.00, "day_gain": 0, "total_gain": 100.00, "security_type": "EQ" },
+    { "ticker": "AIA",  "quantity": 50,  "market_value": 1500.00, "cost_basis": 1400.00, "day_gain": 0, "total_gain": 100.00, "security_type": "EQ" }
+  ],
+  "balances": {
+    "totalAccountValue": 7000.00,
+    "netMv": 7000.00,
+    "cashAvailableForInvestment": 0.00,
+    "cashAvailableForWithdrawal": 0.00
+  }
+}
