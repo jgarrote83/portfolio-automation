@@ -52,6 +52,8 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING',     value: appInsightsConnectionString }
         { name: 'KEY_VAULT_URI',                             value: keyVaultUri }
         { name: 'STORAGE_ACCOUNT_NAME',                      value: storageAccountName }
+        { name: 'WEBSITE_AUTH_MI_ENABLED',                   value: 'TRUE' }
+        // WEBSITE_RUN_FROM_PACKAGE is set by the deploy-code.yml workflow after first deploy
       ]
     }
   }

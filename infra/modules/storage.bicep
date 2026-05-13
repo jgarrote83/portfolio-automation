@@ -6,6 +6,7 @@ var containers = [
   'daily-reports'
   'daily-trades'
   'daily-executions'
+  'deployment'       // function app run-from-package zip
 ]
 
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
