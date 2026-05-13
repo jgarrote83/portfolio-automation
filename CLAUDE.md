@@ -4,7 +4,7 @@
 Azure-native automated portfolio analysis and paper trade execution pipeline. Single-user personal system. NOT for live trading. All trade decisions require human approval via Teams adaptive card.
 
 ## Architecture decisions (do not deviate without discussion)
-- **Azure AI Foundry** for Claude API — project: Portfolio-automation, resource: portfolio-automation-resource (rg-portfolio-automation-prod, East US). API key auth (FoundryApiKey in KV). Endpoints in Function App settings: FOUNDRY_ENDPOINT, FOUNDRY_OPENAI_ENDPOINT. Model: Claude Sonnet 4.6, temp 0.2
+- **Azure AI Foundry** for Claude API — project: Portfolio-Analysis, resource: resource-portfolio-analysis (East US 2, Claude not available in East US). API key auth (FoundryApiKey in KV). Endpoints in Function App settings: FOUNDRY_ENDPOINT, FOUNDRY_OPENAI_ENDPOINT. Model: claude-sonnet-4-6, temp 0.2
 - **E*TRADE API** for portfolio data only (real holdings, balances, option chains) — OAuth 1.0a, tokens expire midnight ET
 - **Alpaca** for Phase 2 paper trading execution only — REST API, no VM needed
 - **FMP (Financial Modeling Prep)** for fundamentals, earnings, ETF look-through, congressional trades, stock news — free tier, 250 req/day
