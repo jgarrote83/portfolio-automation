@@ -18,26 +18,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: pip
-          cache-dependency-path: src/requirements.txt
-
-      - name: Install dependencies into package dir
-        run: |
-          pip install \
-            --target src/.python_packages/lib/site-packages \
-            -r src/requirements.txt
-
-      - name: Build zip
+      - name: Build zip (code only — Oryx installs deps on Azure)
         run: |
           cd src
           zip -r ../func-pfauto.zip . \
             --exclude "**/__pycache__/*" \
             --exclude "**/*.pyc" \
-            --exclude ".python_packages/*/tests/*"
+            --exclude ".python_packages/*"
+          echo "Zip size: $(du -sh ../func-pfauto.zip | cut -f1)"
 
       - name: Azure login (OIDC)
         uses: azure/login@v2
@@ -46,9 +34,11 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Deploy to func-pfauto via Kudu zip deploy
+      - name: Deploy to func-pfauto (Oryx will pip-install requirements.txt)
         run: |
           az functionapp deployment source config-zip \
             --name func-pfauto \
             --resource-group rg-portfolio-automation-prod \
-            --src func-pfauto.zip
+            --src func-pfauto.zip \
+            --build-remote true \
+            --timeout 300
