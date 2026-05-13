@@ -1,14 +1,35 @@
 {
-  "_comment": "Fallback portfolio used when E*TRADE credentials are not yet in Key Vault. Update with real holdings before first run.",
+  "_comment": "Individual Brokerage -8018 (Growth Portfolio). Fallback used until E*TRADE credentials are in Key Vault. Snapshot from 2026-05-12.",
   "positions": [
-    { "ticker": "IDVO", "quantity": 100, "market_value": 2500.00, "cost_basis": 2400.00, "day_gain": 0, "total_gain": 100.00, "security_type": "EQ" },
-    { "ticker": "IDMO", "quantity": 100, "market_value": 3000.00, "cost_basis": 2900.00, "day_gain": 0, "total_gain": 100.00, "security_type": "EQ" },
-    { "ticker": "AIA",  "quantity": 50,  "market_value": 1500.00, "cost_basis": 1400.00, "day_gain": 0, "total_gain": 100.00, "security_type": "EQ" }
+    { "ticker": "SGOV",  "quantity": 79.9190, "market_value": 8031.8595, "cost_basis": 8032.6427, "day_gain":    0.7992, "total_gain":    -0.7832, "security_type": "EQ" },
+    { "ticker": "VDE",   "quantity": 25.3072, "market_value": 4141.9967, "cost_basis": 3627.3716, "day_gain":   30.6215, "total_gain":   514.6251, "security_type": "EQ" },
+    { "ticker": "MCK",   "quantity":  5.0059, "market_value": 3677.8581, "cost_basis": 3584.4894, "day_gain":   47.6571, "total_gain":    93.3687, "security_type": "EQ" },
+    { "ticker": "PPA",   "quantity": 14.0245, "market_value": 2379.2304, "cost_basis": 2183.3568, "day_gain":    2.6649, "total_gain":   195.8736, "security_type": "EQ" },
+    { "ticker": "GLD",   "quantity":  5.0000, "market_value": 2164.6500, "cost_basis": 2094.3500, "day_gain":   -8.6000, "total_gain":    70.3000, "security_type": "EQ" },
+    { "ticker": "QQQ",   "quantity":  3.0130, "market_value": 2130.9141, "cost_basis": 1745.3196, "day_gain":  -18.2286, "total_gain":   385.5945, "security_type": "EQ" },
+    { "ticker": "PDBC",  "quantity": 102.0000,"market_value": 1928.8200, "cost_basis": 1862.8056, "day_gain":   36.7200, "total_gain":    66.0144, "security_type": "EQ" },
+    { "ticker": "IDMO",  "quantity": 25.9720, "market_value": 1568.8477, "cost_basis": 1396.6373, "day_gain":   -8.3104, "total_gain":   172.2104, "security_type": "EQ" },
+    { "ticker": "GOOGL", "quantity":  4.0303, "market_value": 1561.0205, "cost_basis":  753.7498, "day_gain":   -5.1987, "total_gain":   807.2707, "security_type": "EQ" },
+    { "ticker": "SPY",   "quantity":  2.0459, "market_value": 1510.3163, "cost_basis": 1233.9765, "day_gain":   -2.2915, "total_gain":   276.3398, "security_type": "EQ" },
+    { "ticker": "IEMG",  "quantity": 20.3820, "market_value": 1639.6515, "cost_basis": 1459.2031, "day_gain":  -51.3601, "total_gain":   180.4484, "security_type": "EQ" },
+    { "ticker": "XSD",   "quantity":  3.0090, "market_value": 1657.9590, "cost_basis":  854.8870, "day_gain":  -73.6904, "total_gain":   803.0720, "security_type": "EQ" },
+    { "ticker": "AMZN",  "quantity":  5.0000, "market_value": 1329.1000, "cost_basis": 1146.9200, "day_gain":  -15.8500, "total_gain":   182.1800, "security_type": "EQ" },
+    { "ticker": "INTC",  "quantity": 11.0000, "market_value": 1326.7100, "cost_basis":  286.2200, "day_gain":  -97.1300, "total_gain":  1040.4900, "security_type": "EQ" },
+    { "ticker": "AIA",   "quantity":  9.4499, "market_value": 1256.2830, "cost_basis":  811.0143, "day_gain":  -51.5970, "total_gain":   445.2687, "security_type": "EQ" },
+    { "ticker": "VSS",   "quantity":  7.2341, "market_value": 1160.4783, "cost_basis": 1078.7308, "day_gain":  -16.3488, "total_gain":    81.7475, "security_type": "EQ" },
+    { "ticker": "EUAD",  "quantity": 25.0000, "market_value":  990.0000, "cost_basis": 1063.2400, "day_gain":  -14.5000, "total_gain":   -73.2400, "security_type": "EQ" },
+    { "ticker": "EWZ",   "quantity": 12.0000, "market_value":  458.8800, "cost_basis":  468.7800, "day_gain":   -5.0400, "total_gain":    -9.9000, "security_type": "EQ" },
+    { "ticker": "ADBE",  "quantity":  1.0000, "market_value":  240.8300, "cost_basis":  270.9300, "day_gain":   -5.3200, "total_gain":   -30.1000, "security_type": "EQ" },
+    { "ticker": "XLI",   "quantity":  5.0270, "market_value":  876.4574, "cost_basis":  864.6795, "day_gain":   -3.4686, "total_gain":    11.7779, "security_type": "EQ" }
   ],
   "balances": {
-    "totalAccountValue": 7000.00,
-    "netMv": 7000.00,
-    "cashAvailableForInvestment": 0.00,
-    "cashAvailableForWithdrawal": 0.00
+    "totalAccountValue": 44195.51,
+    "netMv": 40031.86,
+    "cashAvailableForInvestment": 4163.65,
+    "cashAvailableForWithdrawal": 4063.65,
+    "totalGainDollar": 5212.54,
+    "totalGainPct": 14.97,
+    "dayGainDollar": -258.47,
+    "dayGainPct": -0.64
   }
 }
