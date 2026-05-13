@@ -4,7 +4,7 @@
 Azure-native automated portfolio analysis and paper trade execution pipeline. Single-user personal system. NOT for live trading. All trade decisions require human approval via Teams adaptive card.
 
 ## Architecture decisions (do not deviate without discussion)
-- **Azure Foundry** for Claude API (Managed Identity auth, Azure billing) — not direct Anthropic API
+- **Azure AI Foundry** for Claude API — project: Portfolio-automation, resource: portfolio-automation-resource (rg-portfolio-automation-prod, East US). API key auth (FoundryApiKey in KV). Endpoints in Function App settings: FOUNDRY_ENDPOINT, FOUNDRY_OPENAI_ENDPOINT. Model: Claude Sonnet 4.6, temp 0.2
 - **E*TRADE API** for portfolio data only (real holdings, balances, option chains) — OAuth 1.0a, tokens expire midnight ET
 - **Alpaca** for Phase 2 paper trading execution only — REST API, no VM needed
 - **FMP (Financial Modeling Prep)** for fundamentals, earnings, ETF look-through, congressional trades, stock news — free tier, 250 req/day
@@ -67,7 +67,7 @@ portfolio-automation/
 ```
 
 ## Key Vault secrets (11 total)
-EtradeConsumerKey, EtradeConsumerSecret, EtradeAccessToken, EtradeAccessTokenSecret, FmpApiKey, FredApiKey, MassiveApiKey, AlpacaApiKey, AlpacaApiSecret, AnthropicApiKey (if not using Foundry), FinnhubApiKey
+EtradeConsumerKey, EtradeConsumerSecret, EtradeAccessToken, EtradeAccessTokenSecret, FmpApiKey, FredApiKey, MassiveApiKey, AlpacaApiKey, AlpacaApiSecret, FoundryApiKey, FinnhubApiKey
 
 ## Data flow — Phase 1
 1. Timer fires collector at 06:00 ET weekdays (NCRONTAB: `0 0 6 * * 1-5`)
