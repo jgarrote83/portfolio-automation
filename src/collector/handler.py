@@ -13,9 +13,9 @@ from shared.clients.finnhub import FinnhubClient
 
 logger = logging.getLogger(__name__)
 
-_ROOT = Path(__file__).parent.parent.parent
-_MACRO_SERIES_FILE = _ROOT / "config" / "macro-series.json"
-_PORTFOLIO_FALLBACK = _ROOT / "config" / "portfolio.json"
+_SRC = Path(__file__).parent.parent   # src/
+_MACRO_SERIES_FILE = _SRC / "config" / "macro-series.json"
+_PORTFOLIO_FALLBACK = _SRC / "config" / "portfolio.json"
 _ETF_WATCHLIST = ["IDVO", "IDMO", "AIA"]
 
 
