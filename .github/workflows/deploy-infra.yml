@@ -1,0 +1,57 @@
+name: Deploy Infrastructure
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'infra/**'
+      - '.github/workflows/deploy-infra.yml'
+  workflow_dispatch:
+    inputs:
+      what_if:
+        description: 'Run as what-if (no changes)'
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_RG: rg-portfolio-automation-prod
+  AZURE_LOCATION: eastus
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id:       ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Ensure resource group
+        run: az group create -n "$AZURE_RG" -l "$AZURE_LOCATION" -o none
+
+      - name: What-if
+        if: ${{ inputs.what_if }}
+        run: |
+          az deployment group what-if \
+            --resource-group "$AZURE_RG" \
+            --template-file infra/main.bicep \
+            --parameters @infra/parameters.prod.json
+
+      - name: Deploy Bicep
+        if: ${{ !inputs.what_if }}
+        run: |
+          az deployment group create \
+            --resource-group "$AZURE_RG" \
+            --name "pfauto-${{ github.run_number }}" \
+            --template-file infra/main.bicep \
+            --parameters @infra/parameters.prod.json \
+            --output none
