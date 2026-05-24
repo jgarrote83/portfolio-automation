@@ -29,11 +29,22 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies into .python_packages (Linux x64 wheels)
+      - name: Install dependencies into .python_packages (manylinux2014 wheels)
+        # Force manylinux2014 (GLIBC 2.17) wheels so binaries run on the Azure
+        # Functions Consumption Linux host image, which has older GLIBC than
+        # the ubuntu-latest runner. Without this, cryptography / pydantic-core
+        # etc. pull cp311-manylinux_2_34 wheels and the worker fails to import.
         run: |
           cd src
           python -m pip install --upgrade pip
-          pip install --target=".python_packages/lib/site-packages" -r requirements.txt
+          pip install \
+            --target=".python_packages/lib/site-packages" \
+            --platform manylinux2014_x86_64 \
+            --python-version 3.11 \
+            --implementation cp \
+            --only-binary=:all: \
+            --upgrade \
+            -r requirements.txt
 
       - name: Build zip (code + bundled deps)
         run: |
