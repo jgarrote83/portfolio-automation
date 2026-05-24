@@ -53,6 +53,8 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'KEY_VAULT_URI',                             value: keyVaultUri }
         { name: 'STORAGE_ACCOUNT_NAME',                      value: storageAccountName }
         { name: 'WEBSITE_AUTH_MI_ENABLED',                   value: 'TRUE' }
+        { name: 'FOUNDRY_ENDPOINT',                          value: 'https://resource-portfolio-analysis.services.ai.azure.com/anthropic/v1/messages?api-version=2025-04-01-preview' }
+        { name: 'FOUNDRY_MODEL',                             value: 'claude-sonnet-4-6' }
         // WEBSITE_RUN_FROM_PACKAGE is set by the deploy-code.yml workflow after first deploy
       ]
     }

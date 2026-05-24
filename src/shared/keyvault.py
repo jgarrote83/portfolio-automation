@@ -13,6 +13,7 @@ _SECRET_NAMES = [
     "MassiveApiKey",
     "FinnhubApiKey",
     "FoundryApiKey",
+    "QuiverApiKey",
     "EtradeConsumerKey",
     "EtradeConsumerSecret",
     "EtradeAccessToken",

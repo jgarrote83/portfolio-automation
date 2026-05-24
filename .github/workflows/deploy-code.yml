@@ -24,12 +24,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build zip (code only — function app reads via managed identity)
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies into .python_packages (Linux x64 wheels)
+        run: |
+          cd src
+          python -m pip install --upgrade pip
+          pip install --target=".python_packages/lib/site-packages" -r requirements.txt
+
+      - name: Build zip (code + bundled deps)
         run: |
           cd src
           zip -r ../func-pfauto.zip . \
             --exclude "**/__pycache__/*" \
-            --exclude "**/*.pyc"
+            --exclude "**/*.pyc" \
+            --exclude ".venv/*" \
+            --exclude "local.settings.json"
           echo "Zip size: $(du -sh ../func-pfauto.zip | cut -f1)"
 
       - name: Azure login (OIDC)

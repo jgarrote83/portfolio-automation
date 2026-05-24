@@ -8,8 +8,8 @@ from shared.storage import ensure_tables, upsert_entity, write_snapshot
 from shared.clients.etrade import ETradeClient
 from shared.clients.fmp import FMPClient
 from shared.clients.fred import FREDClient
-from shared.clients.massive import MassiveClient
 from shared.clients.finnhub import FinnhubClient
+from shared.clients.quiver import QuiverClient
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +56,31 @@ def run() -> None:
 
     earnings           = fmp.get_earnings_calendar(from_2w, to_2w)
     stock_news         = fmp.get_stock_news(tickers, limit=30)
-    congressional      = fmp.get_congressional_trading(from_30d)
     etf_holdings: dict = {etf: fmp.get_etf_holdings(etf) for etf in _ETF_WATCHLIST}
+    etf_country: dict  = {etf: fmp.get_etf_country_weights(etf) for etf in _ETF_WATCHLIST}
+    etf_sector: dict   = {etf: fmp.get_etf_sector_weights(etf) for etf in _ETF_WATCHLIST}
 
-    logger.info("FMP: %d profiles, %d earnings, %d news, %d congressional",
-                len(profiles), len(earnings), len(stock_news), len(congressional))
+    logger.info("FMP: %d profiles, %d earnings, %d news",
+                len(profiles), len(earnings), len(stock_news))
+
+    # --- Quiver (primary congressional source) ------------------------------
+    quiver = QuiverClient(secrets.get("QuiverApiKey"))
+    if quiver.ready:
+        congressional = quiver.get_live_congress_trades()
+        if from_30d:
+            congressional = [
+                r for r in congressional
+                if (r.get("TransactionDate") or r.get("Date") or r.get("transactionDate") or "") >= from_30d
+            ]
+        lobbying      = quiver.get_live_lobbying()
+        gov_contracts = quiver.get_live_gov_contracts()
+    else:
+        logger.warning("Quiver key missing — falling back to FMP senate/house latest")
+        congressional = fmp.get_congressional_trading(from_30d)
+        lobbying      = []
+        gov_contracts = []
+    logger.info("Quiver/FMP: %d congressional, %d lobbying, %d gov contracts",
+                len(congressional), len(lobbying), len(gov_contracts))
 
     # --- FRED ----------------------------------------------------------------
     with open(_MACRO_SERIES_FILE) as f:
@@ -70,12 +90,10 @@ def run() -> None:
     macro_data = fred.get_all_series(list(macro_meta.keys()))
     logger.info("FRED: %d series collected", sum(1 for v in macro_data.values() if v))
 
-    # --- Massive (EOD prices) ------------------------------------------------
-    # Throttled at 5 calls/min — processes ~20 tickers in ~4 minutes
-    massive = MassiveClient(secrets["MassiveApiKey"])
+    # --- EOD prices (FMP batch-quote, single call) --------------------------
     all_tickers = list(dict.fromkeys(tickers + _ETF_WATCHLIST))  # preserve order, dedupe
-    prices = massive.get_prices(all_tickers)
-    logger.info("Massive: %d/%d prices collected", len(prices), len(all_tickers))
+    prices = fmp.get_eod_prices(all_tickers)
+    logger.info("FMP prices: %d/%d collected", len(prices), len(all_tickers))
 
     # --- Finnhub -------------------------------------------------------------
     finnhub = FinnhubClient(secrets["FinnhubApiKey"])
@@ -104,7 +122,11 @@ def run() -> None:
         "earnings_calendar": earnings,
         "stock_news": stock_news,
         "congressional_trades": congressional,
+        "lobbying": lobbying,
+        "gov_contracts": gov_contracts,
         "etf_holdings": etf_holdings,
+        "etf_country_weights": etf_country,
+        "etf_sector_weights": etf_sector,
         "macro": {
             "series_meta": macro_meta,
             "data": macro_data,

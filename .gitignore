@@ -40,3 +40,8 @@ desktop.ini
 
 # Azure
 .azure/
+
+# Function deploy artifacts (locally-built only)
+deploy.zip
+src/.python_packages/
+_snap.json
