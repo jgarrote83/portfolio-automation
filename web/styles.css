@@ -1,0 +1,60 @@
+/* Portfolio Automation — minimal vanilla CSS */
+:root {
+  --bg: #0f1115;
+  --panel: #161a22;
+  --border: #262c38;
+  --text: #e6e8ee;
+  --muted: #8a93a6;
+  --accent: #4f8cff;
+  --green: #2bb673;
+  --red: #e0524d;
+}
+* { box-sizing: border-box; }
+body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+       background:var(--bg); color:var(--text); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.topnav {
+  display:flex; align-items:center; gap:1.5rem;
+  padding:.75rem 1.5rem; background:var(--panel); border-bottom:1px solid var(--border);
+}
+.topnav nav { display:flex; gap:1rem; flex:1; }
+.topnav nav a { color:var(--muted); padding:.25rem .5rem; border-radius:4px; }
+.topnav nav a.active, .topnav nav a:hover { color:var(--text); background:#1f2533; }
+.topnav .user { color:var(--muted); font-size:.85rem; }
+
+.container { max-width: 1100px; margin: 1.5rem auto; padding: 0 1.5rem; }
+h1 { margin-top: .25rem; }
+.muted { color: var(--muted); font-size: .9em; }
+
+section { margin: 2rem 0; }
+
+table { width:100%; border-collapse: collapse; background:var(--panel);
+        border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+th, td { padding:.6rem .8rem; text-align:left; border-bottom:1px solid var(--border); font-size:.92rem; }
+th { background:#1c212c; color:var(--muted); font-weight:600; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: #1a1f2a; }
+
+.btn {
+  display:inline-block; padding:.45rem .9rem; border-radius:5px;
+  border:1px solid var(--border); background:#1c2230; color:var(--text);
+  cursor:pointer; font-size:.9rem;
+}
+.btn:hover { background:#252b3a; }
+.btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+.btn.primary:disabled { background:#2a3b5e; cursor:not-allowed; }
+.btn:disabled { opacity:.5; cursor:not-allowed; }
+
+#trade-controls { display:flex; gap:.5rem; align-items:center; margin-bottom:.75rem; }
+
+.action-buy  { color: var(--green); font-weight: 600; }
+.action-sell { color: var(--red);   font-weight: 600; }
+
+.markdown { background:var(--panel); border:1px solid var(--border);
+            border-radius:6px; padding:1rem 1.25rem; line-height:1.55; }
+.markdown h1, .markdown h2, .markdown h3 { margin-top:1.2em; }
+.markdown code { background:#0b0d12; padding:.1em .35em; border-radius:3px; }
+.markdown pre { background:#0b0d12; padding:.75rem; overflow:auto; border-radius:4px; }
+.markdown table { background:transparent; border:1px solid var(--border); }

@@ -21,7 +21,7 @@ Azure-native automated portfolio analysis and paper trade execution pipeline. Si
 - Linting: ruff
 - Testing: pytest
 - Azure Functions: Consumption plan, Linux, timer + blob triggers
-- Logic Apps: Consumption plan, Office 365 + Teams connectors
+- Static Web App: Free SKU, Entra ID Easy Auth, managed Python /api functions
 - Storage: single account (stpfautoprod) with Blob + Table Storage
 - Key Vault: kv-pfauto-prod, RBAC auth, Managed Identity only — no service principals or connection strings in code
 - Monitoring: Application Insights (workspace-based)
@@ -30,9 +30,8 @@ Azure-native automated portfolio analysis and paper trade execution pipeline. Si
 - Resource group: rg-portfolio-automation-prod
 - Storage account: stpfautoprod
 - Key Vault: kv-pfauto-prod
-- Function App: func-pfauto (hosts collector + analyzer)
-- Logic App delivery: logic-pfauto-delivery
-- Logic App approval: logic-pfauto-approval (Phase 2)
+- Function App: func-pfauto (hosts collector + analyzer; future executor endpoint)
+- Static Web App: swa-pfauto (single pane of glass — report viewer + per-trade approval, Entra ID auth)
 - App Insights: appi-pfauto-prod
 - Log Analytics: log-pfauto-prod
 
@@ -41,7 +40,7 @@ Azure-native automated portfolio analysis and paper trade execution pipeline. Si
 portfolio-automation/
 ├── infra/                    # Bicep templates
 │   ├── main.bicep
-│   ├── modules/              # storage, keyvault, functionapp, logicapp, monitoring
+│   ├── modules/              # storage, keyvault, functionapp, staticwebapp, monitoring
 │   ├── parameters.prod.json
 │   └── deploy.sh
 ├── src/
@@ -49,9 +48,10 @@ portfolio-automation/
 │   ├── analyzer/             # Blob-triggered, assembles context, calls Claude
 │   ├── executor/             # HTTP-triggered, Phase 2 Alpaca execution
 │   └── shared/               # Common utilities, API clients, schemas
-├── logic-apps/
-│   ├── delivery.json
-│   └── approval.json         # Phase 2
+├── web/                      # Static Web App: single pane of glass
+│   ├── *.html, app.js, styles.css
+│   ├── staticwebapp.config.json  # Entra ID auth + route protection
+│   └── api/                  # SWA managed Python Functions (HTTP only)
 ├── config/
 │   ├── project-instructions.md    # Claude system prompt for analysis
 │   ├── macro-series.json          # FRED series IDs
@@ -62,7 +62,8 @@ portfolio-automation/
 │   └── runbooks/             # Operational runbooks
 ├── .github/workflows/
 │   ├── deploy-infra.yml
-│   └── deploy-code.yml
+│   ├── deploy-code.yml      # func-pfauto (collector/analyzer)
+│   └── deploy-web.yml       # swa-pfauto (frontend + managed API)
 ├── CLAUDE.md                 # This file
 └── README.md
 ```
@@ -83,15 +84,15 @@ E*TRADE tokens expire midnight ET and must be refreshed via OAuth dance; the col
 8. Analyzer calls Claude via Foundry (Sonnet 4.6, temp 0.2, max_tokens 8000)
 9. Analyzer parses response: markdown report + structured trade recommendations JSON
 10. Writes report to `daily-reports/YYYY-MM-DD.md`, trades to `daily-trades/YYYY-MM-DD.json`
-11. Delivery Logic App posts to Teams, sends email, copies to OneDrive
+11. Outputs surfaced in `swa-pfauto` (no Logic App delivery; user pulls report via web UI). Optional email/OneDrive copies can be added later if needed.
 
-## Data flow — Phase 2 (paper execution)
-1. Trades blob triggers approval Logic App
-2. Adaptive card sent to Teams with trade details + Approve/Reject buttons
-3. On approve: Logic App calls executor Function with HMAC-signed payload
-4. Executor validates, connects to Alpaca paper API, places orders
-5. Writes results to `daily-executions/YYYY-MM-DD.json` + TradeHistory table
-6. Confirmation posted to Teams
+## Data flow — Phase 2 (paper execution via Static Web App)
+1. User signs into `swa-pfauto` with Entra ID work account (Easy Auth; allowed-role `owner`)
+2. `/today` page renders the latest report (markdown) + a table of trade recommendations with per-row checkboxes
+3. User selects 1…N trades and clicks **Approve selected** (bulk Approve button) or rejects
+4. SWA managed API (`web/api/`) records the decision in `approvals/YYYY-MM-DD.json` and calls the `func-pfauto` executor endpoint (HMAC-signed payload, function master key fetched via SWA MI → Key Vault reference)
+5. Executor validates, connects to Alpaca paper API, places orders (sells before buys)
+6. Writes results to `daily-executions/YYYY-MM-DD.json` + TradeHistory table; SWA `/today` polls and shows execution status inline
 
 ## Table Storage schemas (6 tables)
 - **PortfolioHistory**: PK=ticker, RK=date — positions, weights, P/L

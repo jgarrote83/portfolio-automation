@@ -1,0 +1,40 @@
+// Shared client-side helpers for Portfolio Automation SWA.
+
+/** GET JSON from the SWA managed API. */
+async function api(path, init) {
+  const res = await fetch(path, { credentials: "same-origin", ...init });
+  if (!res.ok) throw new Error(`${path} → ${res.status} ${res.statusText}`);
+  const ct = res.headers.get("content-type") || "";
+  return ct.includes("application/json") ? res.json() : res.text();
+}
+
+/** POST JSON */
+async function postJson(path, body) {
+  return api(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Fill the top-right user label from SWA's built-in /.auth/me. */
+async function renderUser() {
+  const el = document.getElementById("user");
+  if (!el) return;
+  try {
+    const r = await fetch("/.auth/me");
+    const data = await r.json();
+    const p = data && data.clientPrincipal;
+    if (p) {
+      el.innerHTML = `${p.userDetails} &middot; <a href="/logout">sign out</a>`;
+    } else {
+      el.innerHTML = `<a href="/login">sign in</a>`;
+    }
+  } catch {
+    el.textContent = "";
+  }
+}
+
+document.addEventListener("DOMContentLoaded", renderUser);
+
+window.pfauto = { api, postJson };

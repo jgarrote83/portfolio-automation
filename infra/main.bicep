@@ -4,13 +4,20 @@ param location string = 'eastus'
 @description('Environment tag appended to resource names')
 param environment string = 'prod'
 
-// ── Resource names (match CLAUDE.md naming conventions) ──────────────────────
+@description('Entra ID tenant for SWA Easy Auth (work/school login)')
+param tenantId string = subscription().tenantId
+
+@description('Region for the Static Web App (Free SKU is global; metadata sits here). Use eastus2 since SWA Free is not in all regions.')
+param swaLocation string = 'eastus2'
+
+// ── Resource names (match CLAUDE.md naming conventions) ─────────────────────────────
 var storageAccountName = 'stpfauto${environment}'
 var keyVaultName       = 'kv-pfauto-${environment}'
 var functionAppName    = 'func-pfauto'
 var appServicePlanName = 'plan-pfauto-${environment}'
 var logAnalyticsName   = 'log-pfauto-${environment}'
 var appInsightsName    = 'appi-pfauto-${environment}'
+var staticWebAppName   = 'swa-pfauto'
 
 // ── Monitoring (Log Analytics + App Insights) ────────────────────────────────
 module monitoring 'modules/monitoring.bicep' = {
@@ -73,8 +80,33 @@ module kvRoles 'modules/keyvault-roles.bicep' = {
 }
 
 
-// ── Outputs ──────────────────────────────────────────────────────────────────
+// ── Static Web App (single pane of glass: report + trade approval) ────────
+module swa 'modules/staticwebapp.bicep' = {
+  name: 'swa'
+  params: {
+    location: swaLocation
+    staticWebAppName: staticWebAppName
+    appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
+    storageAccountName: storageAccountName
+    keyVaultName: keyVaultName
+    tenantId: tenantId
+  }
+}
+
+// ── Role assignments: SWA MI → Storage + Key Vault ────────────────────────
+module swaRoles 'modules/staticwebapp-roles.bicep' = {
+  name: 'swaRoles'
+  params: {
+    storageAccountName: storageAccountName
+    keyVaultName: keyVaultName
+    principalId: swa.outputs.principalId
+  }
+  dependsOn: [storage, keyvault]
+}
+
+// ── Outputs ───────────────────────────────────────────────────────────────────
 output functionAppName string = functionapp.outputs.functionAppName
 output storageAccountName string = storageAccountName
 output keyVaultUri string = keyvault.outputs.keyVaultUri
 output appInsightsConnectionString string = monitoring.outputs.appInsightsConnectionString
+output staticWebAppHostname string = swa.outputs.defaultHostname

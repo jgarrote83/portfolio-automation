@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Today &middot; Portfolio Automation</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>
+</head>
+<body>
+  <header class="topnav">
+    <strong>Portfolio Automation</strong>
+    <nav>
+      <a href="/today.html" class="active">Today</a>
+      <a href="/history.html">History</a>
+      <a href="/portfolio.html">Portfolio</a>
+    </nav>
+    <span id="user" class="user"></span>
+  </header>
+  <main class="container">
+    <h1>Today <span id="date" class="muted"></span></h1>
+
+    <section>
+      <h2>Trade recommendations</h2>
+      <div id="trade-controls">
+        <button id="approve-selected" class="btn primary" disabled>Approve selected</button>
+        <button id="reject-selected" class="btn" disabled>Reject selected</button>
+        <span id="trade-status" class="muted"></span>
+      </div>
+      <table id="trades">
+        <thead>
+          <tr>
+            <th><input type="checkbox" id="select-all" /></th>
+            <th>Action</th><th>Ticker</th><th>Qty</th><th>Limit</th>
+            <th>Confidence</th><th>Rationale</th>
+          </tr>
+        </thead>
+        <tbody><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Analyst report</h2>
+      <article id="report" class="markdown">Loading…</article>
+    </section>
+  </main>
+  <script src="/app.js" defer></script>
+  <script src="/today.js" defer></script>
+</body>
+</html>

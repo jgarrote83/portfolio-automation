@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Portfolio &middot; Portfolio Automation</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topnav">
+    <strong>Portfolio Automation</strong>
+    <nav>
+      <a href="/today.html">Today</a>
+      <a href="/history.html">History</a>
+      <a href="/portfolio.html" class="active">Portfolio</a>
+    </nav>
+    <span id="user" class="user"></span>
+  </header>
+  <main class="container">
+    <h1>Current holdings</h1>
+    <table id="holdings">
+      <thead>
+        <tr><th>Ticker</th><th>Qty</th><th>Weight</th><th>Last</th><th>Day P/L</th><th>Unrealised</th></tr>
+      </thead>
+      <tbody><tr><td colspan="6" class="muted">Loading…</td></tr></tbody>
+    </table>
+  </main>
+  <script src="/app.js" defer></script>
+  <script src="/portfolio.js" defer></script>
+</body>
+</html>

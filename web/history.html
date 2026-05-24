@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>History &middot; Portfolio Automation</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topnav">
+    <strong>Portfolio Automation</strong>
+    <nav>
+      <a href="/today.html">Today</a>
+      <a href="/history.html" class="active">History</a>
+      <a href="/portfolio.html">Portfolio</a>
+    </nav>
+    <span id="user" class="user"></span>
+  </header>
+  <main class="container">
+    <h1>History</h1>
+    <p class="muted">Past daily reports, trade decisions, and 30/60/90-day outcomes.</p>
+    <ul id="dates"><li class="muted">Loading…</li></ul>
+  </main>
+  <script src="/app.js" defer></script>
+  <script src="/history.js" defer></script>
+</body>
+</html>
