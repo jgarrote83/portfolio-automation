@@ -37,3 +37,16 @@ resource tableContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' =
     principalType: 'ServicePrincipal'
   }
 }
+
+// Storage Account Contributor — required so the Functions host can call
+// BlobServiceClient.GetPropertiesAsync() on startup. Without this the host
+// faults with AuthorizationPermissionMismatch and functions never come up.
+resource accountContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(storageAccount.id, principalId, '17d1049b-9a84-46fb-8f53-869881c3d3ab')
+  scope: storageAccount
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '17d1049b-9a84-46fb-8f53-869881c3d3ab')
+    principalId: principalId
+    principalType: 'ServicePrincipal'
+  }
+}
