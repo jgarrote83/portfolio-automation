@@ -7,10 +7,11 @@ Azure-native automated portfolio analysis and paper trade execution pipeline. Si
 - **Azure AI Foundry** for Claude API — project: Portfolio-Analysis, resource: resource-portfolio-analysis (East US 2, Claude not available in East US). API key auth (FoundryApiKey in KV). Endpoints in Function App settings: FOUNDRY_ENDPOINT, FOUNDRY_OPENAI_ENDPOINT. Model: claude-sonnet-4-6, temp 0.2
 - **E*TRADE API** for portfolio data only (real holdings, balances, option chains) — OAuth 1.0a, tokens expire midnight ET
 - **Alpaca** for Phase 2 paper trading execution only — REST API, no VM needed
-- **FMP (Financial Modeling Prep)** for fundamentals, earnings, ETF look-through, congressional trades, stock news — free tier, 250 req/day
-- **FRED** for macro indicators (18 series: US + international) — free, no practical limit
-- **Massive** (formerly Massive.io) for EOD prices — free tier, 5 calls/min
+- **FMP (Financial Modeling Prep)** for fundamentals, earnings, ETF look-through, EOD prices, stock news, and fallback congressional trades (senate/house) — free tier, 250 req/day
+- **FRED** for macro indicators (17 series collected; `CHPMINDXM` deprecated — to revisit) — free, no practical limit
+- **Quiver Quantitative** (primary alternative-data source) for congressional trades, lobbying, government contracts, wikipedia attention — hobbyist tier, `Authorization: Token <key>` header
 - **Finnhub** for financial market news and company news — free tier, 60 calls/min
+- **Massive** — DEPRECATED (FMP `/stable` price endpoint replaces it). Secret + client to be removed after 2 clean prod runs.
 - **Azure AI Search** (Free tier) for semantic memory recall — Phase 1.5, after 60-90 days of data
 
 ## Tech stack
@@ -66,13 +67,15 @@ portfolio-automation/
 └── README.md
 ```
 
-## Key Vault secrets (11 total)
-EtradeConsumerKey, EtradeConsumerSecret, EtradeAccessToken, EtradeAccessTokenSecret, FmpApiKey, FredApiKey, MassiveApiKey, AlpacaApiKey, AlpacaApiSecret, FoundryApiKey, FinnhubApiKey
+## Key Vault secrets (12 total)
+EtradeConsumerKey, EtradeConsumerSecret, EtradeAccessToken, EtradeAccessTokenSecret, FmpApiKey, FredApiKey, MassiveApiKey (deprecated), AlpacaApiKey, AlpacaApiSecret, FoundryApiKey, FinnhubApiKey, QuiverApiKey
+
+E*TRADE tokens expire midnight ET and must be refreshed via OAuth dance; the collector falls back to `src/config/portfolio.json` when missing.
 
 ## Data flow — Phase 1
 1. Timer fires collector at 06:00 ET weekdays (NCRONTAB: `0 0 6 * * 1-5`)
 2. Collector reads secrets from Key Vault via Managed Identity
-3. Collector calls E*TRADE (positions, balances, option chains), FMP (fundamentals, earnings, congressional trades, ETF data, stock news), FRED (18 macro series), Massive (EOD prices), Finnhub (market news, company news)
+3. Collector calls E*TRADE (positions, balances, option chains — falls back to `config/portfolio.json` if creds missing), FMP (fundamentals, earnings, EOD prices, ETF data, stock news, fallback congressional), FRED (17 macro series), Quiver (congressional trades, lobbying, gov contracts), Finnhub (market news, company news)
 4. Collector writes full JSON snapshot to `daily-snapshots/YYYY-MM-DD.json` blob
 5. Collector writes denormalized rows to 6 Table Storage tables (PortfolioHistory, FundamentalsHistory, MacroHistory, ETFLookthroughHistory, SentimentHistory, TradeHistory)
 6. Blob trigger fires analyzer
@@ -109,6 +112,12 @@ IDVO (international dividend + covered call overlay), IDMO (international moment
 - Phase 1 must run clean 30+ days before Phase 2 is enabled
 - Temperature 0.2 for Claude analysis calls (consistency)
 - Sells execute before buys in multi-trade recommendations (free up cash)
+
+## Deployment lessons (hard-won — see infra/modules/storage-roles.bicep + .github/workflows/deploy-code.yml)
+- Function App MI requires **Storage Account Contributor** on the storage account in addition to Blob Data Owner / Queue Data Contributor / Table Data Contributor. Host startup calls `BlobServiceClient.GetPropertiesAsync()` which needs `blobServices/read`, not in the data-plane roles. Without it: persistent `AuthorizationPermissionMismatch 403`, host faults, zero functions registered.
+- Workflow pip install MUST pin manylinux2014 wheels (`--platform manylinux2014_x86_64 --python-version 3.11 --implementation cp --only-binary=:all:`). GitHub `ubuntu-latest` ships GLIBC 2.39; Functions Linux Consumption image is older. Native wheels (e.g. `cryptography`) otherwise fail with `GLIBC_2.33 not found` and the Python worker silently fails to load.
+- Deploy model: run-from-package via blob (`WEBSITE_RUN_FROM_PACKAGE=<blob URL>`). `func azure functionapp publish` does not work with identity-based `AzureWebJobsStorage`. App runs in read-only mode — portal Test/Run hits CORS; invoke via admin REST instead: `POST https://func-pfauto.azurewebsites.net/admin/functions/<name>` with master key from `az functionapp keys list`.
+- Workflow path filter is `src/**`; workflow-only changes need manual `gh workflow run "Deploy function code" --ref master`.
 
 ## Spec documents (in docs/specs/)
 Full details in these companion documents — read them for implementation specifics:
