@@ -28,6 +28,30 @@ _MA_SHORT_DAYS = 50
 # Pure-international subset used for MA-cross signals against SPY.
 _INTL_RATIO_TICKERS = ["IDMO", "AIA", "IEMG", "EWJ"]
 
+# Market shock detection: short-horizon move windows and keyword sets.
+# The analyzer uses the resulting shock_level to optionally override the 60d
+# rotation windows and lift tilt limits when a structural event hits the tape.
+_SHOCK_SHORT_WINDOW_DAYS = 5
+_SHOCK_VOL_LOOKBACK_DAYS = 60
+_SHOCK_KEYWORDS: dict[str, list[str]] = {
+    "geopolitical": [
+        "tariff", "tariffs", "sanction", "sanctions", "embargo", "export ban",
+        "war", "invasion", "missile", "strike", "attack", "airstrike",
+        "ceasefire", "escalation", "retaliation", "trade war",
+    ],
+    "policy_shock": [
+        "emergency cut", "emergency hike", "surprise cut", "surprise hike",
+        "intervention", "devaluation", "capital controls", "shutdown",
+        "debt ceiling", "default", "downgrade", "impeach", "resign",
+        "bailout", "liquidity facility",
+    ],
+    "market_stress": [
+        "crash", "plunge", "collapse", "contagion", "recession",
+        "bankruptcy", "insolvency", "halt", "circuit breaker",
+        "freeze", "run on", "margin call", "liquidation",
+    ],
+}
+
 
 def run() -> None:
     today = date.today().isoformat()
@@ -132,6 +156,22 @@ def run() -> None:
     logger.info("Finnhub: %d market news, %d company news items",
                 len(market_news), sum(len(v) for v in company_news.values()))
 
+    # --- Market shock detector (short-horizon moves + news keyword scan) ----
+    market_shock = _build_market_shock(
+        fmp=fmp,
+        macro_data=macro_data,
+        market_news=market_news,
+        forex_news=forex_news,
+        stock_news=stock_news,
+        company_news=company_news,
+    )
+    logger.info(
+        "Market shock: level=%s, spy_1d_z=%s, news_hits=%s",
+        market_shock.get("shock_level"),
+        market_shock.get("spy", {}).get("return_1d_zscore"),
+        market_shock.get("news_hits_total"),
+    )
+
     # --- Assemble snapshot ---------------------------------------------------
     snapshot = {
         "date": today,
@@ -156,6 +196,7 @@ def run() -> None:
         },
         "prices": prices,
         "regional_rotation": regional_rotation,
+        "market_shock": market_shock,
         "news": {
             "market": market_news[:50],
             "forex": forex_news[:20],
@@ -518,6 +559,216 @@ def _build_regional_rotation(fmp: FMPClient, macro_data: dict) -> dict:
         "components_missing": missing,
         "scoring_rubric": "0-3 US leadership intact; 4-6 transition window; 7-10 rotation underway",
     }
+
+    return out
+
+
+def _build_market_shock(
+    fmp: FMPClient,
+    macro_data: dict,
+    market_news: list,
+    forex_news: list,
+    stock_news: list,
+    company_news: dict,
+) -> dict:
+    """Detect short-horizon market shocks so the analyzer can override the 60d
+    rotation windows and lift tilt limits when a structural event hits.
+
+    Combines hard price signals (1d / 5d returns and z-scores for SPY, DXY,
+    VIX) with a keyword scan over the day's news. Outputs a composite
+    ``shock_level`` 0-3:
+
+      0 = none        — business as usual; use the 60d framework verbatim
+      1 = watch       — single elevated indicator; flag in narrative only
+      2 = elevated    — multiple indicators fire; allow window shortening
+      3 = acute       — broad shock (e.g. tariff weekend); permit aggressive
+                        tilts and immediate de-risking
+
+    The analyzer prompt defines exactly what each level unlocks.
+    """
+    out: dict = {
+        "shock_level": 0,
+        "shock_label": "none",
+        "triggers": [],
+        "spy": {},
+        "dxy": {},
+        "vix": {},
+        "news_hits_total": 0,
+        "news_hits_by_category": {},
+        "news_examples": [],
+        "scoring_rubric": (
+            "0=none 1=watch 2=elevated (window override permitted) "
+            "3=acute (aggressive tilts + de-risking permitted)"
+        ),
+    }
+
+    def _close(row: dict) -> float | None:
+        v = row.get("price") if row.get("price") is not None else row.get("close")
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    triggers: list[str] = []
+
+    # --- 1. SPY 1d / 5d returns + 1d z-score vs 60d realized vol -----------
+    try:
+        spy_rows = fmp.get_historical_price_light("SPY")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Market shock: SPY history fetch failed: %s", e)
+        spy_rows = []
+    spy_closes = [_close(r) for r in spy_rows[: _SHOCK_VOL_LOOKBACK_DAYS + 2]]
+    spy_closes = [c for c in spy_closes if c]
+    spy_1d_pct: float | None = None
+    spy_5d_pct: float | None = None
+    spy_1d_z: float | None = None
+    if len(spy_closes) >= 2:
+        spy_1d_pct = round((spy_closes[0] / spy_closes[1] - 1.0) * 100.0, 2)
+    if len(spy_closes) >= _SHOCK_SHORT_WINDOW_DAYS + 1:
+        spy_5d_pct = round(
+            (spy_closes[0] / spy_closes[_SHOCK_SHORT_WINDOW_DAYS] - 1.0) * 100.0, 2
+        )
+    if len(spy_closes) >= _SHOCK_VOL_LOOKBACK_DAYS + 1:
+        daily_rets = [
+            (spy_closes[i] / spy_closes[i + 1] - 1.0) * 100.0
+            for i in range(_SHOCK_VOL_LOOKBACK_DAYS)
+        ]
+        mean = sum(daily_rets) / len(daily_rets)
+        var = sum((r - mean) ** 2 for r in daily_rets) / len(daily_rets)
+        sd = var ** 0.5
+        if sd > 0 and spy_1d_pct is not None:
+            spy_1d_z = round((spy_1d_pct - mean) / sd, 2)
+    out["spy"] = {
+        "return_1d_pct": spy_1d_pct,
+        "return_5d_pct": spy_5d_pct,
+        "return_1d_zscore": spy_1d_z,
+        "vol_lookback_days": _SHOCK_VOL_LOOKBACK_DAYS,
+        "latest_date": spy_rows[0].get("date") if spy_rows else None,
+    }
+    if spy_1d_z is not None and abs(spy_1d_z) >= 3.5:
+        triggers.append(f"SPY 1d z-score {spy_1d_z} (|z|>=3.5, acute)")
+    elif spy_1d_z is not None and abs(spy_1d_z) >= 2.5:
+        triggers.append(f"SPY 1d z-score {spy_1d_z} (|z|>=2.5, elevated)")
+    elif spy_1d_z is not None and abs(spy_1d_z) >= 1.5:
+        triggers.append(f"SPY 1d z-score {spy_1d_z} (|z|>=1.5, watch)")
+
+    # --- 2. DXY 1d / 5d % change ------------------------------------------
+    dxy_rows = macro_data.get("DTWEXBGS") or []
+    dxy_vals = [
+        float(r["value"]) for r in dxy_rows
+        if r.get("value") not in (None, ".", "")
+    ]
+    dxy_1d_pct: float | None = None
+    dxy_5d_pct: float | None = None
+    if len(dxy_vals) >= 2:
+        dxy_1d_pct = round((dxy_vals[0] / dxy_vals[1] - 1.0) * 100.0, 2)
+    if len(dxy_vals) >= _SHOCK_SHORT_WINDOW_DAYS + 1:
+        dxy_5d_pct = round(
+            (dxy_vals[0] / dxy_vals[_SHOCK_SHORT_WINDOW_DAYS] - 1.0) * 100.0, 2
+        )
+    out["dxy"] = {
+        "return_1d_pct": dxy_1d_pct,
+        "return_5d_pct": dxy_5d_pct,
+    }
+    if dxy_5d_pct is not None and abs(dxy_5d_pct) >= 3.0:
+        triggers.append(f"DXY 5d move {dxy_5d_pct}% (|>=3%|, elevated)")
+
+    # --- 3. VIX level + 1d change ------------------------------------------
+    vix_rows = macro_data.get("VIXCLS") or []
+    vix_vals: list[float] = []
+    for r in vix_rows:
+        v = r.get("value")
+        if v in (None, ".", ""):
+            continue
+        try:
+            vix_vals.append(float(v))
+        except (TypeError, ValueError):
+            continue
+    vix_latest = vix_vals[0] if vix_vals else None
+    vix_1d_pct = (
+        round((vix_vals[0] / vix_vals[1] - 1.0) * 100.0, 2)
+        if len(vix_vals) >= 2 and vix_vals[1] else None
+    )
+    out["vix"] = {
+        "latest": vix_latest,
+        "return_1d_pct": vix_1d_pct,
+    }
+    if vix_latest is not None and vix_latest >= 35.0:
+        triggers.append(f"VIX {vix_latest} >=35 (elevated absolute level)")
+    if vix_1d_pct is not None and vix_1d_pct >= 30.0:
+        triggers.append(f"VIX 1d jump {vix_1d_pct}% (>=30%, elevated)")
+
+    # --- 4. News keyword scan ----------------------------------------------
+    def _text(item: dict) -> str:
+        parts = [
+            item.get("headline") or item.get("title") or "",
+            item.get("summary") or item.get("text") or "",
+        ]
+        return " ".join(p for p in parts if p).lower()
+
+    pool: list[dict] = []
+    pool.extend(market_news or [])
+    pool.extend(forex_news or [])
+    pool.extend(stock_news or [])
+    for items in (company_news or {}).values():
+        pool.extend(items or [])
+
+    hits_by_cat: dict[str, int] = {cat: 0 for cat in _SHOCK_KEYWORDS}
+    examples: list[dict] = []
+    seen_titles: set[str] = set()
+    for item in pool:
+        body = _text(item)
+        if not body:
+            continue
+        for cat, kws in _SHOCK_KEYWORDS.items():
+            for kw in kws:
+                if kw in body:
+                    hits_by_cat[cat] += 1
+                    title = item.get("headline") or item.get("title") or ""
+                    if title and title not in seen_titles and len(examples) < 8:
+                        examples.append({
+                            "category": cat,
+                            "keyword": kw,
+                            "headline": title[:240],
+                            "source": item.get("source") or item.get("site") or "",
+                            "date": item.get("datetime") or item.get("date") or "",
+                        })
+                        seen_titles.add(title)
+                    break  # avoid double-counting same item under same category
+    total_hits = sum(hits_by_cat.values())
+    out["news_hits_total"] = total_hits
+    out["news_hits_by_category"] = hits_by_cat
+    out["news_examples"] = examples
+    if total_hits >= 20:
+        triggers.append(f"News keyword hits {total_hits} (>=20, elevated)")
+    elif total_hits >= 10:
+        triggers.append(f"News keyword hits {total_hits} (>=10, watch+)")
+    elif total_hits >= 5:
+        triggers.append(f"News keyword hits {total_hits} (>=5, watch)")
+
+    # --- 5. Composite shock level -----------------------------------------
+    level = 0
+    # Acute: extreme tape OR (elevated tape + heavy news cluster)
+    if (spy_1d_z is not None and abs(spy_1d_z) >= 3.5) or total_hits >= 25:
+        level = 3
+    elif (
+        (spy_1d_z is not None and abs(spy_1d_z) >= 2.5)
+        or (vix_latest is not None and vix_latest >= 35.0)
+        or (vix_1d_pct is not None and vix_1d_pct >= 30.0)
+        or total_hits >= 15
+        or (dxy_5d_pct is not None and abs(dxy_5d_pct) >= 3.0 and total_hits >= 8)
+    ):
+        level = 2
+    elif (
+        (spy_1d_z is not None and abs(spy_1d_z) >= 1.5)
+        or total_hits >= 5
+        or (vix_1d_pct is not None and vix_1d_pct >= 15.0)
+    ):
+        level = 1
+
+    out["shock_level"] = level
+    out["shock_label"] = {0: "none", 1: "watch", 2: "elevated", 3: "acute"}[level]
+    out["triggers"] = triggers
 
     return out
 
