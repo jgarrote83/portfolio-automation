@@ -105,12 +105,26 @@ def _upload_json(container: str, name: str, body) -> None:
     blob.upload_blob(json.dumps(body, indent=2).encode("utf-8"), overwrite=True)
 
 
+def _normalize_trade(t: dict) -> dict:
+    """Map analyzer schema (side/symbol/order_type) to UI schema (action/ticker)."""
+    side = t.get("side") or t.get("action")
+    symbol = t.get("symbol") or t.get("ticker")
+    return {
+        **t,
+        "action": (side or "").upper(),
+        "ticker": symbol,
+        # Quantity / confidence / limit_price / rationale already match UI fields.
+    }
+
+
 def _merge_decisions(trades: list[dict], approvals: dict | None) -> list[dict]:
     """Apply approval decisions onto trade records by id."""
     by_id: dict = {}
     if approvals:
         by_id = {d.get("id"): d for d in approvals.get("decisions", []) if d.get("id")}
-    for t in trades:
+    out: list[dict] = []
+    for raw in trades:
+        t = _normalize_trade(raw)
         d = by_id.get(t.get("id"))
         if d:
             t["status"] = d.get("status", "pending")
@@ -118,7 +132,8 @@ def _merge_decisions(trades: list[dict], approvals: dict | None) -> list[dict]:
             t["decided_at"] = d.get("ts")
         else:
             t.setdefault("status", "pending")
-    return trades
+        out.append(t)
+    return out
 
 
 def _record_decisions(date_str: str, ids: list[str], status: str, principal: dict | None) -> dict:
