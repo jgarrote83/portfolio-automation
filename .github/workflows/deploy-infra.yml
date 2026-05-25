@@ -35,8 +35,11 @@ jobs:
           tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Ensure resource group
-        run: az group create -n "$AZURE_RG" -l "$AZURE_LOCATION" -o none
+      - name: Verify resource group exists
+        run: |
+          az group show -n "$AZURE_RG" -o none || {
+            echo "::error::Resource group $AZURE_RG not found. Create it manually — CI is scoped Contributor on the RG, not the subscription." ; exit 1 ;
+          }
 
       - name: What-if
         if: ${{ inputs.what_if }}
