@@ -18,13 +18,11 @@ param tenantId string
 
 // SWA Free — managed Functions in /api are included.
 // Note: linked-backend Function Apps require Standard tier; we use managed API instead.
+// SKU defaults to Free when omitted; the SKU shape under API 2024-04-01 rejects an
+// explicit {name:'Free', tier:'Free'} block (SkuCode 'Free' is invalid).
 resource swa 'Microsoft.Web/staticSites@2024-04-01' = {
   name: staticWebAppName
   location: location
-  sku: {
-    name: 'Free'
-    tier: 'Free'
-  }
   properties: {
     // No repo wired here — deployment is push-based from GitHub Actions.
     allowConfigFileUpdates: true
