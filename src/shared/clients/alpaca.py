@@ -36,6 +36,13 @@ class AlpacaClient:
         r.raise_for_status()
         return r.json()
 
+    # ── positions ─────────────────────────────────────────────────────────
+    def list_positions(self) -> list[dict]:
+        r = self.session.get(f"{self.base_url}/v2/positions", timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        return data if isinstance(data, list) else []
+
     # ── orders ────────────────────────────────────────────────────────────
     def submit_order(
         self,

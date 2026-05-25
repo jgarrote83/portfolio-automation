@@ -5,6 +5,7 @@ import azure.functions as func
 from collector.handler import run as collector_run
 from analyzer.handler import analyze_snapshot
 from executor.handler import execute_approvals
+from seeder.handler import seed_positions
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,37 @@ def executor(req: func.HttpRequest) -> func.HttpResponse:
         logger.exception("Executor failed for %s", date_str)
         return func.HttpResponse(
             json.dumps({"error": str(e), "date": date_str}),
+            status_code=500,
+            mimetype="application/json",
+        )
+    return func.HttpResponse(
+        json.dumps(result, default=str),
+        status_code=200,
+        mimetype="application/json",
+    )
+
+
+@app.route(
+    route="seeder",
+    methods=["POST"],
+    auth_level=func.AuthLevel.FUNCTION,
+)
+def seeder(req: func.HttpRequest) -> func.HttpResponse:
+    """One-time idempotent seeding of the Alpaca paper account from current holdings."""
+    try:
+        body = req.get_json()
+    except ValueError:
+        body = {}
+    body = body or {}
+    source = str(body.get("source") or "config")
+    dry_run = bool(body.get("dry_run", False))
+    force = bool(body.get("force", False))
+    try:
+        result = seed_positions(source=source, dry_run=dry_run, force=force)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Seeder failed (source=%s)", source)
+        return func.HttpResponse(
+            json.dumps({"error": str(e), "source": source}),
             status_code=500,
             mimetype="application/json",
         )
