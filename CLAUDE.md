@@ -8,7 +8,7 @@ Azure-native automated portfolio analysis and paper trade execution pipeline. Si
 - **E*TRADE API** for portfolio data only (real holdings, balances, option chains) — OAuth 1.0a, tokens expire midnight ET
 - **Alpaca** for Phase 2 paper trading execution only — REST API, no VM needed
 - **FMP (Financial Modeling Prep)** for fundamentals, earnings, ETF look-through, EOD prices, stock news, and fallback congressional trades (senate/house) — free tier, 250 req/day
-- **FRED** for macro indicators (17 series collected; `CHPMINDXM` deprecated — to revisit) — free, no practical limit
+- **FRED** for macro indicators (35 series collected, including 6 labor-market series feeding `labor_signals` scorecard; `CHPMINDXM` deprecated — to revisit) — free, no practical limit
 - **Quiver Quantitative** (primary alternative-data source) for congressional trades, lobbying, government contracts, wikipedia attention — hobbyist tier, `Authorization: Token <key>` header
 - **Finnhub** for financial market news and company news — free tier, 60 calls/min
 - **Azure AI Search** (Free tier) for semantic memory recall — Phase 1.5, after 60-90 days of data
@@ -77,7 +77,7 @@ E*TRADE tokens expire midnight ET and must be refreshed via OAuth dance; the col
 ## Data flow — Phase 1
 1. Timer fires collector at 06:00 ET weekdays (NCRONTAB: `0 0 6 * * 1-5`)
 2. Collector reads secrets from Key Vault via Managed Identity
-3. Collector calls E*TRADE (positions, balances, option chains — falls back to `config/portfolio.json` if creds missing), FMP (fundamentals, earnings, EOD prices, ETF data, stock news, fallback congressional), FRED (17 macro series), Quiver (congressional trades, lobbying, gov contracts — **lobbying and gov_contracts are filtered client-side to portfolio tickers ∪ ETF watchlist and last 90 days; raw responses are ~20K rows/~16 MB and would blow past Claude's 1 M-token limit**), Finnhub (market news, company news)
+3. Collector calls E*TRADE (positions, balances, option chains — falls back to `config/portfolio.json` if creds missing), FMP (fundamentals, earnings, EOD prices, ETF data, stock news, fallback congressional), FRED (35 macro series, deep-history for bond + labor scorecards), Quiver (congressional trades, lobbying, gov contracts — **lobbying and gov_contracts are filtered client-side to portfolio tickers ∪ ETF watchlist and last 90 days; raw responses are ~20K rows/~16 MB and would blow past Claude's 1 M-token limit**), Finnhub (market news, company news)
 4. Collector writes full JSON snapshot to `daily-snapshots/YYYY-MM-DD.json` blob
 5. Collector writes denormalized rows to 6 Table Storage tables (PortfolioHistory, FundamentalsHistory, MacroHistory, ETFLookthroughHistory, SentimentHistory, TradeHistory)
 6. Blob trigger fires analyzer

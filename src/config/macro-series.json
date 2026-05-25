@@ -27,5 +27,11 @@
   "T10YIE":           { "name": "10-Year Breakeven Inflation",           "unit": "%",    "frequency": "daily"    },
   "T5YIE":            { "name": "5-Year Breakeven Inflation",            "unit": "%",    "frequency": "daily"    },
   "T5YIFR":           { "name": "5Y5Y Forward Breakeven Inflation",      "unit": "%",    "frequency": "daily"    },
-  "MORTGAGE30US":     { "name": "30-Year Fixed Mortgage Rate",           "unit": "%",    "frequency": "weekly"   }
+  "MORTGAGE30US":     { "name": "30-Year Fixed Mortgage Rate",           "unit": "%",    "frequency": "weekly"   },
+  "ICSA":             { "name": "Initial Jobless Claims",                "unit": "persons","frequency": "weekly" },
+  "CCSA":             { "name": "Continued Jobless Claims",              "unit": "persons","frequency": "weekly" },
+  "CES0500000003":    { "name": "Avg Hourly Earnings, Private",          "unit": "$",    "frequency": "monthly"  },
+  "JTSJOL":           { "name": "Job Openings (JOLTS)",                  "unit": "000s", "frequency": "monthly"  },
+  "CIVPART":          { "name": "Labor Force Participation Rate",        "unit": "%",    "frequency": "monthly"  },
+  "SAHMREALTIME":     { "name": "Sahm Rule Recession Indicator",         "unit": "pp",   "frequency": "monthly"  }
 }

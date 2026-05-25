@@ -156,6 +156,13 @@ def run() -> None:
         "MORTGAGE30US",
     ):
         macro_data[_bond_sid] = fred.get_series_latest(_bond_sid, limit=90)
+    # Labor-signals pre-compute: weekly series need ~26 obs for 4w avg + YoY-ish
+    # trend; monthly series need ~24 obs for 3m / 6m / 12m comparisons.
+    for _labor_sid in ("ICSA", "CCSA"):
+        macro_data[_labor_sid] = fred.get_series_latest(_labor_sid, limit=60)
+    for _labor_sid in ("PAYEMS", "UNRATE", "CES0500000003", "JTSJOL",
+                       "CIVPART", "SAHMREALTIME"):
+        macro_data[_labor_sid] = fred.get_series_latest(_labor_sid, limit=24)
     logger.info("FRED: %d series collected", sum(1 for v in macro_data.values() if v))
 
     # --- EOD prices (FMP batch-quote, single call) --------------------------
@@ -193,6 +200,16 @@ def run() -> None:
         bond_signals.get("scorecard", {}).get("label"),
         bond_signals.get("credit", {}).get("hy_oas", {}).get("latest"),
         bond_signals.get("yield_curve", {}).get("recession_prob_12m"),
+    )
+
+    labor_signals = _build_labor_signals(macro_data)
+    logger.info(
+        "Labor signals: composite=%s label=%s claims_4w=%s sahm=%s payrolls_3m_avg=%s",
+        labor_signals.get("scorecard", {}).get("composite"),
+        labor_signals.get("scorecard", {}).get("label"),
+        labor_signals.get("claims", {}).get("icsa_4w_avg"),
+        labor_signals.get("unemployment", {}).get("sahm_latest"),
+        labor_signals.get("payrolls", {}).get("delta_3m_avg_k"),
     )
 
     market_shock = _build_market_shock(
@@ -236,6 +253,7 @@ def run() -> None:
         "prices": prices,
         "regional_rotation": regional_rotation,
         "bond_signals": bond_signals,
+        "labor_signals": labor_signals,
         "market_shock": market_shock,
         "news": {
             "market": market_news[:50],
@@ -891,6 +909,227 @@ def _build_bond_signals(macro_data: dict) -> dict:
         "composite":    composite,
         "label":        label,
         "scale":        "-8..+8; <=-5 acute_defensive, -4..-1 defensive, 0..+3 neutral, >=+4 risk_on",
+    }
+
+    return out
+
+
+def _build_labor_signals(macro_data: dict) -> dict:
+    """Pre-compute a four-signal labor-market scorecard for the analyzer.
+
+    Inputs from FRED ``macro_data`` (deep-history fetched in ``run()``):
+      ICSA, CCSA               weekly (~60 obs)
+      PAYEMS, UNRATE           monthly (~24 obs)
+      CES0500000003            monthly avg hourly earnings ($)
+      JTSJOL                   monthly job openings
+      CIVPART                  monthly labor force participation
+      SAHMREALTIME             monthly Sahm Rule indicator
+      DFF                      daily Fed funds (already deep-fetched for bonds)
+
+    Output sections (mirrors bond_signals shape):
+      claims:        ICSA latest + 4w avg + 4w vs 26w avg % change; CCSA latest
+      payrolls:      PAYEMS 1m / 3m / 6m monthly deltas (in thousands)
+      unemployment:  UNRATE latest + 6m delta (pp); Sahm Rule + flag
+      wages:         CES YoY%; JTSJOL latest + 3m delta; CIVPART latest + 6m delta
+
+    Composite scorecard: each signal -2..+2, composite -8..+8 with label
+      ``labor_strong`` (>=+4) / ``neutral`` (0..+3) / ``labor_softening``
+      (-1..-4) / ``labor_breaking`` (<=-5).
+
+    Labor data leads recessions: jobless claims and Sahm Rule turn before
+    GDP. Treat as cross-confirmation with bond_signals — when claims and
+    HY OAS both deteriorate, defensive posture is warranted regardless of
+    yield-curve regime.
+    """
+    out: dict = {
+        "claims":       {},
+        "payrolls":     {},
+        "unemployment": {},
+        "wages":        {},
+        "scorecard":    {},
+        "notes": (
+            "Labor leads the cycle. ICSA 4w rising >10% vs 26w avg, "
+            "SAHMREALTIME >=0.5, or PAYEMS 3m avg <100k are early-warning "
+            "signals. Combine with bond_signals.credit_stress for confluence."
+        ),
+    }
+
+    def _vals(sid: str) -> list[float]:
+        rows = macro_data.get(sid) or []
+        out_vals: list[float] = []
+        for r in rows:
+            v = r.get("value")
+            if v in (None, ".", ""):
+                continue
+            try:
+                out_vals.append(float(v))
+            except (TypeError, ValueError):
+                continue
+        return out_vals
+
+    def _latest(vals: list[float], digits: int = 2) -> float | None:
+        return round(vals[0], digits) if vals else None
+
+    def _avg(vals: list[float]) -> float | None:
+        return round(sum(vals) / len(vals), 2) if vals else None
+
+    def _monthly_delta_k(vals: list[float], n: int) -> float | None:
+        """Average monthly change over n months, in thousands of persons.
+
+        PAYEMS arrives from FRED already in thousands, so no /1000 here.
+        """
+        if len(vals) <= n:
+            return None
+        diffs = [(vals[i] - vals[i + 1]) for i in range(n)]
+        return round(sum(diffs) / n, 1)
+
+    # --- 1. Jobless claims --------------------------------------------------
+    icsa = _vals("ICSA")
+    ccsa = _vals("CCSA")
+
+    icsa_4w  = _avg(icsa[:4])  if len(icsa) >= 4  else None
+    icsa_26w = _avg(icsa[:26]) if len(icsa) >= 26 else None
+    icsa_pct_vs_26w = None
+    if icsa_4w is not None and icsa_26w not in (None, 0):
+        icsa_pct_vs_26w = round(100.0 * (icsa_4w - icsa_26w) / icsa_26w, 1)
+
+    out["claims"] = {
+        "icsa_latest":          _latest(icsa, 0),
+        "icsa_4w_avg":          icsa_4w,
+        "icsa_26w_avg":         icsa_26w,
+        "icsa_4w_vs_26w_pct":   icsa_pct_vs_26w,
+        "ccsa_latest":          _latest(ccsa, 0),
+        "ccsa_4w_avg":          _avg(ccsa[:4]) if len(ccsa) >= 4 else None,
+    }
+
+    # --- 2. Payrolls momentum ----------------------------------------------
+    payems = _vals("PAYEMS")
+    out["payrolls"] = {
+        "payems_latest_k":  round(payems[0], 0) if payems else None,
+        "delta_1m_k":       _monthly_delta_k(payems, 1),
+        "delta_3m_avg_k":   _monthly_delta_k(payems, 3),
+        "delta_6m_avg_k":   _monthly_delta_k(payems, 6),
+    }
+
+    # --- 3. Unemployment + Sahm --------------------------------------------
+    unrate = _vals("UNRATE")
+    sahm   = _vals("SAHMREALTIME")
+    civpart = _vals("CIVPART")
+
+    unrate_6m_delta_pp = None
+    if len(unrate) > 6:
+        unrate_6m_delta_pp = round(unrate[0] - unrate[6], 2)
+
+    civpart_6m_delta_pp = None
+    if len(civpart) > 6:
+        civpart_6m_delta_pp = round(civpart[0] - civpart[6], 2)
+
+    sahm_latest = _latest(sahm, 2)
+    out["unemployment"] = {
+        "unrate_latest":            _latest(unrate, 2),
+        "unrate_delta_6m_pp":       unrate_6m_delta_pp,
+        "sahm_latest":              sahm_latest,
+        "sahm_triggered":           bool(sahm_latest is not None and sahm_latest >= 0.5),
+        "civpart_latest":           _latest(civpart, 2),
+        "civpart_delta_6m_pp":      civpart_6m_delta_pp,
+        "sahm_notes":               "Sahm Rule triggers at >=0.5pp; historically coincides with recession start",
+    }
+
+    # --- 4. Wages + JOLTS --------------------------------------------------
+    ces = _vals("CES0500000003")
+    jolts = _vals("JTSJOL")
+    dff = _vals("DFF")
+
+    wage_yoy_pct = None
+    if len(ces) > 12 and ces[12] not in (None, 0):
+        wage_yoy_pct = round(100.0 * (ces[0] - ces[12]) / ces[12], 2)
+
+    jolts_3m_delta_k = None
+    if len(jolts) > 3:
+        jolts_3m_delta_k = round((jolts[0] - jolts[3]), 0)  # already in thousands
+
+    out["wages"] = {
+        "ahe_latest":           _latest(ces, 2),
+        "ahe_yoy_pct":          wage_yoy_pct,
+        "jolts_openings_k":     _latest(jolts, 0),
+        "jolts_delta_3m_k":     jolts_3m_delta_k,
+        "fed_funds_latest":     _latest(dff, 2),
+    }
+
+    # --- 5. Four-signal scorecard ------------------------------------------
+    def _score_claims() -> int:
+        if icsa_pct_vs_26w is None:
+            return 0
+        if icsa_pct_vs_26w >= 10.0:
+            return -2
+        if icsa_pct_vs_26w >= 5.0:
+            return -1
+        if icsa_pct_vs_26w <= -5.0:
+            return 1
+        return 0
+
+    def _score_payrolls() -> int:
+        d3 = out["payrolls"]["delta_3m_avg_k"]
+        if d3 is None:
+            return 0
+        if d3 < 0:
+            return -2
+        if d3 < 100.0:
+            return -1
+        if d3 >= 200.0:
+            return 1
+        return 0
+
+    def _score_unemployment() -> int:
+        if sahm_latest is not None and sahm_latest >= 0.5:
+            return -2
+        if sahm_latest is not None and sahm_latest >= 0.3:
+            return -1
+        if unrate_6m_delta_pp is not None and unrate_6m_delta_pp >= 0.4:
+            return -1
+        if unrate_6m_delta_pp is not None and unrate_6m_delta_pp <= -0.2:
+            return 1
+        return 0
+
+    def _score_wages() -> int:
+        # Hawkish Fed risk if wages hot AND policy already restrictive
+        w = wage_yoy_pct
+        f = _latest(dff, 2)
+        if w is None:
+            return 0
+        if w >= 4.5 and (f is not None and f >= 4.0):
+            return -1
+        if w >= 5.0:
+            return -1
+        if w <= 3.0 and (f is not None and f >= 4.0):
+            return 1   # disinflation in wages + restrictive policy = cuts coming
+        if 3.0 < w < 4.0:
+            return 1
+        return 0
+
+    s_claims = _score_claims()
+    s_pay    = _score_payrolls()
+    s_unemp  = _score_unemployment()
+    s_wages  = _score_wages()
+    composite = s_claims + s_pay + s_unemp + s_wages
+
+    if composite >= 4:
+        label = "labor_strong"
+    elif composite >= 0:
+        label = "neutral"
+    elif composite >= -4:
+        label = "labor_softening"
+    else:
+        label = "labor_breaking"
+
+    out["scorecard"] = {
+        "claims":       s_claims,
+        "payrolls":     s_pay,
+        "unemployment": s_unemp,
+        "wages":        s_wages,
+        "composite":    composite,
+        "label":        label,
+        "scale":        "-8..+8; <=-5 labor_breaking, -4..-1 labor_softening, 0..+3 neutral, >=+4 labor_strong",
     }
 
     return out

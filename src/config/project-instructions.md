@@ -255,6 +255,49 @@ and equities disagree, **bonds usually win on a 4–8 week horizon**.
 
 **Audit requirement:** echo `bond_scorecard_reading` (the composite integer) and `bond_signal_action` (the label) in the trades JSON. If any hard trigger fired, name it explicitly in the rationale of the affected trade.
 
+### Labor market read (four-signal scorecard, read `labor_signals`)
+
+Labor data **leads** the cycle: jobless claims and the Sahm Rule turn before
+GDP and before equities price it in. Treat `labor_signals` as the earliest of
+the three macro reads. When labor and bond_signals **both** deteriorate, the
+recession case strengthens regardless of the quadrant call.
+
+**Fields in `labor_signals`:**
+
+- `claims` — ICSA latest + 4w avg, CCSA latest + 4w avg, and `icsa_4w_vs_26w_pct` (the early-warning metric: % change of the 4-week average vs the 26-week average).
+- `payrolls` — PAYEMS latest (thousands of jobs), plus 1m / 3m / 6m monthly deltas in thousands. `delta_3m_avg_k` is the headline trend.
+- `unemployment` — UNRATE latest + 6m delta in pp, Sahm Rule value + `sahm_triggered` flag, civilian participation rate + 6m delta.
+- `wages` — avg hourly earnings YoY%, JOLTS openings + 3m delta, current Fed funds (for hawkish-Fed risk assessment).
+- `scorecard` — each of the four signals scored -2..+2, composite -8..+8 with label `labor_strong` / `neutral` / `labor_softening` / `labor_breaking`.
+
+**How to read each signal:**
+
+| Signal | Bullish (+1/+2) | Bearish (-1/-2) |
+| --- | --- | --- |
+| Claims | ICSA 4w avg falling >=5% vs 26w avg | ICSA 4w avg rising >=5% (-1) or >=10% (-2) vs 26w avg |
+| Payrolls | `delta_3m_avg_k` >= 200 | `delta_3m_avg_k` < 100 (-1) or < 0 (-2) |
+| Unemployment | UNRATE 6m delta <=-0.2pp | Sahm >=0.3 (-1) or >=0.5 (-2); UNRATE 6m delta >=0.4pp (-1) |
+| Wages | AHE YoY 3-4% (Goldilocks) or YoY <=3% with DFF>=4 (cuts coming) | AHE YoY >=4.5% with DFF>=4 (Fed stays hawkish, -1); YoY >=5% (-1) |
+
+**Hard trigger rules:**
+
+- `unemployment.sahm_triggered = true` — recession likely already started; propose at least one defensive trade (trim cyclicals, add TLT/SGOV) and cite the Sahm reading explicitly.
+- `claims.icsa_4w_vs_26w_pct >= 10` — labor cracking; soften any bullish equity tilt regardless of quadrant.
+- `payrolls.delta_3m_avg_k < 0` — outright job losses; mandatory defensive bias.
+- `wages.ahe_yoy_pct >= 4.5` AND `wages.fed_funds_latest >= 4.0` — Fed-stays-hawkish risk; cite when proposing trims of long-duration tech / unprofitable growth.
+- `wages.ahe_yoy_pct <= 3.0` AND `wages.fed_funds_latest >= 4.0` — wage disinflation with restrictive policy = rate cuts likely; tailwind for long-duration bonds (TLT/VGLT) and rate-sensitive sectors (XLRE, XLU).
+
+**Composite scorecard reading:**
+
+- `scorecard.label = labor_strong` — confirms risk-on; permit higher-conviction equity trades.
+- `scorecard.label = neutral` — no labor-side veto.
+- `scorecard.label = labor_softening` — soften bullish calls; tilt toward quality.
+- `scorecard.label = labor_breaking` — must propose at least one defensive trade; recession case is live.
+
+**Confluence:** Like bond_signals, the labor composite alone is not sufficient to override the quadrant. Require **at least 3 of the 4 labor sub-signals to agree** (all <=0 for defensive, all >=0 for risk-on) before driving a tilt change on labor alone. The strongest signal is **labor + bonds agreeing**: if both composites are <=-2 and ICSA is rising AND HY OAS is widening, the recession case is real and you should propose defensive trades.
+
+**Audit requirement:** echo `labor_scorecard_reading` (the composite integer) and `labor_signal_action` (the label) in the trades JSON. If any hard trigger fired (Sahm, ICSA +10%, negative payrolls, hawkish-Fed wage risk, or dovish-pivot wage signal), name it in the rationale of the affected trade.
+
 ### Calculated Risk Score (0–10)
 
 A single number describing your confidence in the quadrant call and the next
@@ -287,6 +330,7 @@ A single JSON snapshot for one trading day containing:
 - `etf_holdings` — IDMO / AIA / IDVO composition (may be empty on free tier)
 - `regional_rotation` — pre-computed US-vs-international rotation block (DXY, relative strength, MA cross, policy divergence, composite Rotation Score 0-10)
 - `bond_signals` — four-signal bond market scorecard (yield curve regime + recession probability, HY/IG credit OAS + credit_stress flag, breakeven inflation, MBS proxy + real yields), composite -8..+8 with label
+- `labor_signals` — four-signal labor-market scorecard (jobless claims trend, payrolls momentum, unemployment + Sahm Rule, wages vs Fed funds), composite -8..+8 with label `labor_strong` / `neutral` / `labor_softening` / `labor_breaking`
 - `market_shock` — short-horizon shock detector: 1d/5d price moves (SPY/DXY/VIX) with z-scores + news keyword scan, composite `shock_level` 0-3 with `triggers` and `news_examples`
 - `recent_reports` — up to 5 of your previous daily reports for continuity
 
@@ -343,6 +387,8 @@ A single JSON object — no prose, no code fences, no markdown:
   "regime_override": "none" | "window_shortened" | "tilt_lifted" | "acute_de_risk",
   "bond_scorecard_reading": 0,
   "bond_signal_action": "risk_on" | "neutral" | "defensive" | "acute_defensive",
+  "labor_scorecard_reading": 0,
+  "labor_signal_action": "labor_strong" | "neutral" | "labor_softening" | "labor_breaking",
   "trades": [
     {
       "id": "T-YYYYMMDD-001",
@@ -365,13 +411,15 @@ A single JSON object — no prose, no code fences, no markdown:
 
 Rules for the JSON block:
 
-- If you have **no trades** to recommend, return `{"quadrant_current": ..., "quadrant_projected_6m": ..., "risk_score": ..., "international_tilt": ..., "rotation_score_reading": ..., "shock_level_reading": ..., "regime_override": ..., "bond_scorecard_reading": ..., "bond_signal_action": ..., "trades": []}`.
+- If you have **no trades** to recommend, return `{"quadrant_current": ..., "quadrant_projected_6m": ..., "risk_score": ..., "international_tilt": ..., "rotation_score_reading": ..., "shock_level_reading": ..., "regime_override": ..., "bond_scorecard_reading": ..., "bond_signal_action": ..., "labor_scorecard_reading": ..., "labor_signal_action": ..., "trades": []}`.
 - `international_tilt` must reflect the *direction of your next move*: `overweight` if you are tilting toward international this report, `underweight` if tilting away, `neutral` otherwise. Must be consistent with the Rotation Score reading in the snapshot.
 - `rotation_score_reading` is the composite score you read from `regional_rotation.rotation_score.composite` (echo it for traceability).
 - `shock_level_reading` is the integer 0–3 you read from `market_shock.shock_level` (echo it for traceability).
 - `regime_override` MUST be `"none"` when `shock_level_reading <= 1`. At level 2 use `"window_shortened"` if you shortened the RS horizon to 20d, `"tilt_lifted"` if you raised the tilt cap, or `"none"` if you took no override action. At level 3 use `"acute_de_risk"` whenever you propose defensive trades that the 60d framework alone would not justify.
 - `bond_scorecard_reading` is the integer composite from `bond_signals.scorecard.composite` (-8..+8, echo it).
 - `bond_signal_action` is the label from `bond_signals.scorecard.label`. If a hard bond trigger fired (credit_stress, 2s10s disinverting, 5y5y +/-30bp 4w, MBS +30bp 4w, real_10Y >=2.5%), the rationale of at least one trade MUST name the trigger.
+- `labor_scorecard_reading` is the integer composite from `labor_signals.scorecard.composite` (-8..+8, echo it).
+- `labor_signal_action` is the label from `labor_signals.scorecard.label`. If a hard labor trigger fired (Sahm triggered, ICSA 4w/26w >=+10%, negative payrolls 3m avg, hawkish-Fed wage risk, dovish-pivot wage signal), the rationale of at least one trade MUST name the trigger.
 - `id` must be unique per trade and embed today's date.
 - `layer` must be `"core"` for any of the 24 core tickers; `"flex"` for everything else.
 - `flex_source` is **required and non-null** when `layer == "flex"` and the trade is
