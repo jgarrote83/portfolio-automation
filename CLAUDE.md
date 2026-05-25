@@ -77,7 +77,7 @@ E*TRADE tokens expire midnight ET and must be refreshed via OAuth dance; the col
 ## Data flow — Phase 1
 1. Timer fires collector at 06:00 ET weekdays (NCRONTAB: `0 0 6 * * 1-5`)
 2. Collector reads secrets from Key Vault via Managed Identity
-3. Collector calls E*TRADE (positions, balances, option chains — falls back to `config/portfolio.json` if creds missing), FMP (fundamentals, earnings, EOD prices, ETF data, stock news, fallback congressional), FRED (17 macro series), Quiver (congressional trades, lobbying, gov contracts), Finnhub (market news, company news)
+3. Collector calls E*TRADE (positions, balances, option chains — falls back to `config/portfolio.json` if creds missing), FMP (fundamentals, earnings, EOD prices, ETF data, stock news, fallback congressional), FRED (17 macro series), Quiver (congressional trades, lobbying, gov contracts — **lobbying and gov_contracts are filtered client-side to portfolio tickers ∪ ETF watchlist and last 90 days; raw responses are ~20K rows/~16 MB and would blow past Claude's 1 M-token limit**), Finnhub (market news, company news)
 4. Collector writes full JSON snapshot to `daily-snapshots/YYYY-MM-DD.json` blob
 5. Collector writes denormalized rows to 6 Table Storage tables (PortfolioHistory, FundamentalsHistory, MacroHistory, ETFLookthroughHistory, SentimentHistory, TradeHistory)
 6. Blob trigger fires analyzer
@@ -120,6 +120,8 @@ IDVO (international dividend + covered call overlay), IDMO (international moment
 - Workflow pip install MUST pin manylinux2014 wheels (`--platform manylinux2014_x86_64 --python-version 3.11 --implementation cp --only-binary=:all:`). GitHub `ubuntu-latest` ships GLIBC 2.39; Functions Linux Consumption image is older. Native wheels (e.g. `cryptography`) otherwise fail with `GLIBC_2.33 not found` and the Python worker silently fails to load.
 - Deploy model: run-from-package via blob (`WEBSITE_RUN_FROM_PACKAGE=<blob URL>`). `func azure functionapp publish` does not work with identity-based `AzureWebJobsStorage`. App runs in read-only mode — portal Test/Run hits CORS; invoke via admin REST instead: `POST https://func-pfauto.azurewebsites.net/admin/functions/<name>` with master key from `az functionapp keys list`.
 - Workflow path filter is `src/**`; workflow-only changes need manual `gh workflow run "Deploy function code" --ref master`.
+- Quiver `/beta/live/lobbying` and `/beta/live/gov_contracts` return ~20K rows of all-market activity per call (~12 MB + ~4 MB JSON). Collector MUST filter client-side to portfolio tickers ∪ ETF watchlist AND last 90 days — otherwise the daily snapshot balloons to ~20 MB and the analyzer prompt blows past Claude's 1 M-token context window (observed: 6.2 M tokens → permanent 400). See `_row_ticker`/`_row_date` filter in `src/collector/handler.py` after the Quiver fetch. Commit `20cb2b0`.
+- `host.json` `functionTimeout` MUST be `00:10:00` (Consumption-plan max). Default is 5 min; analyzer Foundry call with full snapshot (~240K input tokens) takes ~45–150 s and was being killed silently mid-call with no completion log in App Insights. Commit `743b5ad`.
 
 ## Spec documents (in docs/specs/)
 Full details in these companion documents — read them for implementation specifics:
