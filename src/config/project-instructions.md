@@ -18,12 +18,12 @@ serving the Growth book only.
 
 ---
 
-## Portfolio structure — 30-ticker book
+## Portfolio structure — 33-ticker book
 
 The portfolio is split into two layers. You may **only** add new tickers from the Flex
 layer. The Core roster is fixed.
 
-### Core (20 tickers, fixed roster, weight-only changes)
+### Core (23 tickers, fixed roster, weight-only changes)
 
 You may raise or lower weight, including to 0%, but you may **never delete** a core
 ticker from the roster or add a new one. These are the All Weather backbone.
@@ -50,6 +50,9 @@ ticker from the roster or add a new one. These are the All Weather backbone.
 | DBA    | Agriculture commodities — food inflation               |
 | PDBC   | Diversified commodities (no K-1) — broad inflation     |
 | SGOV   | Short Treasury — cash equivalent / deflation hedge     |
+| TLT    | Long-duration US Treasury — deflation / Fed-pivot hedge|
+| XLP    | US consumer staples — defensive equity                 |
+| TIP    | US TIPS — inflation-linked bonds                       |
 
 ### Flex (up to 10 tickers, rotatable)
 
@@ -94,16 +97,30 @@ different "winning" set of asset classes:
 | Q3 — Stagflation | Falling  | Rising    | Gold, commodities, TIPS, energy, defensive sectors     | Growth equity, long bonds  |
 | Q4 — Deflation   | Falling  | Falling   | Long Treasuries, US dollar cash, defensive equity      | Commodities, EM, cyclicals |
 
-### Mapping our 20 core tickers to quadrants
+### Mapping our 23 core tickers to quadrants
+
+A ticker may appear in more than one quadrant when its role is genuinely
+multi-regime (e.g. GLD as both inflation and crisis hedge). Use the listings
+below when proposing weight shifts: **overweight the quadrant we are in and
+underweight the prior quadrant**, with a partial hedge to the adjacent quadrant
+we may be transitioning toward.
 
 - **Q1 (Goldilocks):** SPY, QQQ, AMZN, GOOGL, XSD, INTC, IDMO, AIA, IEMG, VSS
-- **Q2 (Reflation):** VDE, XLI, PPA, EUAD, DBA, PDBC, EWZ, IEMG
-- **Q3 (Stagflation):** GLD, PDBC, DBA, VDE, MCK
-- **Q4 (Deflation):** SGOV, MCK, SPY (defensive trim)
+- **Q2 (Reflation):** VDE, XLI, PPA, EUAD, DBA, PDBC, EWZ, IEMG, IDMO, TIP
+- **Q3 (Stagflation):** GLD, PDBC, DBA, VDE, MCK, EWZ, SGOV, TIP, XLP
+- **Q4 (Deflation):** TLT, SGOV, XLP, MCK, GLD, GOOGL, AMZN, SPY (defensive trim)
 
-Use this mapping when proposing weight shifts: **overweight the quadrant we are in
-and underweight the prior quadrant**, with a partial hedge to the adjacent quadrant
-we may be transitioning toward.
+Notes on the multi-quadrant tickers:
+- **GLD** — Q3 primary (inflation hedge); Q4 secondary (crisis / Fed-pivot hedge, e.g. 2008, 2020).
+- **SGOV** — Q4 primary (cash / deflation); Q3 secondary (capital preservation while waiting for clarity).
+- **TIP** — Q2 + Q3 (inflation-linked bonds work in both rising-inflation regimes).
+- **TLT** — Q4 primary; mild positive in late Q1 if rate-cut path firms up.
+- **XLP** — Q3 + Q4 defensive equity (inelastic demand, cash flow stable).
+- **MCK** — Q3 + Q4 defensive single-name (healthcare distribution is non-discretionary).
+- **GOOGL, AMZN** — Q1 primary; partial Q4 due to balance-sheet quality and recurring cash flow.
+- **EWZ** — Q2 (commodity-linked EM) + Q3 (FX / commodity wildcard).
+- **IDMO** — Q1 (DM ex-US momentum) + Q2 when international cyclicals lead.
+- **IEMG** — Q1 (broad EM growth) + Q2 (commodity-exposed EM).
 
 ### How to call the quadrant
 
