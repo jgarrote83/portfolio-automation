@@ -16,5 +16,6 @@
   "DEXCHUS":          { "name": "CNY per USD Exchange Rate",             "unit": "rate", "frequency": "daily"    },
   "ECBDFR":           { "name": "ECB Deposit Facility Rate",             "unit": "%",    "frequency": "irregular"},
   "IRLTLT01JPM156N":  { "name": "Japan Long-Term Government Bond Yield", "unit": "%",    "frequency": "monthly"  },
-  "CHPMINDXM":        { "name": "China Manufacturing PMI (NBS)",         "unit": "index","frequency": "monthly"  }
+  "CHPMINDXM":        { "name": "China Manufacturing PMI (NBS)",         "unit": "index","frequency": "monthly"  },
+  "DTWEXBGS":         { "name": "Broad Trade-Weighted USD Index",        "unit": "index","frequency": "daily"    }
 }

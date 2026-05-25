@@ -18,6 +18,16 @@ _MACRO_SERIES_FILE = _SRC / "config" / "macro-series.json"
 _PORTFOLIO_FALLBACK = _SRC / "config" / "portfolio.json"
 _ETF_WATCHLIST = ["IDVO", "IDMO", "AIA"]
 
+# Regional rotation universe: SPY benchmark + international ETFs in Core.
+# Used to compute 60-trading-day relative strength + 50/200d MA cross so the
+# analyzer can call US-vs-international rotation independently of the quadrant.
+_ROTATION_TICKERS = ["SPY", "IDMO", "AIA", "IEMG", "VSS", "EUAD", "EWZ", "EWJ"]
+_ROTATION_WINDOW_DAYS = 60
+_MA_LONG_DAYS = 200
+_MA_SHORT_DAYS = 50
+# Pure-international subset used for MA-cross signals against SPY.
+_INTL_RATIO_TICKERS = ["IDMO", "AIA", "IEMG", "EWJ"]
+
 
 def run() -> None:
     today = date.today().isoformat()
@@ -88,12 +98,25 @@ def run() -> None:
 
     fred = FREDClient(secrets["FredApiKey"])
     macro_data = fred.get_all_series(list(macro_meta.keys()))
+    # Series that need deeper history for the rotation pre-compute
+    # (get_all_series only fetches the latest 5 observations per series).
+    macro_data["DTWEXBGS"] = fred.get_series_latest("DTWEXBGS", limit=90)
+    macro_data["DGS2"]     = fred.get_series_latest("DGS2",     limit=90)
+    macro_data["DFF"]      = fred.get_series_latest("DFF",      limit=90)
     logger.info("FRED: %d series collected", sum(1 for v in macro_data.values() if v))
 
     # --- EOD prices (FMP batch-quote, single call) --------------------------
     all_tickers = list(dict.fromkeys(tickers + _ETF_WATCHLIST))  # preserve order, dedupe
     prices = fmp.get_eod_prices(all_tickers)
     logger.info("FMP prices: %d/%d collected", len(prices), len(all_tickers))
+
+    # --- Regional rotation pre-compute --------------------------------------
+    regional_rotation = _build_regional_rotation(fmp, macro_data)
+    logger.info(
+        "Regional rotation: %d tickers scored, DXY 60d=%s",
+        len(regional_rotation.get("tickers", {})),
+        regional_rotation.get("dxy_60d_pct_change"),
+    )
 
     # --- Finnhub -------------------------------------------------------------
     finnhub = FinnhubClient(secrets["FinnhubApiKey"])
@@ -132,6 +155,7 @@ def run() -> None:
             "data": macro_data,
         },
         "prices": prices,
+        "regional_rotation": regional_rotation,
         "news": {
             "market": market_news[:50],
             "forex": forex_news[:20],
@@ -233,6 +257,269 @@ def _write_etf_history(today: str, etf_holdings: dict, prices: dict) -> None:
             "close_price":     price_data.get("c", 0),
             "volume":          price_data.get("v", 0),
         })
+
+
+def _build_regional_rotation(fmp: FMPClient, macro_data: dict) -> dict:
+    """Pre-compute the US-vs-international rotation signal block.
+
+    Produces, for the analyzer to consume directly:
+      - per-ticker 60-trading-day return + excess vs SPY
+      - leaders / laggards vs SPY (>= +/-5 percentage-point cutoff)
+      - 50/200-day moving-average cross for {IDMO,AIA,IEMG,EWJ}/SPY ratios
+      - DXY 60d % change (FRED DTWEXBGS) with tailwind/headwind tag at +/-3%
+      - policy divergence sub-score from US 2Y yield trend
+      - composite Rotation Score 0-10 (dollar 30 / RS 30 / policy 20 / valuation 20)
+
+    Components we cannot compute from current data sources (ETF flows from
+    Bloomberg/ICI, regional earnings revision breadth) are marked
+    'unavailable' and held at the neutral score of 5.
+    """
+    out: dict = {
+        "window_trading_days": _ROTATION_WINDOW_DAYS,
+        "ma_short_days": _MA_SHORT_DAYS,
+        "ma_long_days": _MA_LONG_DAYS,
+        "benchmark": "SPY",
+        "tickers": {},
+        "leaders_vs_spy": [],
+        "laggards_vs_spy": [],
+        "ratio_ma_cross": {},
+        "dxy_60d_pct_change": None,
+        "dxy_tailwind_for_intl": None,
+        "policy": {},
+        "rotation_flags": {},
+        "rotation_score": {},
+    }
+
+    def _close(row: dict) -> float | None:
+        v = row.get("price") if row.get("price") is not None else row.get("close")
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    # --- 1. Fetch full history once per rotation ticker (newest-first) -------
+    histories: dict[str, list[dict]] = {}
+    for t in _ROTATION_TICKERS:
+        try:
+            rows = fmp.get_historical_price_light(t)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Rotation: history fetch failed for %s: %s", t, e)
+            continue
+        if rows:
+            histories[t] = rows
+
+    # --- 2. 60d returns + excess vs SPY --------------------------------------
+    spy_return: float | None = None
+    per_ticker_ret: dict[str, float] = {}
+    for t, rows in histories.items():
+        if len(rows) < _ROTATION_WINDOW_DAYS + 1:
+            continue
+        latest = _close(rows[0])
+        past = _close(rows[_ROTATION_WINDOW_DAYS])
+        if not latest or not past or past == 0:
+            continue
+        ret_pct = (latest / past - 1.0) * 100.0
+        per_ticker_ret[t] = round(ret_pct, 2)
+        out["tickers"][t] = {
+            "return_60d_pct": round(ret_pct, 2),
+            "latest_close": round(latest, 4),
+            "latest_date": rows[0].get("date"),
+            "window_start_close": round(past, 4),
+            "window_start_date": rows[_ROTATION_WINDOW_DAYS].get("date"),
+        }
+        if t == "SPY":
+            spy_return = ret_pct
+
+    if spy_return is not None:
+        for t, ret in per_ticker_ret.items():
+            if t == "SPY":
+                continue
+            excess = round(ret - spy_return, 2)
+            out["tickers"][t]["excess_vs_spy_pp"] = excess
+            if excess >= 5.0:
+                out["leaders_vs_spy"].append({"ticker": t, "excess_pp": excess})
+            elif excess <= -5.0:
+                out["laggards_vs_spy"].append({"ticker": t, "excess_pp": excess})
+        out["leaders_vs_spy"].sort(key=lambda x: x["excess_pp"], reverse=True)
+        out["laggards_vs_spy"].sort(key=lambda x: x["excess_pp"])
+
+    # --- 3. 50/200-day MA cross on intl/SPY ratios ---------------------------
+    spy_hist = histories.get("SPY") or []
+    if len(spy_hist) >= _MA_LONG_DAYS:
+        # Build a date->close map for SPY so we can align on common trading dates.
+        spy_by_date = {
+            r.get("date"): _close(r) for r in spy_hist
+            if r.get("date") and _close(r)
+        }
+        for t in _INTL_RATIO_TICKERS:
+            int_hist = histories.get(t) or []
+            if len(int_hist) < _MA_LONG_DAYS:
+                continue
+            # Build aligned ratio series, newest-first.
+            ratios: list[float] = []
+            for r in int_hist:
+                d = r.get("date")
+                ic = _close(r)
+                sc = spy_by_date.get(d)
+                if ic and sc:
+                    ratios.append(ic / sc)
+                if len(ratios) >= _MA_LONG_DAYS:
+                    break
+            if len(ratios) < _MA_LONG_DAYS:
+                continue
+            ratio_now = ratios[0]
+            ma_short = sum(ratios[:_MA_SHORT_DAYS]) / _MA_SHORT_DAYS
+            ma_long = sum(ratios[:_MA_LONG_DAYS]) / _MA_LONG_DAYS
+            out["ratio_ma_cross"][f"{t}/SPY"] = {
+                "ratio_now": round(ratio_now, 6),
+                "ma_50d": round(ma_short, 6),
+                "ma_200d": round(ma_long, 6),
+                "ma50_above_ma200": ma_short > ma_long,
+                "ratio_above_ma200": ratio_now > ma_long,
+                "signal": (
+                    "bullish_intl" if (ma_short > ma_long and ratio_now > ma_long)
+                    else "bearish_intl" if (ma_short < ma_long and ratio_now < ma_long)
+                    else "mixed"
+                ),
+            }
+
+    # --- 4. DXY 60-trading-day % change --------------------------------------
+    dxy_rows = macro_data.get("DTWEXBGS") or []
+    valid_dxy = [
+        (r.get("date"), float(r["value"])) for r in dxy_rows
+        if r.get("value") not in (None, ".", "")
+    ]
+    dxy_pct: float | None = None
+    if len(valid_dxy) >= _ROTATION_WINDOW_DAYS + 1:
+        latest_dxy = valid_dxy[0][1]
+        past_dxy = valid_dxy[_ROTATION_WINDOW_DAYS][1]
+        if past_dxy:
+            dxy_pct = round((latest_dxy / past_dxy - 1.0) * 100.0, 2)
+            out["dxy_60d_pct_change"] = dxy_pct
+            out["dxy_latest_date"] = valid_dxy[0][0]
+            if dxy_pct <= -3.0:
+                out["dxy_tailwind_for_intl"] = "tailwind"
+            elif dxy_pct >= 3.0:
+                out["dxy_tailwind_for_intl"] = "headwind"
+            else:
+                out["dxy_tailwind_for_intl"] = "neutral"
+
+    # --- 5. Policy divergence (US 2Y yield trend as a proxy) -----------------
+    dgs2_rows = macro_data.get("DGS2") or []
+    valid_dgs2 = [
+        float(r["value"]) for r in dgs2_rows
+        if r.get("value") not in (None, ".", "")
+    ]
+    us2y_bp_change: float | None = None
+    if len(valid_dgs2) >= _ROTATION_WINDOW_DAYS + 1:
+        latest_y = valid_dgs2[0]
+        past_y = valid_dgs2[_ROTATION_WINDOW_DAYS]
+        us2y_bp_change = round((latest_y - past_y) * 100.0, 1)  # bp
+    fed_funds = next(
+        (float(r["value"]) for r in (macro_data.get("DFF") or [])
+         if r.get("value") not in (None, ".", "")),
+        None,
+    )
+    ecb_rate = next(
+        (float(r["value"]) for r in (macro_data.get("ECBDFR") or [])
+         if r.get("value") not in (None, ".", "")),
+        None,
+    )
+    out["policy"] = {
+        "fed_funds_latest": fed_funds,
+        "ecb_deposit_latest": ecb_rate,
+        "us_2y_60d_bp_change": us2y_bp_change,
+        # Falling US 2Y => market pricing Fed easing => USD weakness => intl tailwind.
+        "stance_for_intl": (
+            "supportive" if us2y_bp_change is not None and us2y_bp_change <= -25
+            else "adverse" if us2y_bp_change is not None and us2y_bp_change >= 25
+            else "neutral" if us2y_bp_change is not None
+            else "unknown"
+        ),
+    }
+
+    # --- 6. Legacy boolean flags (kept for backward compat) ------------------
+    rs_flag = len(out["leaders_vs_spy"]) > 0
+    dxy_tail = out["dxy_tailwind_for_intl"] == "tailwind"
+    dxy_head = out["dxy_tailwind_for_intl"] == "headwind"
+    out["rotation_flags"] = {
+        "intl_rs_leader": rs_flag,
+        "dxy_tailwind": dxy_tail,
+        "dxy_headwind": dxy_head,
+        "rotate_to_international": sum([rs_flag, dxy_tail]) >= 2,
+        "rotate_back_to_us": sum([(not rs_flag and bool(per_ticker_ret)), dxy_head]) >= 2,
+    }
+
+    # --- 7. Composite Rotation Score 0-10 ------------------------------------
+    # Weights: dollar 30 / relative strength 30 / policy 20 / valuation 20.
+    # Each component is scored 0-10 then weight-averaged. Missing components
+    # default to neutral=5 and are flagged in 'components_missing'.
+    components: dict[str, dict] = {}
+    missing: list[str] = []
+
+    # Dollar momentum (lower DXY = higher score for intl).
+    if dxy_pct is not None:
+        if dxy_pct <= -8: d_score = 10.0
+        elif dxy_pct <= -5: d_score = 8.5
+        elif dxy_pct <= -3: d_score = 7.0
+        elif dxy_pct <= -1: d_score = 6.0
+        elif dxy_pct <  1: d_score = 5.0
+        elif dxy_pct <  3: d_score = 4.0
+        elif dxy_pct <  5: d_score = 3.0
+        elif dxy_pct <  8: d_score = 1.5
+        else: d_score = 0.0
+    else:
+        d_score = 5.0
+        missing.append("dollar_momentum")
+    components["dollar_momentum"] = {"score": d_score, "weight": 30, "input_dxy_60d_pct": dxy_pct}
+
+    # Relative strength: average excess vs SPY across intl tickers in universe.
+    intl_excess = [
+        info.get("excess_vs_spy_pp") for tk, info in out["tickers"].items()
+        if tk != "SPY" and info.get("excess_vs_spy_pp") is not None
+    ]
+    if intl_excess:
+        avg_excess = sum(intl_excess) / len(intl_excess)
+        # +10pp avg -> 10, 0pp -> 5, -10pp -> 0; clamp.
+        rs_score = max(0.0, min(10.0, 5.0 + avg_excess * 0.5))
+        rs_input = round(avg_excess, 2)
+    else:
+        rs_score = 5.0
+        rs_input = None
+        missing.append("relative_strength")
+    components["relative_strength"] = {"score": round(rs_score, 2), "weight": 30, "input_avg_excess_pp": rs_input}
+
+    # Policy divergence: based on US 2Y bp change.
+    if us2y_bp_change is not None:
+        # Falling >=50bp -> 10; +/-25bp band -> 5; rising >=50bp -> 0.
+        p_score = max(0.0, min(10.0, 5.0 - us2y_bp_change / 10.0))
+    else:
+        p_score = 5.0
+        missing.append("policy_divergence")
+    components["policy_divergence"] = {"score": round(p_score, 2), "weight": 20, "input_us_2y_60d_bp": us2y_bp_change}
+
+    # Valuation gap: not computable from current feeds (ETF P/E aggregation absent).
+    v_score = 5.0
+    missing.append("valuation_gap")
+    components["valuation_gap"] = {"score": v_score, "weight": 20, "input": None, "note": "ETF forward-P/E aggregation not available on current data tier"}
+
+    weighted = sum(c["score"] * c["weight"] for c in components.values()) / 100.0
+    if weighted <= 3:
+        category = "us_leadership_intact"
+    elif weighted <= 6:
+        category = "transition_window"
+    else:
+        category = "rotation_underway"
+
+    out["rotation_score"] = {
+        "composite": round(weighted, 1),
+        "category": category,
+        "components": components,
+        "components_missing": missing,
+        "scoring_rubric": "0-3 US leadership intact; 4-6 transition window; 7-10 rotation underway",
+    }
+
+    return out
 
 
 def _write_sentiment_history(today: str, snapshot: dict) -> None:
