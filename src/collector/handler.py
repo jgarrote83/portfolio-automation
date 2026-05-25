@@ -108,6 +108,27 @@ def run() -> None:
             ]
         lobbying      = quiver.get_live_lobbying()
         gov_contracts = quiver.get_live_gov_contracts()
+        # Quiver returns ~20K rows of all-market activity. Filter to portfolio
+        # tickers + watchlist (and last 90 days) so the snapshot stays small
+        # enough to fit Claude's context window. Without this, snapshot
+        # balloons to ~20MB (12MB lobbying + 4MB gov_contracts).
+        _interest = set(tickers) | set(_ETF_WATCHLIST)
+        _cutoff_90d = (date.today() - timedelta(days=90)).isoformat()
+
+        def _row_ticker(r: dict) -> str:
+            return (r.get("Ticker") or r.get("ticker") or "").upper()
+
+        def _row_date(r: dict) -> str:
+            return r.get("Date") or r.get("date") or r.get("action_date") or ""
+
+        lobbying = [
+            r for r in lobbying
+            if _row_ticker(r) in _interest and _row_date(r) >= _cutoff_90d
+        ]
+        gov_contracts = [
+            r for r in gov_contracts
+            if _row_ticker(r) in _interest and _row_date(r) >= _cutoff_90d
+        ]
     else:
         logger.warning("Quiver key missing — falling back to FMP senate/house latest")
         congressional = fmp.get_congressional_trading(from_30d)
