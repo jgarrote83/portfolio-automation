@@ -18,11 +18,15 @@ param tenantId string
 
 // SWA Free — managed Functions in /api are included.
 // Note: linked-backend Function Apps require Standard tier; we use managed API instead.
-// SKU defaults to Free when omitted; the SKU shape under API 2024-04-01 rejects an
-// explicit {name:'Free', tier:'Free'} block (SkuCode 'Free' is invalid).
-resource swa 'Microsoft.Web/staticSites@2024-04-01' = {
+// Use API 2022-03-01: under 2024-04-01 the ARM resource provider rejects both
+// {name:'Free',tier:'Free'} and an omitted sku with SkuCode 'Free' is invalid.
+resource swa 'Microsoft.Web/staticSites@2022-03-01' = {
   name: staticWebAppName
   location: location
+  sku: {
+    name: 'Free'
+    tier: 'Free'
+  }
   properties: {
     // No repo wired here — deployment is push-based from GitHub Actions.
     allowConfigFileUpdates: true
@@ -35,7 +39,7 @@ resource swa 'Microsoft.Web/staticSites@2024-04-01' = {
 }
 
 // App settings — exposed to managed API as env vars
-resource swaSettings 'Microsoft.Web/staticSites/config@2024-04-01' = {
+resource swaSettings 'Microsoft.Web/staticSites/config@2022-03-01' = {
   parent: swa
   name: 'appsettings'
   properties: {
