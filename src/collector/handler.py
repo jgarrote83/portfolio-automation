@@ -122,11 +122,19 @@ def run() -> None:
 
     fred = FREDClient(secrets["FredApiKey"])
     macro_data = fred.get_all_series(list(macro_meta.keys()))
-    # Series that need deeper history for the rotation pre-compute
+    # Series that need deeper history for the rotation + bond-signals pre-compute
     # (get_all_series only fetches the latest 5 observations per series).
     macro_data["DTWEXBGS"] = fred.get_series_latest("DTWEXBGS", limit=90)
     macro_data["DGS2"]     = fred.get_series_latest("DGS2",     limit=90)
     macro_data["DFF"]      = fred.get_series_latest("DFF",      limit=90)
+    # Bond-signals pre-compute needs ~90d for percentiles + 4w deltas.
+    for _bond_sid in (
+        "DGS10", "DGS30", "DGS3MO", "T10Y2Y", "T10Y3M",
+        "BAMLH0A0HYM2", "BAMLC0A0CM",
+        "DFII10", "T10YIE", "T5YIE", "T5YIFR",
+        "MORTGAGE30US",
+    ):
+        macro_data[_bond_sid] = fred.get_series_latest(_bond_sid, limit=90)
     logger.info("FRED: %d series collected", sum(1 for v in macro_data.values() if v))
 
     # --- EOD prices (FMP batch-quote, single call) --------------------------
@@ -157,6 +165,15 @@ def run() -> None:
                 len(market_news), sum(len(v) for v in company_news.values()))
 
     # --- Market shock detector (short-horizon moves + news keyword scan) ----
+    bond_signals = _build_bond_signals(macro_data)
+    logger.info(
+        "Bond signals: composite=%s label=%s hy_oas=%s recession_prob=%s",
+        bond_signals.get("scorecard", {}).get("composite"),
+        bond_signals.get("scorecard", {}).get("label"),
+        bond_signals.get("credit", {}).get("hy_oas", {}).get("latest"),
+        bond_signals.get("yield_curve", {}).get("recession_prob_12m"),
+    )
+
     market_shock = _build_market_shock(
         fmp=fmp,
         macro_data=macro_data,
@@ -164,6 +181,7 @@ def run() -> None:
         forex_news=forex_news,
         stock_news=stock_news,
         company_news=company_news,
+        bond_signals=bond_signals,
     )
     logger.info(
         "Market shock: level=%s, spy_1d_z=%s, news_hits=%s",
@@ -196,6 +214,7 @@ def run() -> None:
         },
         "prices": prices,
         "regional_rotation": regional_rotation,
+        "bond_signals": bond_signals,
         "market_shock": market_shock,
         "news": {
             "market": market_news[:50],
@@ -563,6 +582,299 @@ def _build_regional_rotation(fmp: FMPClient, macro_data: dict) -> dict:
     return out
 
 
+def _build_bond_signals(macro_data: dict) -> dict:
+    """Pre-compute a four-signal bond market scorecard for the analyzer.
+
+    Inputs come from the FRED ``macro_data`` block (deep-history fetched in
+    ``run()``). Output sections:
+
+      yield_curve:   3m10y / 2s10s / 5s30s spreads + 5d deltas, curve regime
+                     label, Estrella-Mishkin 12-month recession probability
+      credit:        HY OAS, IG OAS — levels, 5d/20d deltas, 90d percentile,
+                     ``credit_stress`` flag (HY OAS +50bp 4w OR >=90th pct OR
+                     IG OAS +25bp 4w)
+      breakevens:    5y, 10y, 5y5y — levels + 20d deltas
+      systemic:      MBS-Treasury spread proxy (MORTGAGE30US - DGS10) + 20d
+                     delta, real 10Y yield (DFII10) level
+
+    Composite scorecard: each of the four signals scored -2..+2 (negative =
+    bearish risk assets); composite -8..+8 with label
+    ``risk_on`` / ``neutral`` / ``defensive`` / ``acute_defensive``.
+
+    All deltas use trading-day approximations (1d, ~5d, ~20d index offsets in
+    the descending-order FRED responses). Percentile is computed over the
+    available 90d window. None propagates through cleanly when data missing.
+    """
+    out: dict = {
+        "yield_curve": {},
+        "credit": {},
+        "breakevens": {},
+        "systemic": {},
+        "scorecard": {},
+        "caveat": (
+            "2025-2026 bond signals may be partially distorted by QT and "
+            "Treasury issuance patterns. Require confluence (>=3 of 4 signals "
+            "agreeing) before acting on the composite alone."
+        ),
+    }
+
+    def _vals(sid: str) -> list[float]:
+        """Latest-first list of floats, skipping missing observations."""
+        rows = macro_data.get(sid) or []
+        out_vals: list[float] = []
+        for r in rows:
+            v = r.get("value")
+            if v in (None, ".", ""):
+                continue
+            try:
+                out_vals.append(float(v))
+            except (TypeError, ValueError):
+                continue
+        return out_vals
+
+    def _delta_bp(vals: list[float], n: int) -> float | None:
+        """Change in basis points over n trading days."""
+        if len(vals) > n:
+            return round((vals[0] - vals[n]) * 100.0, 1)
+        return None
+
+    def _percentile(vals: list[float], v: float | None) -> int | None:
+        if v is None or not vals:
+            return None
+        below = sum(1 for x in vals if x <= v)
+        return int(round(100.0 * below / len(vals)))
+
+    def _latest(vals: list[float]) -> float | None:
+        return round(vals[0], 4) if vals else None
+
+    # --- 1. Yield curve ----------------------------------------------------
+    dgs2  = _vals("DGS2")
+    dgs10 = _vals("DGS10")
+    dgs30 = _vals("DGS30")
+    dgs3m = _vals("DGS3MO")
+    t10y2y = _vals("T10Y2Y")
+    t10y3m = _vals("T10Y3M")
+
+    # 5s30s spread we compute ourselves (FRED doesn't ship it as a series)
+    # using DGS5 isn't in our set; approximate "belly-to-long" via 10s30s.
+    spread_10s30s = None
+    if dgs10 and dgs30:
+        spread_10s30s = round(dgs30[0] - dgs10[0], 3)
+
+    curve_2s10s_latest = _latest(t10y2y) or (
+        round(dgs10[0] - dgs2[0], 3) if dgs10 and dgs2 else None
+    )
+    curve_3m10y_latest = _latest(t10y3m) or (
+        round(dgs10[0] - dgs3m[0], 3) if dgs10 and dgs3m else None
+    )
+
+    # Curve regime (bull/bear * steepen/flatten) from 5d deltas in 2Y and 10Y
+    regime = "unknown"
+    d10_5d = _delta_bp(dgs10, 5)
+    d2_5d  = _delta_bp(dgs2, 5)
+    if d10_5d is not None and d2_5d is not None:
+        # Steepening = 2s10s widened; Flattening = 2s10s narrowed
+        # Bull = yields falling on average; Bear = yields rising
+        avg = (d10_5d + d2_5d) / 2.0
+        steepening = (d10_5d - d2_5d) > 5.0   # 10Y rose more (or fell less) than 2Y
+        flattening = (d10_5d - d2_5d) < -5.0
+        if steepening and avg < -5.0:
+            regime = "bull_steepening"
+        elif steepening and avg > 5.0:
+            regime = "bear_steepening"
+        elif flattening and avg < -5.0:
+            regime = "bull_flattening"
+        elif flattening and avg > 5.0:
+            regime = "bear_flattening"
+        else:
+            regime = "stable"
+
+    # Estrella-Mishkin probit: P(recession 12m) = Phi(-0.5333 - 0.6629 * spread3m10y)
+    recession_prob = None
+    if curve_3m10y_latest is not None:
+        import math
+        z = -0.5333 - 0.6629 * curve_3m10y_latest
+        # Normal CDF via erf
+        recession_prob = round(0.5 * (1.0 + math.erf(z / math.sqrt(2.0))) * 100.0, 1)
+
+    out["yield_curve"] = {
+        "dgs3m": _latest(dgs3m),
+        "dgs2":  _latest(dgs2),
+        "dgs10": _latest(dgs10),
+        "dgs30": _latest(dgs30),
+        "spread_2s10s": curve_2s10s_latest,
+        "spread_2s10s_delta_5d_bp": _delta_bp(t10y2y, 5) if t10y2y else None,
+        "spread_3m10y": curve_3m10y_latest,
+        "spread_3m10y_delta_5d_bp": _delta_bp(t10y3m, 5) if t10y3m else None,
+        "spread_10s30s": spread_10s30s,
+        "dgs10_delta_5d_bp": d10_5d,
+        "dgs2_delta_5d_bp":  d2_5d,
+        "regime": regime,
+        "recession_prob_12m": recession_prob,
+        "regime_notes": (
+            "bull_steepening: Fed-cuts-into-weakness; bear_steepening: "
+            "inflation/fiscal concern; bull_flattening: growth fading; "
+            "bear_flattening: Fed-hike risk"
+        ),
+    }
+
+    # --- 2. Credit spreads -------------------------------------------------
+    hy = _vals("BAMLH0A0HYM2")
+    ig = _vals("BAMLC0A0CM")
+
+    hy_latest = _latest(hy)
+    ig_latest = _latest(ig)
+    hy_d20 = _delta_bp(hy, 20)
+    ig_d20 = _delta_bp(ig, 20)
+    hy_pct = _percentile(hy, hy_latest)
+    ig_pct = _percentile(ig, ig_latest)
+
+    credit_reasons: list[str] = []
+    if hy_d20 is not None and hy_d20 >= 50.0:
+        credit_reasons.append(f"HY OAS +{hy_d20}bp over 4w (>=+50bp)")
+    if hy_pct is not None and hy_pct >= 90:
+        credit_reasons.append(f"HY OAS at {hy_pct}th pct of 90d (>=90th)")
+    if ig_d20 is not None and ig_d20 >= 25.0:
+        credit_reasons.append(f"IG OAS +{ig_d20}bp over 4w (>=+25bp)")
+
+    out["credit"] = {
+        "hy_oas": {
+            "latest": hy_latest,
+            "delta_5d_bp": _delta_bp(hy, 5),
+            "delta_20d_bp": hy_d20,
+            "pct_rank_90d": hy_pct,
+        },
+        "ig_oas": {
+            "latest": ig_latest,
+            "delta_5d_bp": _delta_bp(ig, 5),
+            "delta_20d_bp": ig_d20,
+            "pct_rank_90d": ig_pct,
+        },
+        "credit_stress": {
+            "flag": bool(credit_reasons),
+            "reasons": credit_reasons,
+        },
+        "hy_threshold_notes": (
+            "<3.5 complacency; 3.5-5.0 normal; 5.0-7.0 stress; "
+            "7.0-10.0 crisis; >10.0 panic (units: %)"
+        ),
+    }
+
+    # --- 3. Breakevens -----------------------------------------------------
+    t5y   = _vals("T5YIE")
+    t10y  = _vals("T10YIE")
+    t5y5y = _vals("T5YIFR")
+
+    out["breakevens"] = {
+        "be_5y":  {"latest": _latest(t5y),   "delta_20d_bp": _delta_bp(t5y, 20)},
+        "be_10y": {"latest": _latest(t10y),  "delta_20d_bp": _delta_bp(t10y, 20)},
+        "be_5y5y": {"latest": _latest(t5y5y), "delta_20d_bp": _delta_bp(t5y5y, 20)},
+    }
+
+    # --- 4. Systemic stress proxies ----------------------------------------
+    mortg = _vals("MORTGAGE30US")
+    real10 = _vals("DFII10")
+
+    mbs_spread_latest = None
+    mbs_spread_d20 = None
+    if mortg and dgs10:
+        mbs_spread_latest = round(mortg[0] - dgs10[0], 3)
+        if len(mortg) > 4 and len(dgs10) > 20:
+            # mortgage is weekly so ~4 obs ≈ 4 weeks; pair with 20d DGS10
+            prior = mortg[4] - dgs10[20]
+            mbs_spread_d20 = round((mbs_spread_latest - prior) * 100.0, 1)
+
+    out["systemic"] = {
+        "mbs_spread_proxy": mbs_spread_latest,
+        "mbs_spread_delta_20d_bp": mbs_spread_d20,
+        "real_yield_10y": _latest(real10),
+        "real_yield_10y_delta_20d_bp": _delta_bp(real10, 20),
+        "mbs_notes": "MORTGAGE30US - DGS10; historical avg 50-80bp, >130bp = stretched",
+    }
+
+    # --- 5. Four-signal scorecard -----------------------------------------
+    def _score_curve() -> int:
+        if curve_3m10y_latest is None:
+            return 0
+        # Recession warning territory
+        if curve_3m10y_latest < 0 and curve_2s10s_latest is not None and curve_2s10s_latest < 0.20:
+            return -2
+        if curve_3m10y_latest < 0:
+            return -1
+        if curve_2s10s_latest is not None and curve_2s10s_latest > 1.0 and regime in ("bull_steepening",):
+            return 2
+        if curve_2s10s_latest is not None and curve_2s10s_latest > 0.5:
+            return 1
+        return 0
+
+    def _score_credit() -> int:
+        if hy_latest is None:
+            return 0
+        # HY OAS thresholds in %: <3.5 complacency, 3.5-5 normal, >5 stress
+        if credit_reasons:
+            return -2 if hy_d20 is not None and hy_d20 >= 75.0 else -1
+        if hy_latest >= 7.0:
+            return -2
+        if hy_latest >= 5.0:
+            return -1
+        if hy_latest < 3.5 and hy_d20 is not None and hy_d20 > 10.0:
+            return -1  # complacency + starting to widen
+        if hy_latest < 3.5:
+            return 0   # tight & stable -- no juice, but no warning yet
+        return 1       # normal range, stable
+
+    def _score_breakevens() -> int:
+        b = _latest(t5y5y) or _latest(t10y)
+        d = _delta_bp(t5y5y, 20) if t5y5y else _delta_bp(t10y, 20)
+        if b is None or d is None:
+            return 0
+        if abs(d) >= 30.0:
+            return -2  # fast move in either direction = regime shift risk
+        if abs(d) >= 15.0:
+            return -1
+        if 2.0 <= b <= 2.6:
+            return 1
+        return 0
+
+    def _score_systemic() -> int:
+        if mbs_spread_latest is None:
+            return 0
+        if mbs_spread_d20 is not None and mbs_spread_d20 >= 30.0:
+            return -2
+        if mbs_spread_latest >= 1.5:
+            return -1
+        if mbs_spread_latest <= 0.8:
+            return 1
+        return 0
+
+    s_curve  = _score_curve()
+    s_credit = _score_credit()
+    s_be     = _score_breakevens()
+    s_sys    = _score_systemic()
+    composite = s_curve + s_credit + s_be + s_sys
+
+    if composite >= 4:
+        label = "risk_on"
+    elif composite >= 0:
+        label = "neutral"
+    elif composite >= -4:
+        label = "defensive"
+    else:
+        label = "acute_defensive"
+
+    out["scorecard"] = {
+        "yield_curve":  s_curve,
+        "credit":       s_credit,
+        "breakevens":   s_be,
+        "systemic":     s_sys,
+        "composite":    composite,
+        "label":        label,
+        "scale":        "-8..+8; <=-5 acute_defensive, -4..-1 defensive, 0..+3 neutral, >=+4 risk_on",
+    }
+
+    return out
+
+
 def _build_market_shock(
     fmp: FMPClient,
     macro_data: dict,
@@ -570,6 +882,7 @@ def _build_market_shock(
     forex_news: list,
     stock_news: list,
     company_news: dict,
+    bond_signals: dict | None = None,
 ) -> dict:
     """Detect short-horizon market shocks so the analyzer can override the 60d
     rotation windows and lift tilt limits when a structural event hits.
@@ -746,6 +1059,15 @@ def _build_market_shock(
     elif total_hits >= 5:
         triggers.append(f"News keyword hits {total_hits} (>=5, watch)")
 
+    # --- 4b. Credit-stress signal from bond_signals ------------------------
+    credit_stress = False
+    if bond_signals:
+        cs = (bond_signals.get("credit") or {}).get("credit_stress") or {}
+        if cs.get("flag"):
+            credit_stress = True
+            for reason in cs.get("reasons", []):
+                triggers.append(f"Credit stress: {reason}")
+
     # --- 5. Composite shock level -----------------------------------------
     level = 0
     # Acute: extreme tape OR (elevated tape + heavy news cluster)
@@ -763,8 +1085,17 @@ def _build_market_shock(
         (spy_1d_z is not None and abs(spy_1d_z) >= 1.5)
         or total_hits >= 5
         or (vix_1d_pct is not None and vix_1d_pct >= 15.0)
+        or credit_stress
     ):
         level = 1
+
+    # Credit stress paired with any equity-side signal escalates to L2.
+    if credit_stress and level == 1 and (
+        (spy_1d_z is not None and abs(spy_1d_z) >= 1.5)
+        or total_hits >= 5
+        or (vix_1d_pct is not None and vix_1d_pct >= 15.0)
+    ):
+        level = 2
 
     out["shock_level"] = level
     out["shock_label"] = {0: "none", 1: "watch", 2: "elevated", 3: "acute"}[level]

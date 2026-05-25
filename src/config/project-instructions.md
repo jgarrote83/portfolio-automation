@@ -210,6 +210,51 @@ can override the slow framework when an event truly hits the tape.
 - Echo the `shock_level`, the specific triggers, and the news examples you relied on in your rationale so the human reviewer can audit the override.
 - If you invoke an override, set `regime_override` in the trades JSON (see Output format). If you do NOT override, set it to `"none"`.
 
+### Bond market read (four-signal scorecard, read `bond_signals`)
+
+The equity market is a voting machine; the bond market is a weighing machine.
+Bond investors hate losing capital more than they crave gains, so they price
+reality faster. Treat `bond_signals` as cross-asset confirmation — when bonds
+and equities disagree, **bonds usually win on a 4–8 week horizon**.
+
+**Fields in `bond_signals`:**
+
+- `yield_curve` — 3m10y / 2s10s / 10s30s spreads (units = %, decimal), 5d deltas in bp, `regime` label (`bull_steepening` / `bear_steepening` / `bull_flattening` / `bear_flattening` / `stable`), `recession_prob_12m` (Estrella–Mishkin probit on 3m10y, %).
+- `credit` — HY OAS and IG OAS levels (%), 5d/20d deltas in bp, 90d percentile rank, and `credit_stress.flag` + `reasons` list.
+- `breakevens` — 5y, 10y, 5y5y forward inflation expectations + 20d deltas in bp.
+- `systemic` — MBS spread proxy (30Y mortgage minus 10Y Treasury) + 20d delta, real 10Y yield (DFII10) + 20d delta.
+- `scorecard` — each signal scored -2..+2, composite -8..+8 with label `risk_on` / `neutral` / `defensive` / `acute_defensive`.
+
+**How to read each signal:**
+
+| Signal | Bullish (+1/+2) | Bearish (-1/-2) |
+| --- | --- | --- |
+| Yield curve | Steep & bull-steepening, recession_prob <10% | 3m10y negative (recession warning), 2s10s disinverting from negative |
+| Credit | HY OAS in 3.5–5.0% range, stable or tightening | `credit_stress.flag` true, HY OAS >=5%, or at >=90th pct of 90d |
+| Breakevens | 5y5y in 2.0–2.6% band, stable | abs(20d delta) >= 30bp in either direction (regime shift) |
+| Systemic | MBS spread <=0.8%, real_yield_10y <2% | MBS spread >=1.5% or +30bp 4w, real_yield_10y >=2.5% |
+
+**Hard trigger rules (mandatory portfolio actions when fired):**
+
+- `credit.credit_stress.flag = true` — trim highest-beta credit positions (HY-heavy ETFs, preferreds); rotate toward IG and Treasuries. If you hold AGGH/PFF-style positions, propose at least a partial trim.
+- `yield_curve.spread_2s10s` flips from negative to positive in the last 5d (disinverting) — recession is historically imminent (3–6 months). Propose at least one defensive trade and consider adding long-duration Treasury (TLT/VGLT) up to 5–10%.
+- `yield_curve.spread_3m10y < 0` and stays negative for 20+ days (deep into series) — late-cycle confirmed; increase quality bias.
+- `breakevens.be_5y5y.delta_20d_bp >= 30` — inflation expectations breaking higher; add SCHP / GLD / commodity exposure, trim long-duration nominal bonds.
+- `breakevens.be_5y5y.delta_20d_bp <= -30` — deflation/recession fear; add TLT, trim TIPS.
+- `systemic.mbs_spread_delta_20d_bp >= 30` — systemic stress emerging; move to quality across the board, raise cash.
+- `systemic.real_yield_10y >= 2.5` — explicit headwind for GLD, long-duration tech, EM equity; cite this when proposing trims of those names.
+
+**Composite scorecard reading:**
+
+- `scorecard.label = risk_on` — bonds agree with bullish equity tilts; permit higher conviction trades within the quadrant.
+- `scorecard.label = neutral` — no bond-side veto; use 60d framework as usual.
+- `scorecard.label = defensive` — if your equity-side call is bullish, soften it (smaller tilts, more SGOV).
+- `scorecard.label = acute_defensive` — must propose at least one defensive trade even if quadrant is Q1/Q2.
+
+**Confluence requirement:** the composite scorecard alone is NOT sufficient to override the quadrant. 2025–2026 bond signals are partially distorted by QT and Treasury issuance (per `bond_signals.caveat`). Require **at least 3 of the 4 sub-signals to agree** (all <=0 for defensive, all >=0 for risk-on) before letting the scorecard drive a tilt change. When signals diverge, cite the divergence in the rationale and defer to the quadrant.
+
+**Audit requirement:** echo `bond_scorecard_reading` (the composite integer) and `bond_signal_action` (the label) in the trades JSON. If any hard trigger fired, name it explicitly in the rationale of the affected trade.
+
 ### Calculated Risk Score (0–10)
 
 A single number describing your confidence in the quadrant call and the next
@@ -241,6 +286,7 @@ A single JSON snapshot for one trading day containing:
 - `lobbying` / `government_contracts` — Quiver alt-data (may be empty)
 - `etf_holdings` — IDMO / AIA / IDVO composition (may be empty on free tier)
 - `regional_rotation` — pre-computed US-vs-international rotation block (DXY, relative strength, MA cross, policy divergence, composite Rotation Score 0-10)
+- `bond_signals` — four-signal bond market scorecard (yield curve regime + recession probability, HY/IG credit OAS + credit_stress flag, breakeven inflation, MBS proxy + real yields), composite -8..+8 with label
 - `market_shock` — short-horizon shock detector: 1d/5d price moves (SPY/DXY/VIX) with z-scores + news keyword scan, composite `shock_level` 0-3 with `triggers` and `news_examples`
 - `recent_reports` — up to 5 of your previous daily reports for continuity
 
@@ -295,6 +341,8 @@ A single JSON object — no prose, no code fences, no markdown:
   "rotation_score_reading": 0.0,
   "shock_level_reading": 0,
   "regime_override": "none" | "window_shortened" | "tilt_lifted" | "acute_de_risk",
+  "bond_scorecard_reading": 0,
+  "bond_signal_action": "risk_on" | "neutral" | "defensive" | "acute_defensive",
   "trades": [
     {
       "id": "T-YYYYMMDD-001",
@@ -317,11 +365,13 @@ A single JSON object — no prose, no code fences, no markdown:
 
 Rules for the JSON block:
 
-- If you have **no trades** to recommend, return `{"quadrant_current": ..., "quadrant_projected_6m": ..., "risk_score": ..., "international_tilt": ..., "rotation_score_reading": ..., "shock_level_reading": ..., "regime_override": ..., "trades": []}`.
+- If you have **no trades** to recommend, return `{"quadrant_current": ..., "quadrant_projected_6m": ..., "risk_score": ..., "international_tilt": ..., "rotation_score_reading": ..., "shock_level_reading": ..., "regime_override": ..., "bond_scorecard_reading": ..., "bond_signal_action": ..., "trades": []}`.
 - `international_tilt` must reflect the *direction of your next move*: `overweight` if you are tilting toward international this report, `underweight` if tilting away, `neutral` otherwise. Must be consistent with the Rotation Score reading in the snapshot.
 - `rotation_score_reading` is the composite score you read from `regional_rotation.rotation_score.composite` (echo it for traceability).
 - `shock_level_reading` is the integer 0–3 you read from `market_shock.shock_level` (echo it for traceability).
 - `regime_override` MUST be `"none"` when `shock_level_reading <= 1`. At level 2 use `"window_shortened"` if you shortened the RS horizon to 20d, `"tilt_lifted"` if you raised the tilt cap, or `"none"` if you took no override action. At level 3 use `"acute_de_risk"` whenever you propose defensive trades that the 60d framework alone would not justify.
+- `bond_scorecard_reading` is the integer composite from `bond_signals.scorecard.composite` (-8..+8, echo it).
+- `bond_signal_action` is the label from `bond_signals.scorecard.label`. If a hard bond trigger fired (credit_stress, 2s10s disinverting, 5y5y +/-30bp 4w, MBS +30bp 4w, real_10Y >=2.5%), the rationale of at least one trade MUST name the trigger.
 - `id` must be unique per trade and embed today's date.
 - `layer` must be `"core"` for any of the 24 core tickers; `"flex"` for everything else.
 - `flex_source` is **required and non-null** when `layer == "flex"` and the trade is

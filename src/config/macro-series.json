@@ -17,5 +17,15 @@
   "ECBDFR":           { "name": "ECB Deposit Facility Rate",             "unit": "%",    "frequency": "irregular"},
   "IRLTLT01JPM156N":  { "name": "Japan Long-Term Government Bond Yield", "unit": "%",    "frequency": "monthly"  },
   "CHPMINDXM":        { "name": "China Manufacturing PMI (NBS)",         "unit": "index","frequency": "monthly"  },
-  "DTWEXBGS":         { "name": "Broad Trade-Weighted USD Index",        "unit": "index","frequency": "daily"    }
+  "DTWEXBGS":         { "name": "Broad Trade-Weighted USD Index",        "unit": "index","frequency": "daily"    },
+  "T10Y3M":           { "name": "10Y-3M Treasury Yield Spread",          "unit": "%",    "frequency": "daily"    },
+  "DGS3MO":           { "name": "3-Month Treasury Yield",                "unit": "%",    "frequency": "daily"    },
+  "DGS30":            { "name": "30-Year Treasury Yield",                "unit": "%",    "frequency": "daily"    },
+  "BAMLH0A0HYM2":     { "name": "ICE BofA US High Yield OAS",            "unit": "%",    "frequency": "daily"    },
+  "BAMLC0A0CM":       { "name": "ICE BofA US Corporate IG OAS",          "unit": "%",    "frequency": "daily"    },
+  "DFII10":           { "name": "10-Year TIPS Real Yield",               "unit": "%",    "frequency": "daily"    },
+  "T10YIE":           { "name": "10-Year Breakeven Inflation",           "unit": "%",    "frequency": "daily"    },
+  "T5YIE":            { "name": "5-Year Breakeven Inflation",            "unit": "%",    "frequency": "daily"    },
+  "T5YIFR":           { "name": "5Y5Y Forward Breakeven Inflation",      "unit": "%",    "frequency": "daily"    },
+  "MORTGAGE30US":     { "name": "30-Year Fixed Mortgage Rate",           "unit": "%",    "frequency": "weekly"   }
 }
