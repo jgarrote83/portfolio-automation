@@ -4,9 +4,6 @@ param location string = 'eastus'
 @description('Environment tag appended to resource names')
 param environment string = 'prod'
 
-@description('Entra ID tenant for SWA Easy Auth (work/school login)')
-param tenantId string = subscription().tenantId
-
 @description('Region for the Static Web App (Free SKU is global; metadata sits here). Use eastus2 since SWA Free is not in all regions.')
 param swaLocation string = 'eastus2'
 
@@ -81,6 +78,9 @@ module kvRoles 'modules/keyvault-roles.bicep' = {
 
 
 // ── Static Web App (single pane of glass: report + trade approval) ────────
+// Free tier: no managed identity (SWA Free rejects MI assignment). Secrets
+// (STORAGE_CONNECTION_STRING, FUNC_MASTER_KEY, AAD_CLIENT_ID/SECRET) are
+// set as plain app settings via az CLI post-deploy.
 module swa 'modules/staticwebapp.bicep' = {
   name: 'swa'
   params: {
@@ -88,20 +88,7 @@ module swa 'modules/staticwebapp.bicep' = {
     staticWebAppName: staticWebAppName
     appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
     storageAccountName: storageAccountName
-    keyVaultName: keyVaultName
-    tenantId: tenantId
   }
-}
-
-// ── Role assignments: SWA MI → Storage + Key Vault ────────────────────────
-module swaRoles 'modules/staticwebapp-roles.bicep' = {
-  name: 'swaRoles'
-  params: {
-    storageAccountName: storageAccountName
-    keyVaultName: keyVaultName
-    principalId: swa.outputs.principalId
-  }
-  dependsOn: [storage, keyvault]
 }
 
 // ── Outputs ───────────────────────────────────────────────────────────────────
