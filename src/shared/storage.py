@@ -125,3 +125,50 @@ def write_trades(date_str: str, trades: dict | list) -> None:
     data = json.dumps(trades, default=str, indent=2)
     blob.upload_blob(data, overwrite=True)
     logger.info("Trades written: daily-trades/%s.json (%d bytes)", date_str, len(data))
+
+
+def _read_json_blob(container: str, name: str) -> dict | list | None:
+    """Best-effort blob read; returns None if blob is missing."""
+    client = _blob_client()
+    blob = client.get_blob_client(container, name)
+    try:
+        raw = blob.download_blob().readall()
+    except Exception as e:
+        logger.info("Blob %s/%s not found: %s", container, name, e)
+        return None
+    if not raw:
+        return None
+    return json.loads(raw)
+
+
+def read_trades(date_str: str) -> dict | list | None:
+    return _read_json_blob("daily-trades", f"{date_str}.json")
+
+
+def read_approvals(date_str: str) -> dict | None:
+    """Load approvals/{date}.json written by the SWA managed API."""
+    data = _read_json_blob("approvals", f"{date_str}.json")
+    if data is None or isinstance(data, list):
+        return data if isinstance(data, dict) else None
+    return data
+
+
+def read_executions(date_str: str) -> dict | None:
+    data = _read_json_blob("daily-executions", f"{date_str}.json")
+    return data if isinstance(data, dict) else None
+
+
+def write_executions(date_str: str, executions: dict) -> None:
+    client = _blob_client()
+    container = client.get_container_client("daily-executions")
+    try:
+        container.create_container()
+    except Exception:
+        pass
+    blob = client.get_blob_client("daily-executions", f"{date_str}.json")
+    data = json.dumps(executions, default=str, indent=2)
+    blob.upload_blob(data, overwrite=True)
+    logger.info(
+        "Executions written: daily-executions/%s.json (%d bytes)",
+        date_str, len(data),
+    )

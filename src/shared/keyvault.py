@@ -10,7 +10,6 @@ _SECRET_NAMES = [
     "AlpacaApiSecret",
     "FmpApiKey",
     "FredApiKey",
-    "MassiveApiKey",
     "FinnhubApiKey",
     "FoundryApiKey",
     "QuiverApiKey",

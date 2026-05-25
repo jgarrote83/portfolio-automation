@@ -11,7 +11,6 @@ Azure-native automated portfolio analysis and paper trade execution pipeline. Si
 - **FRED** for macro indicators (17 series collected; `CHPMINDXM` deprecated — to revisit) — free, no practical limit
 - **Quiver Quantitative** (primary alternative-data source) for congressional trades, lobbying, government contracts, wikipedia attention — hobbyist tier, `Authorization: Token <key>` header
 - **Finnhub** for financial market news and company news — free tier, 60 calls/min
-- **Massive** — DEPRECATED (FMP `/stable` price endpoint replaces it). Secret + client to be removed after 2 clean prod runs.
 - **Azure AI Search** (Free tier) for semantic memory recall — Phase 1.5, after 60-90 days of data
 
 ## Tech stack
@@ -68,8 +67,10 @@ portfolio-automation/
 └── README.md
 ```
 
-## Key Vault secrets (12 total)
-EtradeConsumerKey, EtradeConsumerSecret, EtradeAccessToken, EtradeAccessTokenSecret, FmpApiKey, FredApiKey, MassiveApiKey (deprecated), AlpacaApiKey, AlpacaApiSecret, FoundryApiKey, FinnhubApiKey, QuiverApiKey
+## Key Vault secrets (11 total)
+EtradeConsumerKey, EtradeConsumerSecret, EtradeAccessToken, EtradeAccessTokenSecret, FmpApiKey, FredApiKey, AlpacaApiKey, AlpacaApiSecret, FoundryApiKey, FinnhubApiKey, QuiverApiKey
+
+(Note: `MassiveApiKey` may still exist in KV as a soft-deletable leftover from the deprecated Polygon/Massive integration — safe to delete manually.)
 
 E*TRADE tokens expire midnight ET and must be refreshed via OAuth dance; the collector falls back to `src/config/portfolio.json` when missing.
 

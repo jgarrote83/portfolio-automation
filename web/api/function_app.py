@@ -33,6 +33,13 @@ import azure.functions as func
 from azure.core.exceptions import ResourceNotFoundError
 from azure.storage.blob import BlobServiceClient
 
+try:  # urllib is stdlib, but keep import isolated so module load is clean
+    from urllib import request as urlrequest
+    from urllib import error as urlerror
+except Exception:  # pragma: no cover
+    urlrequest = None
+    urlerror = None
+
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 log = logging.getLogger("pfauto.web.api")
 
@@ -263,11 +270,65 @@ def _decide(req: func.HttpRequest, status: str) -> func.HttpResponse:
         return _err(str(e), status=500)
 
 
+def _invoke_executor(date_str: str | None) -> tuple[dict | None, str | None]:
+    """POST to func-pfauto executor; returns (result, error). Both None if not configured."""
+    if not date_str:
+        return None, "missing date"
+    host = (
+        os.environ.get("FUNCTION_APP_HOST")
+        or (os.environ.get("FUNCTION_APP_NAME") and f"{os.environ['FUNCTION_APP_NAME']}.azurewebsites.net")
+        or "func-pfauto.azurewebsites.net"
+    )
+    key = os.environ.get("FUNC_MASTER_KEY")
+    if not key:
+        log.warning("FUNC_MASTER_KEY not set — skipping executor invocation")
+        return None, None
+    if urlrequest is None:
+        return None, "urllib unavailable"
+    url = f"https://{host}/api/executor"
+    payload = json.dumps({"date": date_str}).encode("utf-8")
+    req = urlrequest.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "x-functions-key": key,
+        },
+    )
+    try:
+        with urlrequest.urlopen(req, timeout=60) as resp:
+            text = resp.read().decode("utf-8")
+            return json.loads(text), None
+    except urlerror.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8")
+        except Exception:
+            pass
+        log.exception("executor HTTP %s: %s", e.code, body)
+        return None, f"executor http {e.code}: {body or e.reason}"
+    except Exception as e:  # noqa: BLE001
+        log.exception("executor invocation failed")
+        return None, str(e)
+
+
 @app.route(route="trades/{date}/approve", methods=["POST"])
 def approve(req: func.HttpRequest) -> func.HttpResponse:
-    # Phase 2 TODO: after recording approval, POST to func-pfauto executor with
-    # x-functions-key: <FUNC_MASTER_KEY> to actually place paper trades.
-    return _decide(req, "approved")
+    """Record approval, then invoke func-pfauto executor (Phase 2)."""
+    resp = _decide(req, "approved")
+    if resp.status_code != 200:
+        return resp
+    d = req.route_params.get("date")
+    exec_result, exec_err = _invoke_executor(d)
+    if exec_result is None and exec_err is None:
+        # Executor not configured — return approval-only response.
+        return resp
+    payload = json.loads(resp.get_body().decode("utf-8"))
+    payload["execution"] = exec_result
+    if exec_err:
+        payload["execution_error"] = exec_err
+    return _json(payload)
 
 
 @app.route(route="trades/{date}/reject", methods=["POST"])
