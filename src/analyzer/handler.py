@@ -187,24 +187,32 @@ def _extract_json(text: str) -> dict | None:
 
 def _write_trade_history(date_str: str, trades_obj: dict) -> None:
     year_month = date_str[:7]  # YYYY-MM
+    quadrant_current = trades_obj.get("quadrant_current") or ""
+    quadrant_projected_6m = trades_obj.get("quadrant_projected_6m") or ""
+    risk_score = trades_obj.get("risk_score")
     for t in trades_obj.get("trades", []):
         trade_id = t.get("id") or f"T-{date_str.replace('-', '')}-X"
         try:
             upsert_entity("TradeHistory", {
-                "PartitionKey":    year_month,
-                "RowKey":          trade_id,
-                "recommended_at":  date_str,
-                "status":          "recommended",
-                "side":            t.get("side", ""),
-                "symbol":          t.get("symbol", ""),
-                "quantity":        int(t.get("quantity") or 0),
-                "order_type":      t.get("order_type", ""),
-                "limit_price":     t.get("limit_price"),
-                "time_in_force":   t.get("time_in_force", ""),
-                "rationale":       (t.get("rationale") or "")[:32000],
-                "confidence":      float(t.get("confidence") or 0.0),
-                "stop_loss":       t.get("stop_loss"),
-                "take_profit":     t.get("take_profit"),
+                "PartitionKey":         year_month,
+                "RowKey":               trade_id,
+                "recommended_at":       date_str,
+                "status":               "recommended",
+                "side":                 t.get("side", ""),
+                "symbol":               t.get("symbol", ""),
+                "layer":                t.get("layer", ""),
+                "flex_source":          t.get("flex_source") or "",
+                "quantity":             int(t.get("quantity") or 0),
+                "order_type":           t.get("order_type", ""),
+                "limit_price":          t.get("limit_price"),
+                "time_in_force":        t.get("time_in_force", ""),
+                "rationale":            (t.get("rationale") or "")[:32000],
+                "confidence":           float(t.get("confidence") or 0.0),
+                "stop_loss":            t.get("stop_loss"),
+                "take_profit":          t.get("take_profit"),
+                "quadrant_current":     quadrant_current,
+                "quadrant_projected_6m": quadrant_projected_6m,
+                "risk_score":           risk_score,
             })
         except Exception as e:  # noqa: BLE001
             logger.error("TradeHistory upsert failed for %s: %s", trade_id, e)
