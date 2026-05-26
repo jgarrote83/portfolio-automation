@@ -20,7 +20,12 @@
     { "ticker": "EUAD",  "quantity": 25.0000, "market_value":  990.0000, "cost_basis": 1063.2400, "day_gain":  -14.5000, "total_gain":   -73.2400, "security_type": "EQ" },
     { "ticker": "EWZ",   "quantity": 12.0000, "market_value":  458.8800, "cost_basis":  468.7800, "day_gain":   -5.0400, "total_gain":    -9.9000, "security_type": "EQ" },
     { "ticker": "ADBE",  "quantity":  1.0000, "market_value":  240.8300, "cost_basis":  270.9300, "day_gain":   -5.3200, "total_gain":   -30.1000, "security_type": "EQ" },
-    { "ticker": "XLI",   "quantity":  5.0270, "market_value":  876.4574, "cost_basis":  864.6795, "day_gain":   -3.4686, "total_gain":    11.7779, "security_type": "EQ" }
+    { "ticker": "XLI",   "quantity":  5.0270, "market_value":  876.4574, "cost_basis":  864.6795, "day_gain":   -3.4686, "total_gain":    11.7779, "security_type": "EQ" },
+    { "ticker": "EWJ",   "quantity": 25.0000, "market_value": 0.0,       "cost_basis": 0.0,       "day_gain":    0.0,    "total_gain":     0.0,    "security_type": "EQ", "_note": "Q1 Goldilocks starter (Japan equities) — added 2026-05-26 for quadrant coverage" },
+    { "ticker": "DBA",   "quantity": 80.0000, "market_value": 0.0,       "cost_basis": 0.0,       "day_gain":    0.0,    "total_gain":     0.0,    "security_type": "EQ", "_note": "Q2/Q3 starter (Agriculture) — added 2026-05-26 for quadrant coverage" },
+    { "ticker": "TIP",   "quantity": 18.0000, "market_value": 0.0,       "cost_basis": 0.0,       "day_gain":    0.0,    "total_gain":     0.0,    "security_type": "EQ", "_note": "Q2/Q3 starter (TIPS / inflation-linked) — added 2026-05-26 for quadrant coverage" },
+    { "ticker": "XLP",   "quantity": 25.0000, "market_value": 0.0,       "cost_basis": 0.0,       "day_gain":    0.0,    "total_gain":     0.0,    "security_type": "EQ", "_note": "Q3/Q4 starter (Consumer Staples) — added 2026-05-26 for quadrant coverage" },
+    { "ticker": "TLT",   "quantity": 22.0000, "market_value": 0.0,       "cost_basis": 0.0,       "day_gain":    0.0,    "total_gain":     0.0,    "security_type": "EQ", "_note": "Q4 starter (Long Treasuries) — added 2026-05-26 for quadrant coverage" }
   ],
   "balances": {
     "totalAccountValue": 44195.51,
