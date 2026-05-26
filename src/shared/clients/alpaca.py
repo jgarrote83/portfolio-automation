@@ -83,3 +83,14 @@ class AlpacaClient:
             logger.error("Alpaca order failed (%s): %s", r.status_code, r.text)
             r.raise_for_status()
         return r.json()
+
+    def list_orders(self, status: str = "open", limit: int = 200) -> list[dict]:
+        """List orders. ``status`` is one of 'open', 'closed', 'all'."""
+        r = self.session.get(
+            f"{self.base_url}/v2/orders",
+            params={"status": status, "limit": limit},
+            timeout=20,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data if isinstance(data, list) else []

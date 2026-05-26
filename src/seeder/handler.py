@@ -72,6 +72,16 @@ def seed_positions(
     except Exception as e:  # noqa: BLE001
         logger.warning("Could not list existing Alpaca positions: %s", e)
 
+    # Also block symbols with an open buy order so re-running the seeder
+    # before fills doesn't duplicate (issue seen 2026-05-26).
+    open_buy_symbols: set[str] = set()
+    try:
+        for o in client.list_orders(status="open", limit=500):
+            if str(o.get("side", "")).lower() == "buy":
+                open_buy_symbols.add(str(o.get("symbol", "")).upper())
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not list existing Alpaca open orders: %s", e)
+
     results: list[dict] = []
     for h in holdings:
         symbol = str(h.get("ticker") or h.get("symbol") or "").upper()
@@ -93,6 +103,13 @@ def seed_positions(
                 **base,
                 "status": "skipped_already_held",
                 "alpaca_qty": held,
+            })
+            continue
+
+        if symbol in open_buy_symbols and not force:
+            results.append({
+                **base,
+                "status": "skipped_open_order_pending",
             })
             continue
 
