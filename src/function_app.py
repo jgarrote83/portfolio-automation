@@ -16,7 +16,7 @@ app = func.FunctionApp()
 
 
 @app.timer_trigger(
-    schedule="0 0 13 * * 1-5",   # 13:00 UTC = 09:00 ET (EDT), weekdays
+    schedule="0 0 9 * * 1-5",    # 09:00 ET weekdays (WEBSITE_TIME_ZONE=Eastern Standard Time)
     arg_name="timer",
     run_on_startup=False,
     use_monitor=True,
@@ -41,7 +41,7 @@ def analyzer(snapshot: func.InputStream) -> None:
 
 
 @app.timer_trigger(
-    schedule="0 35 13 * * 1-5",   # 13:35 UTC = 09:35 ET (EDT) — 5 min after open
+    schedule="0 35 9 * * 1-5",   # 09:35 ET weekdays — 5 min after open (WEBSITE_TIME_ZONE)
     arg_name="timer",
     run_on_startup=False,
     use_monitor=True,
