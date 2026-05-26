@@ -1,0 +1,44 @@
+{
+  "date": "2026-05-24",
+  "status": "ok",
+  "executed_at": "2026-05-25T03:33:31.198193+00:00",
+  "total": 3,
+  "succeeded": 2,
+  "failed": 1,
+  "executions": [
+    {
+      "id": "T-20260524-001",
+      "symbol": "ADBE",
+      "side": "sell",
+      "qty": 1,
+      "order_type": "market",
+      "submitted_at": "2026-05-25T03:33:31.123563+00:00",
+      "status": "submitted",
+      "alpaca_order_id": "babee76d-e33e-4919-89bd-cdad6b93e3dd",
+      "alpaca_status": "accepted",
+      "alpaca_client_order_id": "2026-05-24-T-20260524-001"
+    },
+    {
+      "id": "T-20260524-002",
+      "symbol": "INTC",
+      "side": "sell",
+      "qty": 3,
+      "order_type": "market",
+      "submitted_at": "2026-05-25T03:33:31.174116+00:00",
+      "status": "submitted",
+      "alpaca_order_id": "66049540-6ff9-403d-ad04-3145c6782d8f",
+      "alpaca_status": "accepted",
+      "alpaca_client_order_id": "2026-05-24-T-20260524-002"
+    },
+    {
+      "id": "T-20260524-003",
+      "symbol": "XSD",
+      "side": "sell",
+      "qty": 1,
+      "order_type": "market",
+      "submitted_at": "2026-05-25T03:33:31.186414+00:00",
+      "status": "error",
+      "error": "422 Client Error: Unprocessable Entity for url: https://paper-api.alpaca.markets/v2/orders"
+    }
+  ]
+}

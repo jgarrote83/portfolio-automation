@@ -1,5 +1,8 @@
 import json
 import logging
+import os
+from datetime import datetime, timezone
+
 import azure.functions as func
 
 from collector.handler import run as collector_run
@@ -13,7 +16,7 @@ app = func.FunctionApp()
 
 
 @app.timer_trigger(
-    schedule="0 0 11 * * 1-5",   # 11:00 UTC = 06:00 ET, weekdays only
+    schedule="0 0 13 * * 1-5",   # 13:00 UTC = 09:00 ET (EDT), weekdays
     arg_name="timer",
     run_on_startup=False,
     use_monitor=True,
@@ -37,19 +40,47 @@ def analyzer(snapshot: func.InputStream) -> None:
     analyze_snapshot(data, blob_name)
 
 
+@app.timer_trigger(
+    schedule="0 35 13 * * 1-5",   # 13:35 UTC = 09:35 ET (EDT) — 5 min after open
+    arg_name="timer",
+    run_on_startup=False,
+    use_monitor=True,
+)
+def auto_executor(timer: func.TimerRequest) -> None:
+    """Paper-only auto-execute. Gated by AUTO_EXECUTE_ENABLED app setting.
+
+    Reads today's `daily-trades/{date}.json` and submits every recommendation
+    to Alpaca paper. Market-closed gate inside execute_approvals will defer
+    if open is missed (e.g. holiday).
+    """
+    if timer.past_due:
+        logger.warning("auto_executor timer was past due — running now")
+    if os.getenv("AUTO_EXECUTE_ENABLED", "false").lower() != "true":
+        logger.info("AUTO_EXECUTE_ENABLED is not 'true' — skipping auto execution")
+        return
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        result = execute_approvals(date_str, force=False, auto=True)
+        logger.info("auto_executor result for %s: %s", date_str, result.get("status"))
+    except Exception:  # noqa: BLE001
+        logger.exception("auto_executor failed for %s", date_str)
+
+
 @app.route(
     route="executor",
     methods=["POST"],
     auth_level=func.AuthLevel.FUNCTION,
 )
 def executor(req: func.HttpRequest) -> func.HttpResponse:
-    """Phase-2 paper-trade executor. Called by SWA managed API after approval."""
+    """Phase-2 paper-trade executor. Called by SWA managed API after approval,
+    or with `auto=true` for paper-only auto-execute."""
     try:
         body = req.get_json()
     except ValueError:
         body = {}
     date_str = (body or {}).get("date")
     force = bool((body or {}).get("force", False))
+    auto = bool((body or {}).get("auto", False))
     if not date_str:
         return func.HttpResponse(
             json.dumps({"error": "date is required (YYYY-MM-DD)"}),
@@ -57,7 +88,7 @@ def executor(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json",
         )
     try:
-        result = execute_approvals(date_str, force=force)
+        result = execute_approvals(date_str, force=force, auto=auto)
     except Exception as e:  # noqa: BLE001
         logger.exception("Executor failed for %s", date_str)
         return func.HttpResponse(

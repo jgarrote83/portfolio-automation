@@ -30,9 +30,18 @@ from shared.clients.alpaca import AlpacaClient
 logger = logging.getLogger(__name__)
 
 
-def execute_approvals(date_str: str, force: bool = False) -> dict:
-    """Place Alpaca paper orders for every approved trade on `date_str`."""
-    logger.info("=== Executor starting for %s (force=%s) ===", date_str, force)
+def execute_approvals(date_str: str, force: bool = False, auto: bool = False) -> dict:
+    """Place Alpaca paper orders for trades on `date_str`.
+
+    Parameters
+    ----------
+    date_str : YYYY-MM-DD
+    force    : ignore cached `daily-executions/{date}.json` and re-run.
+    auto     : paper-only auto-execute. Skips approval doc and treats every
+               recommendation in `daily-trades/{date}.json` as approved.
+               Caller is responsible for ensuring this is paper-only.
+    """
+    logger.info("=== Executor starting for %s (force=%s, auto=%s) ===", date_str, force, auto)
 
     if not force:
         existing = read_executions(date_str)
@@ -48,18 +57,22 @@ def execute_approvals(date_str: str, force: bool = False) -> dict:
     if not trades:
         return {"date": date_str, "status": "no_trades", "executions": []}
 
-    approvals_doc = read_approvals(date_str) or {}
-    approved_ids = {
-        d.get("id")
-        for d in approvals_doc.get("decisions", [])
-        if d.get("status") == "approved" and d.get("id")
-    }
-    if not approved_ids:
-        return {"date": date_str, "status": "no_approvals", "executions": []}
+    if auto:
+        approved = list(trades)
+        logger.info("Auto-execute: approving all %d recommended trades", len(approved))
+    else:
+        approvals_doc = read_approvals(date_str) or {}
+        approved_ids = {
+            d.get("id")
+            for d in approvals_doc.get("decisions", [])
+            if d.get("status") == "approved" and d.get("id")
+        }
+        if not approved_ids:
+            return {"date": date_str, "status": "no_approvals", "executions": []}
 
-    approved = [t for t in trades if t.get("id") in approved_ids]
-    if not approved:
-        return {"date": date_str, "status": "no_match", "executions": []}
+        approved = [t for t in trades if t.get("id") in approved_ids]
+        if not approved:
+            return {"date": date_str, "status": "no_match", "executions": []}
 
     # CLAUDE.md rule: sells first to free up cash, then buys.
     approved.sort(key=lambda t: 0 if str(t.get("side", "")).lower() == "sell" else 1)
@@ -71,6 +84,27 @@ def execute_approvals(date_str: str, force: bool = False) -> dict:
         raise RuntimeError("Alpaca credentials missing from Key Vault")
 
     client = AlpacaClient(api_key=key, api_secret=secret)
+
+    # Gate on market clock. Fractional + day-tif orders are rejected by Alpaca
+    # when market is closed; even whole-share queued orders span weekends badly
+    # (see 2026-05-24 batch rejection). Defer to next open instead.
+    try:
+        clock = client.get_clock()
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to read Alpaca clock — proceeding anyway")
+        clock = {"is_open": True}
+    if not clock.get("is_open", False):
+        logger.warning(
+            "Market closed (next_open=%s) — deferring %d trades for %s",
+            clock.get("next_open"), len(approved), date_str,
+        )
+        return {
+            "date": date_str,
+            "status": "deferred_market_closed",
+            "next_open": clock.get("next_open"),
+            "pending": len(approved),
+            "executions": [],
+        }
 
     executions: list[dict] = []
     for trade in approved:

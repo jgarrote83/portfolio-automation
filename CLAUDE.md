@@ -75,7 +75,7 @@ EtradeConsumerKey, EtradeConsumerSecret, EtradeAccessToken, EtradeAccessTokenSec
 E*TRADE tokens expire midnight ET and must be refreshed via OAuth dance; the collector falls back to `src/config/portfolio.json` when missing.
 
 ## Data flow — Phase 1
-1. Timer fires collector at 06:00 ET weekdays (NCRONTAB: `0 0 6 * * 1-5`)
+1. Timer fires collector at 09:00 ET weekdays (NCRONTAB: `0 0 13 * * 1-5`, UTC for EDT)
 2. Collector reads secrets from Key Vault via Managed Identity
 3. Collector calls E*TRADE (positions, balances, option chains — falls back to `config/portfolio.json` if creds missing), FMP (fundamentals, earnings, EOD prices, ETF data, stock news, fallback congressional), FRED (35 macro series, deep-history for bond + labor scorecards), Quiver (congressional trades, lobbying, gov contracts — **lobbying and gov_contracts are filtered client-side to portfolio tickers ∪ ETF watchlist and last 90 days; raw responses are ~20K rows/~16 MB and would blow past Claude's 1 M-token limit**), Finnhub (market news, company news)
 4. Collector writes full JSON snapshot to `daily-snapshots/YYYY-MM-DD.json` blob
@@ -110,7 +110,7 @@ IDVO (international dividend + covered call overlay), IDMO (international moment
 - Never store secrets in code — always Key Vault with Managed Identity
 - All functions emit custom metrics to App Insights
 - Blob is source of truth; tables can be rebuilt from blobs (RUNBOOK-007)
-- Human approval required for ALL trade execution — no autonomous trading
+- Human approval required for ALL **live** trade execution — no autonomous live trading. **Paper-only auto-execute** is enabled via app setting `AUTO_EXECUTE_ENABLED=true`: a 09:35 ET timer (`auto_executor`) reads `daily-trades/{today}.json` and submits every recommendation to Alpaca paper, gated by Alpaca market clock (defers if closed)
 - Phase 1 must run clean 30+ days before Phase 2 is enabled
 - Temperature 0.2 for Claude analysis calls (consistency)
 - Sells execute before buys in multi-trade recommendations (free up cash)

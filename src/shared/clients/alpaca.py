@@ -35,7 +35,12 @@ class AlpacaClient:
         r = self.session.get(f"{self.base_url}/v2/account", timeout=20)
         r.raise_for_status()
         return r.json()
-
+    # ── clock ───────────────────────────────────────────────────────────────────────
+    def get_clock(self) -> dict:
+        """Returns {'is_open': bool, 'next_open': iso, 'next_close': iso, 'timestamp': iso}."""
+        r = self.session.get(f"{self.base_url}/v2/clock", timeout=20)
+        r.raise_for_status()
+        return r.json()
     # ── positions ─────────────────────────────────────────────────────────
     def list_positions(self) -> list[dict]:
         r = self.session.get(f"{self.base_url}/v2/positions", timeout=20)
