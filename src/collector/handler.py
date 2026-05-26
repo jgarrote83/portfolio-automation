@@ -10,6 +10,7 @@ from shared.clients.fmp import FMPClient
 from shared.clients.fred import FREDClient
 from shared.clients.finnhub import FinnhubClient
 from shared.clients.quiver import QuiverClient
+from shared.clients.alpaca import AlpacaClient
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,50 @@ def run() -> None:
             fb = json.load(f)
         positions = fb.get("positions", [])
         balances = fb.get("balances", {})
+
+    # --- Alpaca paper account (actual auto-executed holdings) ----------------
+    # Pulled so Claude can reconcile its recommendations against the *real*
+    # paper-trade book, not just the E*TRADE picture. Soft-fail: never block
+    # collection on Alpaca being unreachable.
+    paper_account: dict = {"available": False}
+    try:
+        ak = secrets.get("AlpacaApiKey")
+        asec = secrets.get("AlpacaApiSecret")
+        if ak and asec:
+            alp = AlpacaClient(api_key=ak, api_secret=asec)
+            acct = alp.get_account()
+            pos = alp.list_positions()
+            paper_positions = [
+                {
+                    "ticker":        p.get("symbol"),
+                    "qty":           float(p.get("qty") or 0),
+                    "avg_entry":     float(p.get("avg_entry_price") or 0),
+                    "market_value":  float(p.get("market_value") or 0),
+                    "unrealized_pl": float(p.get("unrealized_pl") or 0),
+                    "unrealized_plpc": float(p.get("unrealized_plpc") or 0),
+                    "current_price": float(p.get("current_price") or 0),
+                    "side":          p.get("side"),
+                }
+                for p in pos
+            ]
+            paper_account = {
+                "available":     True,
+                "cash":          float(acct.get("cash") or 0),
+                "buying_power":  float(acct.get("buying_power") or 0),
+                "equity":        float(acct.get("equity") or 0),
+                "portfolio_value": float(acct.get("portfolio_value") or 0),
+                "status":        acct.get("status"),
+                "position_count": len(paper_positions),
+                "positions":     paper_positions,
+            }
+            logger.info(
+                "Alpaca paper: %d positions, cash=$%.2f, equity=$%.2f",
+                len(paper_positions), paper_account["cash"], paper_account["equity"],
+            )
+        else:
+            logger.warning("Alpaca creds missing — skipping paper_account block")
+    except Exception:  # noqa: BLE001
+        logger.exception("Alpaca paper-account fetch failed — continuing without it")
 
     tickers = [p["ticker"] for p in positions if p.get("ticker")]
     logger.info("Portfolio tickers (%d): %s", len(tickers), tickers)
@@ -237,6 +282,7 @@ def run() -> None:
             "balances": balances,
             "source": "etrade" if etrade.ready else "fallback",
         },
+        "paper_account": paper_account,
         "fundamentals": profiles,
         "earnings_calendar": earnings,
         "stock_news": stock_news,

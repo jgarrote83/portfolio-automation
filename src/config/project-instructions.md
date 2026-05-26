@@ -317,8 +317,9 @@ Print the score as `Risk Score: X/10` in the Summary section.
 
 A single JSON snapshot for one trading day containing:
 
-- `portfolio.positions` — current holdings (ticker, qty, market_value, cost_basis, gain)
-- `portfolio.balances` — cash and total account value
+- `portfolio.positions` — **E*TRADE real-money** holdings (ticker, qty, market_value, cost_basis, gain) — reference / risk context only
+- `portfolio.balances` — E*TRADE cash and total account value
+- `paper_account` — **Alpaca paper-trading** account state (the book your recommendations actually execute against). Contains `cash`, `buying_power`, `equity`, `portfolio_value`, and `positions[]` with `ticker, qty, avg_entry, market_value, unrealized_pl, unrealized_plpc, current_price, side`. **Reconcile every trade against this**, not E*TRADE: do not propose buying a ticker the paper book is already heavily long, do not propose selling more shares than `paper_account.positions[].qty`, and respect `paper_account.cash` / `buying_power` as the hard cash constraint. If `paper_account.available == false`, fall back to `portfolio.positions` and note the staleness.
 - `fundamentals` — FMP company profile per holding (P/E, beta, DCF, rating, sector)
 - `earnings_calendar` — upcoming earnings dates (next ~14 days)
 - `prices` — most recent EOD price per ticker
