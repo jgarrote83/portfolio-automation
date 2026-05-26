@@ -85,6 +85,61 @@ def execute_approvals(date_str: str, force: bool = False, auto: bool = False) ->
 
     client = AlpacaClient(api_key=key, api_secret=secret)
 
+    # Defensive filter: drop sells we cannot fill (paper book doesn't hold the
+    # symbol, or holds less than requested). Claude sometimes recommends sells
+    # against the E*TRADE book even though the paper account has different
+    # holdings — these would all reject with 422. Skipping them keeps the
+    # execution log clean and avoids API-error noise.
+    skipped: list[dict] = []
+    try:
+        paper_qty = {
+            str(p.get("symbol", "")).upper(): float(p.get("qty") or 0)
+            for p in client.list_positions()
+        }
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not fetch paper positions — skipping sell filter")
+        paper_qty = None
+
+    if paper_qty is not None:
+        filtered: list[dict] = []
+        for t in approved:
+            side = str(t.get("side", "")).lower()
+            sym = str(t.get("symbol") or t.get("ticker") or "").upper()
+            req_qty = float(t.get("quantity") or t.get("qty") or 0)
+            if side == "sell":
+                held = paper_qty.get(sym, 0.0)
+                if held <= 0:
+                    skipped.append({
+                        "id": t.get("id"), "symbol": sym, "side": side,
+                        "requested_qty": req_qty,
+                        "reason": "not_held_in_paper_account",
+                    })
+                    continue
+                if req_qty > held + 1e-6:
+                    # Trim to what we actually hold rather than skip entirely.
+                    logger.warning(
+                        "%s sell qty %s > held %s — trimming to held",
+                        sym, req_qty, held,
+                    )
+                    t = {**t, "quantity": held}
+            filtered.append(t)
+        if skipped:
+            logger.warning(
+                "Dropped %d sell(s) not held in paper book: %s",
+                len(skipped), [s["symbol"] for s in skipped],
+            )
+        approved = filtered
+
+    if not approved:
+        result = {
+            "date": date_str,
+            "status": "all_filtered",
+            "skipped": skipped,
+            "executions": [],
+        }
+        write_executions(date_str, result)
+        return result
+
     # Gate on market clock. Fractional + day-tif orders are rejected by Alpaca
     # when market is closed; even whole-share queued orders span weekends badly
     # (see 2026-05-24 batch rejection). Defer to next open instead.
@@ -117,6 +172,7 @@ def execute_approvals(date_str: str, force: bool = False, auto: bool = False) ->
         "total": len(executions),
         "succeeded": sum(1 for e in executions if e["status"] == "submitted"),
         "failed": sum(1 for e in executions if e["status"] == "error"),
+        "skipped": skipped,
         "executions": executions,
     }
     write_executions(date_str, result)

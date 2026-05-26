@@ -36,11 +36,17 @@ def seed_positions(
     source: str = "config",
     dry_run: bool = False,
     force: bool = False,
+    whole_shares_only: bool = False,
 ) -> dict:
-    """Seed the Alpaca paper account with the current E*TRADE holdings."""
+    """Seed the Alpaca paper account with the current E*TRADE holdings.
+
+    Pass ``whole_shares_only=True`` when seeding outside market hours: Alpaca
+    rejects fractional day-orders queued for the next session, so we floor each
+    quantity and drop tickers that would round to zero.
+    """
     logger.info(
-        "=== Seeder starting (source=%s, dry_run=%s, force=%s) ===",
-        source, dry_run, force,
+        "=== Seeder starting (source=%s, dry_run=%s, force=%s, whole_shares_only=%s) ===",
+        source, dry_run, force, whole_shares_only,
     )
 
     holdings = _load_holdings(source)
@@ -89,6 +95,22 @@ def seed_positions(
                 "alpaca_qty": held,
             })
             continue
+
+        # When seeding outside market hours, Alpaca only queues whole-share day
+        # orders for the next session. Floor fractional qty; drop sub-1 tickers.
+        if whole_shares_only:
+            try:
+                whole = int(float(qty))
+            except (TypeError, ValueError):
+                whole = 0
+            if whole <= 0:
+                results.append({
+                    **base,
+                    "status": "skipped_sub_one_share",
+                    "floored_qty": whole,
+                })
+                continue
+            qty = whole
 
         if dry_run:
             results.append({**base, "status": "dry_run", "would_buy": qty})

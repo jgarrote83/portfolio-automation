@@ -118,8 +118,14 @@ def seeder(req: func.HttpRequest) -> func.HttpResponse:
     source = str(body.get("source") or "config")
     dry_run = bool(body.get("dry_run", False))
     force = bool(body.get("force", False))
+    whole_shares_only = bool(body.get("whole_shares_only", False))
     try:
-        result = seed_positions(source=source, dry_run=dry_run, force=force)
+        result = seed_positions(
+            source=source,
+            dry_run=dry_run,
+            force=force,
+            whole_shares_only=whole_shares_only,
+        )
     except Exception as e:  # noqa: BLE001
         logger.exception("Seeder failed (source=%s)", source)
         return func.HttpResponse(
