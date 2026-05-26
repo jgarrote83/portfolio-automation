@@ -75,9 +75,9 @@ EtradeConsumerKey, EtradeConsumerSecret, EtradeAccessToken, EtradeAccessTokenSec
 E*TRADE tokens expire midnight ET and must be refreshed via OAuth dance; the collector falls back to `src/config/portfolio.json` when missing.
 
 ## Data flow — Phase 1
-1. Timer fires collector at 09:00 ET weekdays (NCRONTAB: `0 0 13 * * 1-5`, UTC for EDT)
+1. Timer fires collector at 09:00 ET weekdays (NCRONTAB: `0 0 9 * * 1-5`, ET-local via `WEBSITE_TIME_ZONE=Eastern Standard Time` app setting — no DST drift)
 2. Collector reads secrets from Key Vault via Managed Identity
-3. Collector calls E*TRADE (positions, balances, option chains — falls back to `config/portfolio.json` if creds missing), FMP (fundamentals, earnings, EOD prices, ETF data, stock news, fallback congressional), FRED (35 macro series, deep-history for bond + labor scorecards), Quiver (congressional trades, lobbying, gov contracts — **lobbying and gov_contracts are filtered client-side to portfolio tickers ∪ ETF watchlist and last 90 days; raw responses are ~20K rows/~16 MB and would blow past Claude's 1 M-token limit**), Finnhub (market news, company news)
+3. Collector calls E*TRADE (positions, balances, option chains — falls back to `config/portfolio.json` if creds missing), Alpaca paper account (`paper_account` block: cash, buying_power, equity, current positions — lets Claude reconcile recommendations against the real paper book), FMP (fundamentals, earnings, EOD prices, ETF data, stock news, fallback congressional), FRED (35 macro series, deep-history for bond + labor scorecards), Quiver (congressional trades, lobbying, gov contracts — **lobbying and gov_contracts are filtered client-side to portfolio tickers ∪ ETF watchlist and last 90 days; raw responses are ~20K rows/~16 MB and would blow past Claude's 1 M-token limit**), Finnhub (market news, company news)
 4. Collector writes full JSON snapshot to `daily-snapshots/YYYY-MM-DD.json` blob
 5. Collector writes denormalized rows to 6 Table Storage tables (PortfolioHistory, FundamentalsHistory, MacroHistory, ETFLookthroughHistory, SentimentHistory, TradeHistory)
 6. Blob trigger fires analyzer
@@ -110,7 +110,8 @@ IDVO (international dividend + covered call overlay), IDMO (international moment
 - Never store secrets in code — always Key Vault with Managed Identity
 - All functions emit custom metrics to App Insights
 - Blob is source of truth; tables can be rebuilt from blobs (RUNBOOK-007)
-- Human approval required for ALL **live** trade execution — no autonomous live trading. **Paper-only auto-execute** is enabled via app setting `AUTO_EXECUTE_ENABLED=true`: a 09:35 ET timer (`auto_executor`) reads `daily-trades/{today}.json` and submits every recommendation to Alpaca paper, gated by Alpaca market clock (defers if closed)
+- Human approval required for ALL **live** trade execution — no autonomous live trading. **Paper-only auto-execute** is enabled via app setting `AUTO_EXECUTE_ENABLED=true`: a 09:35 ET timer (`auto_executor`, NCRONTAB `0 35 9 * * 1-5`, ET-local via `WEBSITE_TIME_ZONE`) reads `daily-trades/{today}.json` and submits every recommendation to Alpaca paper, gated by Alpaca market clock (defers if closed). Executor applies a **defensive sell filter**: any sell against a symbol not currently held in the Alpaca paper account is dropped (status `not_held_in_paper_account`); requested qty larger than held is trimmed. Drops are recorded in `daily-executions/{date}.json` `skipped[]`.
+- **One-time paper seeder** (`POST /api/seeder`): idempotent mirror of `config/portfolio.json` into Alpaca paper. Use `whole_shares_only=true` for off-hours seeding (Alpaca rejects fractional day-orders queued outside market hours — we floor qty to int, drop sub-1 tickers). Symbols already held OR with a pending open buy order are skipped (`skipped_already_held` / `skipped_open_order_pending`) so re-runs never duplicate. Per-run report written to `seeding/{utc_ts}.json`.
 - Phase 1 must run clean 30+ days before Phase 2 is enabled
 - Temperature 0.2 for Claude analysis calls (consistency)
 - Sells execute before buys in multi-trade recommendations (free up cash)
