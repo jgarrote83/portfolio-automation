@@ -5,8 +5,7 @@ Azure-native automated portfolio analysis and paper trade execution pipeline. Si
 
 ## Architecture decisions (do not deviate without discussion)
 - **Azure AI Foundry** for Claude API — project: Portfolio-Analysis, resource: resource-portfolio-analysis (East US 2, Claude not available in East US). API key auth (FoundryApiKey in KV). Endpoints in Function App settings: FOUNDRY_ENDPOINT, FOUNDRY_OPENAI_ENDPOINT. Model: claude-sonnet-4-6, temp 0.2
-- **E*TRADE API** for portfolio data only (real holdings, balances, option chains) — OAuth 1.0a, tokens expire midnight ET
-- **Alpaca** for Phase 2 paper trading execution only — REST API, no VM needed
+- **Alpaca paper account** is the canonical source of truth for portfolio positions and balances (`portfolio.positions[]`, `portfolio.balances`, `paper_account` block). Also used for Phase 2 paper-trade execution. REST API, no VM needed. (E*TRADE was removed in commit `bc60604` — its OAuth-1.0a tokens expired daily and the integration was dropped; `src/shared/clients/etrade.py` is dead code retained only as historical reference.)
 - **FMP (Financial Modeling Prep)** for fundamentals, earnings, ETF look-through, EOD prices, stock news, and fallback congressional trades (senate/house) — free tier, 250 req/day
 - **FRED** for macro indicators (35 series collected, including 6 labor-market series feeding `labor_signals` scorecard; `CHPMINDXM` deprecated — to revisit) — free, no practical limit
 - **Quiver Quantitative** (primary alternative-data source) for congressional trades, lobbying, government contracts, wikipedia attention — hobbyist tier, `Authorization: Token <key>` header
@@ -67,17 +66,17 @@ portfolio-automation/
 └── README.md
 ```
 
-## Key Vault secrets (11 total)
-EtradeConsumerKey, EtradeConsumerSecret, EtradeAccessToken, EtradeAccessTokenSecret, FmpApiKey, FredApiKey, AlpacaApiKey, AlpacaApiSecret, FoundryApiKey, FinnhubApiKey, QuiverApiKey
+## Key Vault secrets (7 active)
+FmpApiKey, FredApiKey, AlpacaApiKey, AlpacaApiSecret, FoundryApiKey, FinnhubApiKey, QuiverApiKey
 
-(Note: `MassiveApiKey` may still exist in KV as a soft-deletable leftover from the deprecated Polygon/Massive integration — safe to delete manually.)
+(Note: `MassiveApiKey` and the four `Etrade*` secrets may still exist in KV as soft-deletable leftovers from deprecated integrations — safe to delete manually. The collector no longer fetches them.)
 
-E*TRADE tokens expire midnight ET and must be refreshed via OAuth dance; the collector falls back to `src/config/portfolio.json` when missing.
+If Alpaca is unreachable the collector falls back to `src/config/portfolio.json` (positions only — dollar gains will be zero in that mode).
 
 ## Data flow — Phase 1
 1. Timer fires collector at 09:00 ET weekdays (NCRONTAB: `0 0 9 * * 1-5`, ET-local via `TZ=America/New_York` app setting — no DST drift). **NOTE**: this is Linux Consumption, so the IANA `TZ` setting is required. The Windows-only `WEBSITE_TIME_ZONE` is silently ignored on Linux and caused crons to fire 4.5h early (at 09:00 UTC = 05:00 ET) until commit 6f42f1a.
 2. Collector reads secrets from Key Vault via Managed Identity
-3. Collector calls E*TRADE (positions, balances, option chains — falls back to `config/portfolio.json` if creds missing), Alpaca paper account (`paper_account` block: cash, buying_power, equity, current positions — lets Claude reconcile recommendations against the real paper book), FMP (fundamentals, earnings, EOD prices, ETF data, stock news, fallback congressional), FRED (35 macro series, deep-history for bond + labor scorecards), Quiver (congressional trades, lobbying, gov contracts — **lobbying and gov_contracts are filtered client-side to portfolio tickers ∪ ETF watchlist and last 90 days; raw responses are ~20K rows/~16 MB and would blow past Claude's 1 M-token limit**), Finnhub (market news, company news)
+3. Collector calls Alpaca paper account (positions + balances drive the canonical `portfolio.positions[]` / `portfolio.balances`; `paper_account` block also retained with cash, buying_power, equity, last_equity, position list — falls back to `config/portfolio.json` if Alpaca unreachable), FMP (fundamentals, earnings, EOD prices, ETF data, stock news, fallback congressional), FRED (35 macro series, deep-history for bond + labor scorecards), Quiver (congressional trades, lobbying, gov contracts — **lobbying and gov_contracts are filtered client-side to portfolio tickers ∪ ETF watchlist and last 90 days; raw responses are ~20K rows/~16 MB and would blow past Claude's 1 M-token limit**), Finnhub (market news, company news)
 4. Collector writes full JSON snapshot to `daily-snapshots/YYYY-MM-DD.json` blob
 5. Collector writes denormalized rows to 6 Table Storage tables (PortfolioHistory, FundamentalsHistory, MacroHistory, ETFLookthroughHistory, SentimentHistory, TradeHistory)
 6. Blob trigger fires analyzer
