@@ -5,7 +5,6 @@ from pathlib import Path
 
 from shared.keyvault import load_secrets
 from shared.storage import ensure_tables, upsert_entity, write_snapshot
-from shared.clients.etrade import ETradeClient
 from shared.clients.fmp import FMPClient
 from shared.clients.fred import FREDClient
 from shared.clients.finnhub import FinnhubClient
@@ -61,66 +60,101 @@ def run() -> None:
     secrets = load_secrets()
     ensure_tables()
 
-    # --- Portfolio -----------------------------------------------------------
-    etrade = ETradeClient(
-        consumer_key=secrets.get("EtradeConsumerKey"),
-        consumer_secret=secrets.get("EtradeConsumerSecret"),
-        access_token=secrets.get("EtradeAccessToken"),
-        access_token_secret=secrets.get("EtradeAccessTokenSecret"),
-    )
-    positions = etrade.get_portfolio()
-    balances = etrade.get_balances()
+    # --- Portfolio (primary source: Alpaca paper account) -------------------
+    # E*TRADE has been retired. Alpaca paper is the source of truth for
+    # positions and balances. Falls back to config/portfolio.json only if
+    # Alpaca is unreachable — in that case dollar gains will be unavailable.
+    positions: list[dict] = []
+    balances: dict = {}
+    portfolio_source = "fallback"
+    paper_account: dict = {"available": False}
 
-    if positions is None:
-        logger.warning("E*TRADE unavailable — loading config/portfolio.json fallback")
+    ak = secrets.get("AlpacaApiKey")
+    asec = secrets.get("AlpacaApiSecret")
+    if ak and asec:
+        try:
+            alp = AlpacaClient(api_key=ak, api_secret=asec)
+            acct = alp.get_account()
+            pos = alp.list_positions()
+
+            # Canonical positions schema (compatible with previous E*TRADE shape).
+            positions = [
+                {
+                    "ticker":        p.get("symbol"),
+                    "quantity":      float(p.get("qty") or 0),
+                    "market_value":  round(float(p.get("market_value") or 0), 4),
+                    "cost_basis":    round(float(p.get("cost_basis") or 0), 4),
+                    "day_gain":      round(float(p.get("unrealized_intraday_pl") or 0), 4),
+                    "total_gain":    round(float(p.get("unrealized_pl") or 0), 4),
+                    "avg_entry":     float(p.get("avg_entry_price") or 0),
+                    "current_price": float(p.get("current_price") or 0),
+                    "security_type": "EQ",
+                }
+                for p in pos
+            ]
+            equity     = float(acct.get("equity") or 0)
+            last_eq    = float(acct.get("last_equity") or equity)
+            cash       = float(acct.get("cash") or 0)
+            net_mv     = sum(p["market_value"] for p in positions)
+            total_cost = sum(p["cost_basis"]   for p in positions)
+            total_gain = sum(p["total_gain"]   for p in positions)
+            day_gain   = sum(p["day_gain"]     for p in positions)
+            balances = {
+                "totalAccountValue":           round(equity, 2),
+                "netMv":                       round(net_mv, 2),
+                "cashAvailableForInvestment":  round(cash, 2),
+                "cashAvailableForWithdrawal":  round(cash, 2),
+                "buyingPower":                 round(float(acct.get("buying_power") or 0), 2),
+                "totalGainDollar":             round(total_gain, 2),
+                "totalGainPct":                round((total_gain / total_cost * 100), 2) if total_cost else 0.0,
+                "dayGainDollar":               round(day_gain, 2),
+                "dayGainPct":                  round(((equity - last_eq) / last_eq * 100), 2) if last_eq else 0.0,
+            }
+            portfolio_source = "alpaca"
+
+            # Keep `paper_account` block too so the analyzer's existing
+            # reconciliation logic (which references paper_account.equity etc.)
+            # keeps working.
+            paper_account = {
+                "available":     True,
+                "cash":          cash,
+                "buying_power":  float(acct.get("buying_power") or 0),
+                "equity":        equity,
+                "last_equity":   last_eq,
+                "portfolio_value": float(acct.get("portfolio_value") or 0),
+                "status":        acct.get("status"),
+                "position_count": len(positions),
+                "positions": [
+                    {
+                        "ticker":          p.get("symbol"),
+                        "qty":             float(p.get("qty") or 0),
+                        "avg_entry":       float(p.get("avg_entry_price") or 0),
+                        "market_value":    float(p.get("market_value") or 0),
+                        "unrealized_pl":   float(p.get("unrealized_pl") or 0),
+                        "unrealized_plpc": float(p.get("unrealized_plpc") or 0),
+                        "current_price":   float(p.get("current_price") or 0),
+                        "side":            p.get("side"),
+                    }
+                    for p in pos
+                ],
+            }
+            logger.info(
+                "Alpaca portfolio: %d positions, equity=$%.2f, cash=$%.2f, total_gain=$%.2f",
+                len(positions), equity, cash, total_gain,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Alpaca portfolio fetch failed — falling back to portfolio.json")
+            positions = []
+            balances = {}
+    else:
+        logger.warning("Alpaca creds missing — falling back to portfolio.json")
+
+    if not positions:
+        logger.warning("Loading config/portfolio.json fallback")
         with open(_PORTFOLIO_FALLBACK) as f:
             fb = json.load(f)
         positions = fb.get("positions", [])
         balances = fb.get("balances", {})
-
-    # --- Alpaca paper account (actual auto-executed holdings) ----------------
-    # Pulled so Claude can reconcile its recommendations against the *real*
-    # paper-trade book, not just the E*TRADE picture. Soft-fail: never block
-    # collection on Alpaca being unreachable.
-    paper_account: dict = {"available": False}
-    try:
-        ak = secrets.get("AlpacaApiKey")
-        asec = secrets.get("AlpacaApiSecret")
-        if ak and asec:
-            alp = AlpacaClient(api_key=ak, api_secret=asec)
-            acct = alp.get_account()
-            pos = alp.list_positions()
-            paper_positions = [
-                {
-                    "ticker":        p.get("symbol"),
-                    "qty":           float(p.get("qty") or 0),
-                    "avg_entry":     float(p.get("avg_entry_price") or 0),
-                    "market_value":  float(p.get("market_value") or 0),
-                    "unrealized_pl": float(p.get("unrealized_pl") or 0),
-                    "unrealized_plpc": float(p.get("unrealized_plpc") or 0),
-                    "current_price": float(p.get("current_price") or 0),
-                    "side":          p.get("side"),
-                }
-                for p in pos
-            ]
-            paper_account = {
-                "available":     True,
-                "cash":          float(acct.get("cash") or 0),
-                "buying_power":  float(acct.get("buying_power") or 0),
-                "equity":        float(acct.get("equity") or 0),
-                "portfolio_value": float(acct.get("portfolio_value") or 0),
-                "status":        acct.get("status"),
-                "position_count": len(paper_positions),
-                "positions":     paper_positions,
-            }
-            logger.info(
-                "Alpaca paper: %d positions, cash=$%.2f, equity=$%.2f",
-                len(paper_positions), paper_account["cash"], paper_account["equity"],
-            )
-        else:
-            logger.warning("Alpaca creds missing — skipping paper_account block")
-    except Exception:  # noqa: BLE001
-        logger.exception("Alpaca paper-account fetch failed — continuing without it")
 
     tickers = [p["ticker"] for p in positions if p.get("ticker")]
     logger.info("Portfolio tickers (%d): %s", len(tickers), tickers)
@@ -280,7 +314,7 @@ def run() -> None:
         "portfolio": {
             "positions": positions,
             "balances": balances,
-            "source": "etrade" if etrade.ready else "fallback",
+            "source": portfolio_source,
         },
         "paper_account": paper_account,
         "fundamentals": profiles,
@@ -1419,5 +1453,5 @@ def _write_sentiment_history(today: str, snapshot: dict) -> None:
         "forex_news_count":     len(news.get("forex", [])),
         "company_news_count":   sum(len(v) for v in news.get("company", {}).values()),
         "positions_count":      len(snapshot.get("portfolio", {}).get("positions", [])),
-        "etrade_source":        snapshot.get("portfolio", {}).get("source", "unknown"),
+        "portfolio_source":     snapshot.get("portfolio", {}).get("source", "unknown"),
     })

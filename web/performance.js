@@ -42,8 +42,9 @@
   function renderChart(data) {
     const series = data.series || [];
     const labels = series.map(p => p.date);
-    const pfData = series.map(p => p.portfolio_norm);
-    const spyData = series.map(p => p.spy_norm);
+    // Convert normalized (start=100) into percent change from start.
+    const pfData  = series.map(p => p.portfolio_norm != null ? p.portfolio_norm - 100 : null);
+    const spyData = series.map(p => p.spy_norm       != null ? p.spy_norm       - 100 : null);
 
     const cfg = {
       type: "line",
@@ -51,9 +52,9 @@
         labels,
         datasets: [
           { label: "Portfolio", data: pfData, borderColor: "#4f8cff", backgroundColor: "transparent",
-            borderWidth: 2, tension: 0.15, pointRadius: 0, pointHoverRadius: 4 },
+            borderWidth: 2, tension: 0.15, pointRadius: 2, pointHoverRadius: 5 },
           { label: "S&P 500 (SPY)", data: spyData, borderColor: "#e0524d", backgroundColor: "transparent",
-            borderWidth: 2, tension: 0.15, pointRadius: 0, pointHoverRadius: 4, borderDash: [5, 4] },
+            borderWidth: 2, tension: 0.15, pointRadius: 2, pointHoverRadius: 5, borderDash: [5, 4] },
         ],
       },
       options: {
@@ -63,14 +64,24 @@
           legend: { labels: { color: "#e6e8ee" } },
           tooltip: {
             callbacks: {
-              label: (ctx) => `${ctx.dataset.label}: ${Number(ctx.parsed.y).toFixed(2)} (${(ctx.parsed.y - 100).toFixed(2)}%)`,
+              label: (ctx) => {
+                const v = ctx.parsed.y;
+                return v == null ? `${ctx.dataset.label}: —`
+                  : `${ctx.dataset.label}: ${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
+              },
             },
           },
         },
         scales: {
           x: { ticks: { color: "#8a93a6", maxTicksLimit: 10 }, grid: { color: "#262c38" } },
-          y: { ticks: { color: "#8a93a6", callback: (v) => v.toFixed(0) }, grid: { color: "#262c38" },
-               title: { display: true, text: "Normalized (start = 100)", color: "#8a93a6" } },
+          y: {
+            ticks: {
+              color: "#8a93a6",
+              callback: (v) => `${v >= 0 ? "+" : ""}${Number(v).toFixed(2)}%`,
+            },
+            grid: { color: "#262c38" },
+            title: { display: true, text: "% change from window start", color: "#8a93a6" },
+          },
         },
       },
     };
