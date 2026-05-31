@@ -339,3 +339,113 @@ def reject(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="me", methods=["GET"])
 def me(req: func.HttpRequest) -> func.HttpResponse:
     return _json({"clientPrincipal": _client_principal(req)})
+
+
+# ── performance: portfolio vs S&P 500 time series ─────────────────────────────
+_WINDOW_DAYS = {
+    "YTD": None,  # special-cased below
+    "3M":  93,
+    "6M":  186,
+    "1Y":  366,
+    "2Y":  732,
+    "3Y":  1098,
+    "ALL": None,
+}
+
+
+@app.route(route="performance", methods=["GET"])
+def performance(req: func.HttpRequest) -> func.HttpResponse:
+    """Return time series for portfolio total value and SPY close, plus current
+    holdings valuations. Query param: window=YTD|3M|6M|1Y|2Y|3Y|ALL (default 1Y).
+    """
+    from datetime import date, timedelta
+
+    window = (req.params.get("window") or "1Y").upper()
+    if window not in _WINDOW_DAYS:
+        return _err(f"invalid window (use {list(_WINDOW_DAYS)})", 400)
+
+    today = date.today()
+    if window == "YTD":
+        cutoff = date(today.year, 1, 1)
+    elif window == "ALL":
+        cutoff = date(1900, 1, 1)
+    else:
+        cutoff = today - timedelta(days=_WINDOW_DAYS[window])
+    cutoff_str = cutoff.isoformat()
+
+    try:
+        container = _blobs().get_container_client("daily-snapshots")
+        # List all snapshot blob names (cheap; metadata only).
+        all_names = []
+        for b in container.list_blobs():
+            stem = b.name.rsplit(".", 1)[0]
+            if _DATE_RE.match(stem) and stem >= cutoff_str:
+                all_names.append(stem)
+        all_names.sort()
+
+        series = []
+        latest_positions = []
+        latest_balances = {}
+        latest_prices = {}
+        latest_date = None
+
+        for d in all_names:
+            snap = _download_json("daily-snapshots", f"{d}.json")
+            if not snap:
+                continue
+            pf = snap.get("portfolio") or {}
+            bal = pf.get("balances") or {}
+            prices = snap.get("prices") or {}
+            spy = (prices.get("SPY") or {}).get("c")
+            tav = bal.get("totalAccountValue")
+            if tav is not None and spy is not None:
+                series.append({
+                    "date": d,
+                    "portfolio_value": round(float(tav), 2),
+                    "spy_close": round(float(spy), 4),
+                })
+            latest_date = d
+            latest_positions = pf.get("positions") or latest_positions
+            latest_balances  = bal or latest_balances
+            latest_prices    = prices or latest_prices
+
+        # Normalize both series to 100 at first point for chart comparability.
+        if series:
+            p0 = series[0]["portfolio_value"]
+            s0 = series[0]["spy_close"]
+            for pt in series:
+                pt["portfolio_norm"] = round((pt["portfolio_value"] / p0) * 100, 3) if p0 else None
+                pt["spy_norm"]       = round((pt["spy_close"] / s0) * 100, 3) if s0 else None
+
+        # Build current holdings table (from latest snapshot).
+        holdings = []
+        total_mv = latest_balances.get("netMv") or sum((p.get("market_value") or 0) for p in latest_positions)
+        for p in latest_positions:
+            cost = p.get("cost_basis")
+            mv   = p.get("market_value")
+            tg   = p.get("total_gain")
+            tg_pct = (tg / cost * 100) if (cost and tg is not None) else None
+            holdings.append({
+                "ticker": p.get("ticker"),
+                "quantity": p.get("quantity"),
+                "cost_basis": cost,
+                "market_value": mv,
+                "last_price": (latest_prices.get(p.get("ticker")) or {}).get("c"),
+                "total_gain": tg,
+                "total_gain_pct": round(tg_pct, 2) if tg_pct is not None else None,
+                "weight_pct": round((mv / total_mv * 100), 2) if (mv and total_mv) else None,
+                "dividends_gain": None,  # TODO: requires E*TRADE transactions or FMP dividend history
+            })
+        holdings.sort(key=lambda h: -(h.get("market_value") or 0))
+
+        return _json({
+            "window": window,
+            "cutoff": cutoff_str,
+            "as_of": latest_date,
+            "series": series,
+            "holdings": holdings,
+            "balances": latest_balances,
+        })
+    except Exception as e:
+        log.exception("performance failed")
+        return _err(str(e), status=500)

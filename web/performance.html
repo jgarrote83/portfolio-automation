@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Performance &middot; Portfolio Automation</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topnav">
+    <strong>Portfolio Automation</strong>
+    <nav>
+      <a href="/today.html">Today</a>
+      <a href="/history.html">History</a>
+      <a href="/portfolio.html">Portfolio</a>
+      <a href="/performance.html" class="active">Performance</a>
+    </nav>
+    <span id="user" class="user"></span>
+  </header>
+  <main class="container">
+    <h1>Portfolio vs S&amp;P 500</h1>
+
+    <div id="window-tabs" class="window-tabs">
+      <button class="btn" data-window="YTD">YTD</button>
+      <button class="btn" data-window="3M">3M</button>
+      <button class="btn" data-window="6M">6M</button>
+      <button class="btn primary" data-window="1Y">1Y</button>
+      <button class="btn" data-window="2Y">2Y</button>
+      <button class="btn" data-window="3Y">3Y</button>
+      <span id="perf-summary" class="muted" style="margin-left:1rem"></span>
+    </div>
+
+    <div class="chart-wrap">
+      <canvas id="perfChart" height="120"></canvas>
+    </div>
+
+    <h2 style="margin-top:2rem">Holdings valuation</h2>
+    <p class="muted" style="margin-top:-.5rem">As of <span id="as-of">—</span>. Dividends not yet tracked — coming soon.</p>
+    <table id="valuations">
+      <thead>
+        <tr>
+          <th>Ticker</th>
+          <th>Qty</th>
+          <th>Weight</th>
+          <th>Cost basis</th>
+          <th>Current value</th>
+          <th>Total gain</th>
+          <th>Dividends gain</th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
+    </table>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="/app.js" defer></script>
+  <script src="/performance.js" defer></script>
+</body>
+</html>

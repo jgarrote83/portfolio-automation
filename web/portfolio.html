@@ -13,16 +13,22 @@
       <a href="/today.html">Today</a>
       <a href="/history.html">History</a>
       <a href="/portfolio.html" class="active">Portfolio</a>
+      <a href="/performance.html">Performance</a>
     </nav>
     <span id="user" class="user"></span>
   </header>
   <main class="container">
     <h1>Current holdings</h1>
+    <div id="summary" class="summary-grid"></div>
     <table id="holdings">
       <thead>
-        <tr><th>Ticker</th><th>Qty</th><th>Weight</th><th>Last</th><th>Day P/L</th><th>Unrealised</th></tr>
+        <tr>
+          <th>Ticker</th><th>Qty</th><th>Weight</th><th>Last</th>
+          <th>Market value</th><th>Cost basis</th>
+          <th>Day P/L</th><th>Total gain</th>
+        </tr>
       </thead>
-      <tbody><tr><td colspan="6" class="muted">Loading…</td></tr></tbody>
+      <tbody><tr><td colspan="8" class="muted">Loading…</td></tr></tbody>
     </table>
   </main>
   <script src="/app.js" defer></script>
