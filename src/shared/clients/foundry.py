@@ -26,7 +26,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "claude-sonnet-4-6"
-_DEFAULT_MAX_TOKENS = 8000
+_DEFAULT_MAX_TOKENS = 16000
 _DEFAULT_TEMPERATURE = 0.2
 _TIMEOUT_SECONDS = 180
 _ANTHROPIC_VERSION = "2023-06-01"
@@ -98,11 +98,17 @@ class FoundryClient:
                 if not full:
                     raise RuntimeError(f"Foundry empty response: {data}")
                 logger.info(
-                    "Foundry call ok: model=%s in_tokens=%s out_tokens=%s",
+                    "Foundry call ok: model=%s in_tokens=%s out_tokens=%s stop_reason=%s",
                     self.model,
                     data.get("usage", {}).get("input_tokens"),
                     data.get("usage", {}).get("output_tokens"),
+                    data.get("stop_reason"),
                 )
+                if data.get("stop_reason") == "max_tokens":
+                    logger.warning(
+                        "Foundry response hit max_tokens cap (%s) \u2014 output likely truncated",
+                        max_tokens,
+                    )
                 return full
             except Exception as e:  # noqa: BLE001
                 last_err = e

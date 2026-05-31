@@ -127,6 +127,17 @@ def write_trades(date_str: str, trades: dict | list) -> None:
     logger.info("Trades written: daily-trades/%s.json (%d bytes)", date_str, len(data))
 
 
+def write_debug_raw(date_str: str, raw: str) -> None:
+    """Persist the raw Claude response for forensics when parsing fails."""
+    client = _blob_client()
+    blob = client.get_blob_client("daily-reports", f"_debug/{date_str}-raw.txt")
+    blob.upload_blob(raw.encode("utf-8"), overwrite=True)
+    logger.info(
+        "Debug raw response written: daily-reports/_debug/%s-raw.txt (%d bytes)",
+        date_str, len(raw),
+    )
+
+
 def _read_json_blob(container: str, name: str) -> dict | list | None:
     """Best-effort blob read; returns None if blob is missing."""
     client = _blob_client()

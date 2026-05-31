@@ -143,7 +143,16 @@ def _trim_snapshot(snapshot: dict) -> dict:
 def _split_response(raw: str, date_str: str) -> tuple[str, dict]:
     """Split Claude's response into (markdown_report, trades_dict)."""
     if _TRADES_MARKER not in raw:
-        logger.warning("Marker missing — treating full response as report, no trades")
+        logger.warning(
+            "Marker missing in response for %s (len=%d) \u2014 saving raw output to "
+            "daily-reports/_debug/%s-raw.txt; treating full response as report",
+            date_str, len(raw), date_str,
+        )
+        try:
+            from shared.storage import write_debug_raw
+            write_debug_raw(date_str, raw)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not persist debug raw response: %s", e)
         return raw.strip(), {"trades": []}
 
     md_part, _, trades_part = raw.partition(_TRADES_MARKER)
