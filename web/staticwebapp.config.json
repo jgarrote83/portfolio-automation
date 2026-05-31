@@ -1,29 +1,9 @@
 {
   "$schema": "https://json.schemas.azure.com/staticwebapp.config.json",
-  "auth": {
-    "rolesSource": "/api/roles",
-    "identityProviders": {
-      "azureActiveDirectory": {
-        "registration": {
-          "openIdIssuer": "https://login.microsoftonline.com/e4152184-8ced-4af2-9535-02d350cf54c9/v2.0",
-          "clientIdSettingName": "AAD_CLIENT_ID",
-          "clientSecretSettingName": "AAD_CLIENT_SECRET"
-        },
-        "login": {
-          "loginParameters": ["scope=openid profile email"]
-        }
-      }
-    }
-  },
   "routes": [
-    { "route": "/login", "redirect": "/.auth/login/aad", "statusCode": 302 },
-    { "route": "/logout", "redirect": "/.auth/logout", "statusCode": 302 },
-    { "route": "/api/*", "allowedRoles": ["owner"] },
-    { "route": "/*",     "allowedRoles": ["owner"] }
+    { "route": "/api/*", "allowedRoles": ["anonymous"] },
+    { "route": "/*",     "allowedRoles": ["anonymous"] }
   ],
-  "responseOverrides": {
-    "401": { "redirect": "/.auth/login/aad", "statusCode": 302 }
-  },
   "globalHeaders": {
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
