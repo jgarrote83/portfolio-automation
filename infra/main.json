@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.43.8.12551",
-      "templateHash": "14932532173766121615"
+      "templateHash": "8880496101734714227"
     }
   },
   "parameters": {
@@ -22,6 +22,13 @@
       "metadata": {
         "description": "Environment tag appended to resource names"
       }
+    },
+    "swaLocation": {
+      "type": "string",
+      "defaultValue": "eastus2",
+      "metadata": {
+        "description": "Region for the Static Web App (Free SKU is global; metadata sits here). Use eastus2 since SWA Free is not in all regions."
+      }
     }
   },
   "variables": {
@@ -30,7 +37,8 @@
     "functionAppName": "func-pfauto",
     "appServicePlanName": "[format('plan-pfauto-{0}', parameters('environment'))]",
     "logAnalyticsName": "[format('log-pfauto-{0}', parameters('environment'))]",
-    "appInsightsName": "[format('appi-pfauto-{0}', parameters('environment'))]"
+    "appInsightsName": "[format('appi-pfauto-{0}', parameters('environment'))]",
+    "staticWebAppName": "swa-pfauto"
   },
   "resources": [
     {
@@ -139,7 +147,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.43.8.12551",
-              "templateHash": "13845320606393057193"
+              "templateHash": "10507357928135410282"
             }
           },
           "parameters": {
@@ -155,7 +163,8 @@
               "daily-snapshots",
               "daily-reports",
               "daily-trades",
-              "daily-executions"
+              "daily-executions",
+              "deployment"
             ]
           },
           "resources": [
@@ -320,7 +329,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.43.8.12551",
-              "templateHash": "7594363210781563838"
+              "templateHash": "1985442267884952942"
             }
           },
           "parameters": {
@@ -341,18 +350,25 @@
             },
             "keyVaultUri": {
               "type": "string"
+            },
+            "deploymentContainerName": {
+              "type": "string",
+              "defaultValue": "deployment",
+              "metadata": {
+                "description": "Blob container that holds the deployment .zip package."
+              }
             }
           },
           "resources": [
             {
               "type": "Microsoft.Web/serverfarms",
-              "apiVersion": "2023-12-01",
+              "apiVersion": "2024-04-01",
               "name": "[parameters('appServicePlanName')]",
               "location": "[parameters('location')]",
-              "kind": "linux",
+              "kind": "functionapp",
               "sku": {
-                "name": "B1",
-                "tier": "Basic"
+                "name": "FC1",
+                "tier": "FlexConsumption"
               },
               "properties": {
                 "reserved": true
@@ -360,7 +376,7 @@
             },
             {
               "type": "Microsoft.Web/sites",
-              "apiVersion": "2023-12-01",
+              "apiVersion": "2024-04-01",
               "name": "[parameters('functionAppName')]",
               "location": "[parameters('location')]",
               "kind": "functionapp,linux",
@@ -370,23 +386,29 @@
               "properties": {
                 "serverFarmId": "[resourceId('Microsoft.Web/serverfarms', parameters('appServicePlanName'))]",
                 "httpsOnly": true,
+                "functionAppConfig": {
+                  "deployment": {
+                    "storage": {
+                      "type": "blobContainer",
+                      "value": "[format('{0}{1}', reference(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2023-05-01').primaryEndpoints.blob, parameters('deploymentContainerName'))]",
+                      "authentication": {
+                        "type": "SystemAssignedIdentity"
+                      }
+                    }
+                  },
+                  "scaleAndConcurrency": {
+                    "maximumInstanceCount": 40,
+                    "instanceMemoryMB": 2048
+                  },
+                  "runtime": {
+                    "name": "python",
+                    "version": "3.11"
+                  }
+                },
                 "siteConfig": {
-                  "linuxFxVersion": "Python|3.11",
-                  "ftpsState": "Disabled",
                   "minTlsVersion": "1.2",
+                  "ftpsState": "Disabled",
                   "appSettings": [
-                    {
-                      "name": "FUNCTIONS_EXTENSION_VERSION",
-                      "value": "~4"
-                    },
-                    {
-                      "name": "FUNCTIONS_WORKER_RUNTIME",
-                      "value": "python"
-                    },
-                    {
-                      "name": "PYTHON_ISOLATE_WORKER_DEPENDENCIES",
-                      "value": "1"
-                    },
                     {
                       "name": "AzureWebJobsStorage__accountName",
                       "value": "[parameters('storageAccountName')]"
@@ -396,20 +418,24 @@
                       "value": "managedidentity"
                     },
                     {
-                      "name": "WEBSITE_CONTENTAZUREFILECONNECTIONSTRING",
-                      "value": "[format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix=core.windows.net', parameters('storageAccountName'), listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2023-05-01').keys[0].value)]"
-                    },
-                    {
-                      "name": "WEBSITE_CONTENTSHARE",
-                      "value": "[toLower(parameters('functionAppName'))]"
-                    },
-                    {
                       "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",
                       "value": "[parameters('appInsightsConnectionString')]"
                     },
                     {
                       "name": "KEY_VAULT_URI",
                       "value": "[parameters('keyVaultUri')]"
+                    },
+                    {
+                      "name": "STORAGE_ACCOUNT_NAME",
+                      "value": "[parameters('storageAccountName')]"
+                    },
+                    {
+                      "name": "FOUNDRY_ENDPOINT",
+                      "value": "https://resource-portfolio-analysis.services.ai.azure.com/anthropic/v1/messages?api-version=2025-04-01-preview"
+                    },
+                    {
+                      "name": "FOUNDRY_MODEL",
+                      "value": "claude-sonnet-4-6"
                     }
                   ]
                 }
@@ -422,7 +448,7 @@
           "outputs": {
             "principalId": {
               "type": "string",
-              "value": "[reference(resourceId('Microsoft.Web/sites', parameters('functionAppName')), '2023-12-01', 'full').identity.principalId]"
+              "value": "[reference(resourceId('Microsoft.Web/sites', parameters('functionAppName')), '2024-04-01', 'full').identity.principalId]"
             },
             "functionAppName": {
               "type": "string",
@@ -460,7 +486,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.43.8.12551",
-              "templateHash": "10683029048000236200"
+              "templateHash": "3396065340356279471"
             }
           },
           "parameters": {
@@ -498,9 +524,20 @@
               "type": "Microsoft.Authorization/roleAssignments",
               "apiVersion": "2022-04-01",
               "scope": "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
-              "name": "[guid(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), parameters('principalId'), '0a9a7e0f-af71-4fde-9194-84e0c8f05c2e')]",
+              "name": "[guid(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), parameters('principalId'), '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3')]",
               "properties": {
-                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '0a9a7e0f-af71-4fde-9194-84e0c8f05c2e')]",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3')]",
+                "principalId": "[parameters('principalId')]",
+                "principalType": "ServicePrincipal"
+              }
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
+              "name": "[guid(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), parameters('principalId'), '17d1049b-9a84-46fb-8f53-869881c3d3ab')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '17d1049b-9a84-46fb-8f53-869881c3d3ab')]",
                 "principalId": "[parameters('principalId')]",
                 "principalType": "ServicePrincipal"
               }
@@ -537,7 +574,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.43.8.12551",
-              "templateHash": "14117798009259176804"
+              "templateHash": "12506564780346783601"
             }
           },
           "parameters": {
@@ -553,9 +590,9 @@
               "type": "Microsoft.Authorization/roleAssignments",
               "apiVersion": "2022-04-01",
               "scope": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]",
-              "name": "[guid(resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName')), parameters('principalId'), '4633458b-17de-408a-b874-0445c86b69e0')]",
+              "name": "[guid(resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName')), parameters('principalId'), '4633458b-17de-408a-b874-0445c86b69e6')]",
               "properties": {
-                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e0')]",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')]",
                 "principalId": "[parameters('principalId')]",
                 "principalType": "ServicePrincipal"
               }
@@ -565,6 +602,216 @@
       },
       "dependsOn": [
         "[resourceId('Microsoft.Resources/deployments', 'functionapp')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "eventgrid",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "storageAccountName": {
+            "value": "[variables('storageAccountName')]"
+          },
+          "functionAppName": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'functionapp'), '2025-04-01').outputs.functionAppName.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "2327744266739100751"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string"
+            },
+            "storageAccountName": {
+              "type": "string"
+            },
+            "functionAppName": {
+              "type": "string"
+            },
+            "analyzerFunctionName": {
+              "type": "string",
+              "defaultValue": "analyzer",
+              "metadata": {
+                "description": "Name of the Python function with @app.blob_trigger(..., source=\"EventGrid\")."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.EventGrid/systemTopics",
+              "apiVersion": "2024-06-01-preview",
+              "name": "[format('{0}-snapshots-topic', parameters('storageAccountName'))]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "source": "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
+                "topicType": "Microsoft.Storage.StorageAccounts"
+              }
+            },
+            {
+              "type": "Microsoft.EventGrid/systemTopics/eventSubscriptions",
+              "apiVersion": "2024-06-01-preview",
+              "name": "[format('{0}/{1}', format('{0}-snapshots-topic', parameters('storageAccountName')), 'analyzer-on-snapshot')]",
+              "properties": {
+                "destination": {
+                  "endpointType": "AzureFunction",
+                  "properties": {
+                    "resourceId": "[format('{0}/functions/{1}', resourceId('Microsoft.Web/sites', parameters('functionAppName')), parameters('analyzerFunctionName'))]",
+                    "maxEventsPerBatch": 1,
+                    "preferredBatchSizeInKilobytes": 64
+                  }
+                },
+                "filter": {
+                  "includedEventTypes": [
+                    "Microsoft.Storage.BlobCreated"
+                  ],
+                  "subjectBeginsWith": "/blobServices/default/containers/daily-snapshots/",
+                  "subjectEndsWith": ".json"
+                },
+                "eventDeliverySchema": "EventGridSchema",
+                "retryPolicy": {
+                  "maxDeliveryAttempts": 30,
+                  "eventTimeToLiveInMinutes": 1440
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.EventGrid/systemTopics', format('{0}-snapshots-topic', parameters('storageAccountName')))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "systemTopicName": {
+              "type": "string",
+              "value": "[format('{0}-snapshots-topic', parameters('storageAccountName'))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'functionapp')]",
+        "[resourceId('Microsoft.Resources/deployments', 'storage')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "swa",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('swaLocation')]"
+          },
+          "staticWebAppName": {
+            "value": "[variables('staticWebAppName')]"
+          },
+          "appInsightsConnectionString": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'monitoring'), '2025-04-01').outputs.appInsightsConnectionString.value]"
+          },
+          "storageAccountName": {
+            "value": "[variables('storageAccountName')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "11174145361754357009"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "defaultValue": "eastus2",
+              "metadata": {
+                "description": "Azure region. SWA Free metadata sits here. Use eastus2 (Free is not in all regions)."
+              }
+            },
+            "staticWebAppName": {
+              "type": "string",
+              "defaultValue": "swa-pfauto",
+              "metadata": {
+                "description": "SWA resource name"
+              }
+            },
+            "appInsightsConnectionString": {
+              "type": "string",
+              "metadata": {
+                "description": "App Insights connection string (shared with func-pfauto)"
+              }
+            },
+            "storageAccountName": {
+              "type": "string",
+              "metadata": {
+                "description": "Storage account name (exposed to managed API as env var)"
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Web/staticSites",
+              "apiVersion": "2022-03-01",
+              "name": "[parameters('staticWebAppName')]",
+              "location": "[parameters('location')]",
+              "sku": {
+                "name": "Free",
+                "tier": "Free"
+              },
+              "properties": {
+                "allowConfigFileUpdates": true,
+                "stagingEnvironmentPolicy": "Enabled",
+                "provider": "GitHub"
+              }
+            },
+            {
+              "type": "Microsoft.Web/staticSites/config",
+              "apiVersion": "2022-03-01",
+              "name": "[format('{0}/{1}', parameters('staticWebAppName'), 'appsettings')]",
+              "properties": {
+                "APPLICATIONINSIGHTS_CONNECTION_STRING": "[parameters('appInsightsConnectionString')]",
+                "STORAGE_ACCOUNT_NAME": "[parameters('storageAccountName')]",
+                "FUNCTION_APP_NAME": "func-pfauto"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Web/staticSites', parameters('staticWebAppName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "staticWebAppName": {
+              "type": "string",
+              "value": "[parameters('staticWebAppName')]"
+            },
+            "defaultHostname": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Web/staticSites', parameters('staticWebAppName')), '2022-03-01').defaultHostname]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'monitoring')]"
       ]
     }
   ],
@@ -584,6 +831,10 @@
     "appInsightsConnectionString": {
       "type": "string",
       "value": "[reference(resourceId('Microsoft.Resources/deployments', 'monitoring'), '2025-04-01').outputs.appInsightsConnectionString.value]"
+    },
+    "staticWebAppHostname": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'swa'), '2025-04-01').outputs.defaultHostname.value]"
     }
   }
 }
