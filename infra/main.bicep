@@ -76,6 +76,19 @@ module kvRoles 'modules/keyvault-roles.bicep' = {
   }
 }
 
+// ── Event Grid: daily-snapshots BlobCreated → analyzer ──────────────────────
+// Flex Consumption requires EventGrid-sourced blob triggers. The analyzer
+// function (function_app.py) uses @app.blob_trigger(source="EventGrid").
+module eventgrid 'modules/eventgrid.bicep' = {
+  name: 'eventgrid'
+  params: {
+    location: location
+    storageAccountName: storageAccountName
+    functionAppName: functionapp.outputs.functionAppName
+  }
+  dependsOn: [storage]
+}
+
 
 // ── Static Web App (single pane of glass: report + trade approval) ────────
 // Free tier: no managed identity (SWA Free rejects MI assignment). Secrets

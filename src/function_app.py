@@ -31,6 +31,7 @@ def collector(timer: func.TimerRequest) -> None:
     arg_name="snapshot",
     path="daily-snapshots/{name}.json",
     connection="AzureWebJobsStorage",
+    source="EventGrid",  # Flex Consumption requires Event Grid-sourced blob triggers
 )
 def analyzer(snapshot: func.InputStream) -> None:
     """Fires when a new daily snapshot lands; produces report + trades."""
