@@ -44,7 +44,7 @@ module keyvault 'modules/keyvault.bicep' = {
   }
 }
 
-// ── Function App (Consumption plan, Python 3.11, Linux) ─────────────────────
+// ── Function App (Flex Consumption, Python 3.11, Linux) ───────────────────
 module functionapp 'modules/functionapp.bicep' = {
   name: 'functionapp'
   params: {

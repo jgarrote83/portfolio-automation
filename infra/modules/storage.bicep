@@ -6,7 +6,7 @@ var containers = [
   'daily-reports'
   'daily-trades'
   'daily-executions'
-  'deployment'       // function app run-from-package zip
+  'deployment'       // Flex Consumption one-deploy package container
 ]
 
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
@@ -19,7 +19,7 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     supportsHttpsTrafficOnly: true
     minimumTlsVersion: 'TLS1_2'
     allowBlobPublicAccess: false
-    allowSharedKeyAccess: true     // required: Functions Linux Consumption needs shared key for Azure Files host share
+    allowSharedKeyAccess: true     // SWA managed API still uses STORAGE_CONNECTION_STRING; Flex func app uses identity-based auth and does not need this
   }
 }
 

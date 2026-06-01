@@ -1,5 +1,13 @@
 name: Deploy function code
 
+# Flex Consumption deployment.
+# Identity-based one-deploy via `az functionapp deployment source config-zip`,
+# which uploads the package to the deployment container declared in
+# functionAppConfig.deployment.storage and triggers the host to swap.
+#
+# Wheels are still pre-bundled with manylinux2014 platform tags so the worker
+# can import cryptography / pydantic-core etc. on the Flex Linux image.
+
 on:
   push:
     branches: [master]
@@ -8,14 +16,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  id-token: write   # required for OIDC — no client secret stored in GitHub
+  id-token: write   # OIDC — no client secret stored in GitHub
   contents: read
 
 env:
   FUNCTION_APP:   func-pfauto
   RESOURCE_GROUP: rg-portfolio-automation-prod
-  STORAGE_ACCT:   stpfautoprod
-  PACKAGE_BLOB:   https://stpfautoprod.blob.core.windows.net/deployment/func-pfauto.zip
 
 jobs:
   deploy:
@@ -30,10 +36,6 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies into .python_packages (manylinux2014 wheels)
-        # Force manylinux2014 (GLIBC 2.17) wheels so binaries run on the Azure
-        # Functions Consumption Linux host image, which has older GLIBC than
-        # the ubuntu-latest runner. Without this, cryptography / pydantic-core
-        # etc. pull cp311-manylinux_2_34 wheels and the worker fails to import.
         run: |
           cd src
           python -m pip install --upgrade pip
@@ -63,23 +65,11 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Upload package to deployment blob
+      - name: Deploy package (Flex Consumption one-deploy)
         run: |
-          az storage blob upload \
-            --account-name ${{ env.STORAGE_ACCT }} \
-            --container-name deployment \
-            --name func-pfauto.zip \
-            --file func-pfauto.zip \
-            --auth-mode login \
-            --overwrite
-
-      - name: Set WEBSITE_RUN_FROM_PACKAGE and restart
-        run: |
-          az functionapp config appsettings set \
+          az functionapp deployment source config-zip \
             --name ${{ env.FUNCTION_APP }} \
             --resource-group ${{ env.RESOURCE_GROUP }} \
-            --settings "WEBSITE_RUN_FROM_PACKAGE=${{ env.PACKAGE_BLOB }}"
-          az functionapp restart \
-            --name ${{ env.FUNCTION_APP }} \
-            --resource-group ${{ env.RESOURCE_GROUP }}
-          echo "Deployed: ${{ env.PACKAGE_BLOB }}"
+            --src func-pfauto.zip \
+            --build-remote false
+          echo "Deployed func-pfauto.zip to ${{ env.FUNCTION_APP }} via Flex one-deploy"
