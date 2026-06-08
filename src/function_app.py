@@ -9,6 +9,7 @@ from collector.handler import run as collector_run
 from analyzer.handler import analyze_snapshot
 from executor.handler import execute_approvals
 from seeder.handler import seed_positions
+from shared.storage import read_blob_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -140,3 +141,42 @@ def seeder(req: func.HttpRequest) -> func.HttpResponse:
         mimetype="application/json",
     )
 
+
+@app.route(
+    route="backfill",
+    methods=["POST"],
+    auth_level=func.AuthLevel.FUNCTION,
+)
+def backfill(req: func.HttpRequest) -> func.HttpResponse:
+    """Directly invoke analyze_snapshot for a given date from storage.
+
+    Useful when the EventGrid trigger can't fire (e.g. provider registering).
+    Body: {"date": "YYYY-MM-DD"}
+    """
+    try:
+        body = req.get_json()
+    except ValueError:
+        body = {}
+    date_str = (body or {}).get("date")
+    if not date_str:
+        return func.HttpResponse(
+            json.dumps({"error": "date is required (YYYY-MM-DD)"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+    blob_name = f"{date_str}.json"
+    try:
+        snapshot_bytes = read_blob_bytes("daily-snapshots", blob_name)
+        analyze_snapshot(snapshot_bytes, blob_name)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Backfill failed for %s", date_str)
+        return func.HttpResponse(
+            json.dumps({"error": str(e), "date": date_str}),
+            status_code=500,
+            mimetype="application/json",
+        )
+    return func.HttpResponse(
+        json.dumps({"status": "ok", "date": date_str}),
+        status_code=200,
+        mimetype="application/json",
+    )
