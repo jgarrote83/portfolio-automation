@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MODEL = "claude-sonnet-4-6"
 _DEFAULT_MAX_TOKENS = 16000
 _DEFAULT_TEMPERATURE = 0.2
-_TIMEOUT_SECONDS = 180
+_TIMEOUT_SECONDS = 600  # Claude with large snapshots can take >3 min; Flex allows 40 min
 _ANTHROPIC_VERSION = "2023-06-01"
 
 
