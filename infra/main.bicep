@@ -79,12 +79,13 @@ module kvRoles 'modules/keyvault-roles.bicep' = {
 // ── Event Grid: daily-snapshots BlobCreated → analyzer ──────────────────────
 // Flex Consumption requires EventGrid-sourced blob triggers. The analyzer
 // function (function_app.py) uses @app.blob_trigger(source="EventGrid").
+// Only the System Topic is created here. The event subscription is wired up
+// by deploy-code.yml AFTER code deploy, once the blobs_extension key exists.
 module eventgrid 'modules/eventgrid.bicep' = {
   name: 'eventgrid'
   params: {
     location: location
     storageAccountName: storageAccountName
-    functionAppName: functionapp.outputs.functionAppName
   }
   dependsOn: [storage]
 }
