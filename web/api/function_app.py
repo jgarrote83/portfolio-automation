@@ -397,11 +397,21 @@ def performance(req: func.HttpRequest) -> func.HttpResponse:
             bal = pf.get("balances") or {}
             prices = snap.get("prices") or {}
             spy = (prices.get("SPY") or {}).get("c")
-            tav = bal.get("totalAccountValue")
-            if tav is not None and spy is not None:
+            # Performance basis = Alpaca paper-account EQUITY (cash + position
+            # market value), NOT balances.totalAccountValue. `tav` was sourced
+            # inconsistently across snapshots: a static config-fallback value
+            # (~$44,195) on days before the paper account was funded, then the
+            # live value (~$99K) after — which rendered as a fake +124% step.
+            # Requiring paper_account.equity also makes the series begin on the
+            # first funded/trading day (the account was seeded 2026-05-26), so
+            # the chart starts when buying began rather than at a placeholder.
+            # With no external cash flows into the paper account, normalized
+            # equity %-change is the true (time-weighted) return vs SPY.
+            equity = (snap.get("paper_account") or {}).get("equity")
+            if equity is not None and spy is not None:
                 series.append({
                     "date": d,
-                    "portfolio_value": round(float(tav), 2),
+                    "portfolio_value": round(float(equity), 2),
                     "spy_close": round(float(spy), 4),
                 })
             latest_date = d
