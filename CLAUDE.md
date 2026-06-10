@@ -3,6 +3,8 @@
 ## Project overview
 Azure-native automated portfolio analysis and paper trade execution pipeline. Single-user personal system. NOT for live trading. All trade decisions require human approval via Teams adaptive card.
 
+> **Open work / where we left off:** see [`FOLLOWUPS.md`](FOLLOWUPS.md) at the repo root.
+
 ## Architecture decisions (do not deviate without discussion)
 - **Azure AI Foundry** for Claude API — project: Portfolio-Analysis, resource: resource-portfolio-analysis (East US 2, Claude not available in East US). API key auth (FoundryApiKey in KV). Endpoints in Function App settings: FOUNDRY_ENDPOINT, FOUNDRY_OPENAI_ENDPOINT. Model: claude-sonnet-4-6, temp 0.2
 - **Alpaca paper account** is the canonical source of truth for portfolio positions and balances (`portfolio.positions[]`, `portfolio.balances`, `paper_account` block). Also used for Phase 2 paper-trade execution. REST API, no VM needed. (E*TRADE was removed in commit `bc60604` — its OAuth-1.0a tokens expired daily and the integration was dropped; `src/shared/clients/etrade.py` is dead code retained only as historical reference.)
