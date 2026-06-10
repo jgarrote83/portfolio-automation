@@ -95,7 +95,11 @@ jobs:
 
           # URL-encode the key (handles trailing == from base64)
           ENCODED_KEY=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$BLOBS_KEY', safe=''))")
-          WEBHOOK_URL="https://${{ env.FUNCTION_APP }}.azurewebsites.net/runtime/webhooks/blobs?functionName=analyzer&code=${ENCODED_KEY}"
+          # functionName MUST be the fully-qualified "Host.Functions.<name>" form.
+          # The bare "analyzer" form is accepted by the blobs webhook (HTTP 200)
+          # but cannot be routed to the registered listener, so events are
+          # silently dropped — the analyzer never fires. (Diagnosed 2026-06-09.)
+          WEBHOOK_URL="https://${{ env.FUNCTION_APP }}.azurewebsites.net/runtime/webhooks/blobs?functionName=Host.Functions.analyzer&code=${ENCODED_KEY}"
 
           TOPIC_NAME="stpfautoprod-snapshots-topic"
           SUB_NAME="analyzer-on-snapshot"

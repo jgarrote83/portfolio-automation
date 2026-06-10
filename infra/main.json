@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.43.8.12551",
-      "templateHash": "8880496101734714227"
+      "templateHash": "10380642167420602039"
     }
   },
   "parameters": {
@@ -619,9 +619,6 @@
           },
           "storageAccountName": {
             "value": "[variables('storageAccountName')]"
-          },
-          "functionAppName": {
-            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'functionapp'), '2025-04-01').outputs.functionAppName.value]"
           }
         },
         "template": {
@@ -631,7 +628,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.43.8.12551",
-              "templateHash": "2327744266739100751"
+              "templateHash": "9112966282006837856"
             }
           },
           "parameters": {
@@ -640,16 +637,6 @@
             },
             "storageAccountName": {
               "type": "string"
-            },
-            "functionAppName": {
-              "type": "string"
-            },
-            "analyzerFunctionName": {
-              "type": "string",
-              "defaultValue": "analyzer",
-              "metadata": {
-                "description": "Name of the Python function with @app.blob_trigger(..., source=\"EventGrid\")."
-              }
             }
           },
           "resources": [
@@ -662,36 +649,6 @@
                 "source": "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
                 "topicType": "Microsoft.Storage.StorageAccounts"
               }
-            },
-            {
-              "type": "Microsoft.EventGrid/systemTopics/eventSubscriptions",
-              "apiVersion": "2024-06-01-preview",
-              "name": "[format('{0}/{1}', format('{0}-snapshots-topic', parameters('storageAccountName')), 'analyzer-on-snapshot')]",
-              "properties": {
-                "destination": {
-                  "endpointType": "AzureFunction",
-                  "properties": {
-                    "resourceId": "[format('{0}/functions/{1}', resourceId('Microsoft.Web/sites', parameters('functionAppName')), parameters('analyzerFunctionName'))]",
-                    "maxEventsPerBatch": 1,
-                    "preferredBatchSizeInKilobytes": 64
-                  }
-                },
-                "filter": {
-                  "includedEventTypes": [
-                    "Microsoft.Storage.BlobCreated"
-                  ],
-                  "subjectBeginsWith": "/blobServices/default/containers/daily-snapshots/",
-                  "subjectEndsWith": ".json"
-                },
-                "eventDeliverySchema": "EventGridSchema",
-                "retryPolicy": {
-                  "maxDeliveryAttempts": 30,
-                  "eventTimeToLiveInMinutes": 1440
-                }
-              },
-              "dependsOn": [
-                "[resourceId('Microsoft.EventGrid/systemTopics', format('{0}-snapshots-topic', parameters('storageAccountName')))]"
-              ]
             }
           ],
           "outputs": {
@@ -703,7 +660,6 @@
         }
       },
       "dependsOn": [
-        "[resourceId('Microsoft.Resources/deployments', 'functionapp')]",
         "[resourceId('Microsoft.Resources/deployments', 'storage')]"
       ]
     },
