@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.43.8.12551",
-      "templateHash": "10380642167420602039"
+      "templateHash": "3159244546816342159"
     }
   },
   "parameters": {
@@ -329,7 +329,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.43.8.12551",
-              "templateHash": "1985442267884952942"
+              "templateHash": "14628199031829905967"
             }
           },
           "parameters": {
@@ -436,6 +436,18 @@
                     {
                       "name": "FOUNDRY_MODEL",
                       "value": "claude-sonnet-4-6"
+                    },
+                    {
+                      "name": "TZ",
+                      "value": "America/New_York"
+                    },
+                    {
+                      "name": "AUTO_EXECUTE_ENABLED",
+                      "value": "true"
+                    },
+                    {
+                      "name": "AzureFunctionsJobHost__functionTimeout",
+                      "value": "00:40:00"
                     }
                   ]
                 }

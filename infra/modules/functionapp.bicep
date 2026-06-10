@@ -83,16 +83,24 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         // Foundry / Claude endpoint.
         { name: 'FOUNDRY_ENDPOINT',                          value: 'https://resource-portfolio-analysis.services.ai.azure.com/anthropic/v1/messages?api-version=2025-04-01-preview' }
         { name: 'FOUNDRY_MODEL',                             value: 'claude-sonnet-4-6' }
+        // Runtime knobs — kept in IaC so an infra redeploy does NOT wipe them.
+        // (They were previously applied post-deploy; that fragility silently
+        // disabled the pipeline after the Flex migration — see CLAUDE.md.)
+        //   TZ: crons are ET-local (collector 09:00 ET, auto_executor 09:35 ET).
+        //       Without it crons run UTC and auto_executor fires pre-market.
+        { name: 'TZ',                                        value: 'America/New_York' }
+        //   Paper-only auto-execute at 09:35 ET. NOTE: this overrides the
+        //   "Phase 1 clean 30+ days before Phase 2" gate — auto-trading is on.
+        { name: 'AUTO_EXECUTE_ENABLED',                      value: 'true' }
+        //   Analyzer Claude call on large snapshots can exceed the old 10-min
+        //   Consumption cap; Flex allows more. Backstops host.json functionTimeout.
+        { name: 'AzureFunctionsJobHost__functionTimeout',    value: '00:40:00' }
         // NOTE — settings intentionally NOT set here (Flex defaults / managed by platform):
         //   FUNCTIONS_EXTENSION_VERSION   (Flex auto-pins ~4)
         //   FUNCTIONS_WORKER_RUNTIME      (moved to functionAppConfig.runtime)
         //   PYTHON_ISOLATE_WORKER_DEPENDENCIES (always-on in Flex)
         //   WEBSITE_CONTENTAZUREFILECONNECTIONSTRING / WEBSITE_CONTENTSHARE (no Azure Files)
         //   WEBSITE_RUN_FROM_PACKAGE       (Flex deployment uses functionAppConfig.deployment)
-        //
-        // Runtime knobs applied post-deploy (per-env, not in IaC):
-        //   AUTO_EXECUTE_ENABLED=true
-        //   TZ=America/New_York
       ]
     }
   }
