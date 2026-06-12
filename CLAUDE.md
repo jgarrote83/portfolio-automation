@@ -47,16 +47,15 @@ portfolio-automation/
 │   ├── collector/            # Timer-triggered, collects from all APIs
 │   ├── analyzer/             # Blob-triggered, assembles context, calls Claude
 │   ├── executor/             # HTTP-triggered, Phase 2 Alpaca execution
-│   └── shared/               # Common utilities, API clients, schemas
+│   ├── shared/               # Common utilities, API clients, schemas
+│   └── config/               # Packaged with the function app
+│       ├── project-instructions.md    # Claude system prompt for analysis
+│       ├── macro-series.json          # FRED series IDs
+│       └── portfolio.json             # Fallback positions if Alpaca unreachable
 ├── web/                      # Static Web App: single pane of glass
 │   ├── *.html, app.js, styles.css
 │   ├── staticwebapp.config.json  # Entra ID auth + route protection
 │   └── api/                  # SWA managed Python Functions (HTTP only)
-├── config/
-│   ├── project-instructions.md    # Claude system prompt for analysis
-│   ├── macro-series.json          # FRED series IDs
-│   ├── news-keywords.json         # News filtering keywords
-│   └── etf-watchlist.json         # IDVO, IDMO, AIA
 ├── docs/
 │   ├── specs/                # Architecture spec + companion docs
 │   └── runbooks/             # Operational runbooks
@@ -83,7 +82,7 @@ If Alpaca is unreachable the collector falls back to `src/config/portfolio.json`
 5. Collector writes denormalized rows to 6 Table Storage tables (PortfolioHistory, FundamentalsHistory, MacroHistory, ETFLookthroughHistory, SentimentHistory, TradeHistory)
 6. Blob trigger fires analyzer
 7. Analyzer reads today's snapshot + queries tables for historical trends + loads last 5 reports for continuity
-8. Analyzer calls Claude via Foundry (Sonnet 4.6, temp 0.2, max_tokens 8000)
+8. Analyzer calls Claude via Foundry (Sonnet 4.6, temp 0.2, max_tokens 16000)
 9. Analyzer parses response: markdown report + structured trade recommendations JSON
 10. Writes report to `daily-reports/YYYY-MM-DD.md`, trades to `daily-trades/YYYY-MM-DD.json`
 11. Outputs surfaced in `swa-pfauto` (no Logic App delivery; user pulls report via web UI). Optional email/OneDrive copies can be added later if needed.
