@@ -198,6 +198,12 @@ def _extract_trades(doc: dict | list) -> list[dict]:
 
 
 def _place_one(client: AlpacaClient, trade: dict, date_str: str) -> dict:
+    # Single-leg market/limit orders only. `stop_loss` / `take_profit` on the trade
+    # are ADVISORY levels evaluated by the analyzer on the next run (it proposes an
+    # exit if the snapshot price breaches them) — they are intentionally NOT sent to
+    # Alpaca as bracket/OCO legs. A resting broker stop would make this executor
+    # stateful and collide with the daily re-recommendation loop; the daily
+    # analyzer check is the stop mechanism by design. Do not wire them in here.
     trade_id = str(trade.get("id") or uuid.uuid4())
     symbol = trade.get("symbol") or trade.get("ticker")
     side = str(trade.get("side") or trade.get("action") or "").lower()

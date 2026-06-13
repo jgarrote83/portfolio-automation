@@ -69,27 +69,40 @@ still uses `STORAGE_CONNECTION_STRING` (account key). Switching it to
 with the rule and **eliminate the secret entirely** — which also resolves the
 storage half of #2.
 
-### 5. Verify the first report under the v1.1 prompt (HIGH — time-sensitive)
-First run after commit `1de4624` uses the new format. Confirm on the next
-weekday run:
-- `===TRADES_JSON===` still parses (`daily-trades/{date}.json` appears alongside
-  the report — the new section 6 "Themes & flex pipeline" must not confuse the
-  parser)
-- Theme ledger + flex gatekeeper sections render sensibly (ledger starts empty
-  and builds across days — expected, not a bug)
-- Trade quantities follow the new conversion recipe (floor, $200 minimum,
-  1.5% cash floor respected)
+### 5. Verify the first report under the v1.1 prompt ✅ DONE 2026-06-13 (PASS)
+Verified against the `2026-06-12` report+trades blobs. Parser intact (valid JSON,
+5 trades, all echo fields). All 9 sections in new order; section 6 "Themes & Flex
+Pipeline" rendered. Flex exit discipline fired live (ADBE sold on kill criterion).
+Sells before buys; core trimmed not zeroed; data discipline held (deferred to FRED
+over a contradictory ECB headline). **Theme ledger working** — AI capex cascade
+with tier migration, watching MU (memory) June 24; correctly declined to nominate
+Tier 3 names (ETN/NEE/XLU) for lack of fundamentals → confirms #8 is the binding
+constraint on real flex nominations. Moved to Done.
 
-### 6. Phase B — stop_loss / take_profit doctrine (MEDIUM — decision needed)
-The trades JSON carries `stop_loss` / `take_profit`, but the executor **never
-reads them** — no bracket orders are sent to Alpaca; the fields are silent
-no-ops. Two options:
-- **(a) Honest minimalism (quick):** prompt instructs "set both to `null`; not
-  executed in Phase 1/2" — removes the false signal, zero code.
-- **(b) Implement:** executor submits Alpaca bracket orders when both fields are
-  present, plus prompt doctrine for how to set them (e.g. ATR-based or % bands).
-Start with (a), queue (b). Note: the flex gatekeeper's *kill criteria* (in the
-report markdown) partially cover this need via next-day proposed sells.
+### 5b. Shock framework is crisis-biased — no positive-shock path (LOW)
+On 2026-06-12 `shock_level 3` fired on a *bullish* shock (Iran peace, SPY +1.7%).
+The model used `regime_override: "tilt_lifted"` (a level-2 enum value) because at
+level 3 the only defined value is `"acute_de_risk"`, which assumes de-risking; the
+"always pair an acute call with a defensive trade" rule also assumes crisis. It
+handled it sensibly (kept ~45% cash, tiny adds) but the prompt has no clean acute-
+bullish path. Consider an enum value / narrative branch for positive acute shocks.
+(Cosmetic also noted: rotation 3.6 labeled "transition_window (4–6)" — 3.6 is in
+the 3–4 gap; no trade resulted.)
+
+### 6. Phase B — stop_loss / take_profit doctrine ✅ DONE 2026-06-13
+Resolved as advisory daily-checked levels (not broker orders), per-layer:
+- **Flex** `stop_loss` = the published kill-criteria price trigger; analyzer
+  compares it to the snapshot price each run and proposes a full exit if breached.
+  Flex names can be liquidated fully.
+- **Core** stops are null — core is never sold to zero; new **~0.1% / ≥1-share
+  weight floor** replaces the old "trim to 0%" rule (All-Weather backbone always
+  held). Decided with the account holder.
+- Executor unchanged behaviorally — clarifying comment added in `_place_one` that
+  the fields are intentionally NOT sent as bracket/OCO legs (a resting broker stop
+  would make the executor stateful and collide with the daily re-recommendation
+  loop). True broker brackets remain future work and belong with the wheel-monitor
+  component, not Phases 1–2.
+Moved to Done below.
 
 ### 7. Phase C — performance feedback loop (HIGH value, largest effort)
 The mission is "beat SPY over 12 months" but the analyzer never sees its own
@@ -127,6 +140,16 @@ narrow an aperture.
 ---
 
 ## Done
+- **2026-06-13** — Verified first v1.1 run (#5, PASS — see above) against the
+  2026-06-12 blobs.
+- **2026-06-13** — Phase B (#6): stop_loss/take_profit settled as flex-only
+  advisory levels checked daily by the analyzer (= the published kill trigger);
+  core stops null; added ~0.1% / ≥1-share **core weight floor** (core never sold
+  to zero); clarifying comment in executor `_place_one`. Prompt + CLAUDE.md +
+  executor comment. Decided 0.1% floor with the account holder. Also: **$200
+  minimum-trade floor now exempts flex** — flex can be opened/trimmed/sold-complete
+  regardless of notional (a fired kill criterion must always close the position);
+  floor still applies to core dust nudges.
 - **2026-06-12** (`1de4624`) — Phase A prompt fixes (E*TRADE staleness, weight→
   shares recipe, cash floor, earnings window, flex exit discipline, output
   budget guard) + flex gatekeeper v1.1 + thematic capex cascade + input hygiene.

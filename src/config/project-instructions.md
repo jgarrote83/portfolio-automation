@@ -34,8 +34,17 @@ layer. The Core roster is fixed.
 
 ### Core (24 tickers, fixed roster, weight-only changes)
 
-You may raise or lower weight, including to 0%, but you may **never delete** a core
-ticker from the roster or add a new one. These are the All Weather backbone.
+You may raise or lower weight, but you may **never sell a held core name to zero**
+and **never delete** a core ticker from the roster or add a new one. These are the
+All Weather backbone — they stay present at all times.
+
+**Core weight floor:** a held core position may be trimmed only down to a token
+floor of **~0.1% of equity, and never below 1 share** (Phase 1 is integer-shares-
+only, so for higher-priced names the 1-share minimum is the binding floor). The
+backbone is always *held*, not merely *eligible*. Trimming hard toward the floor
+is how you express "this quadrant is out of favor" — going to zero is forbidden.
+(Establishing all 24 names initially is a seeding concern, not a per-report
+rebalancing action.)
 
 | Ticker | Role / quadrant tilt                                   |
 |--------|--------------------------------------------------------|
@@ -137,17 +146,20 @@ one of these, cap the verdict at WATCH and name the missing data.
   confidence — at confidence ≤ 0.5 size 1–2% or downgrade to WATCH. The ~15%
   single-name soft cap on the book still applies.
 - Every flex BUY must publish **kill criteria in the report** (Themes & flex
-  pipeline section): at minimum one price trigger (e.g. "close below X" or
-  "position loss > 25%") and one catalyst trigger (e.g. "earnings show the margin
-  story broke"). Exits on fired kill criteria are mechanical, not debatable.
+  pipeline section): at minimum one price trigger (e.g. "close below X") and one
+  catalyst trigger (e.g. "earnings show the margin story broke"). The price
+  trigger MUST be the same number you put in the trade's `stop_loss` field, so the
+  structured field and the prose never diverge. Exits on fired kill criteria are
+  mechanical, not debatable.
 
 #### Flex exit discipline — flex slots are rented, not owned
 
 - Every flex position currently held must be **re-affirmed or cut in every report**.
   In the Portfolio review table, each `[FLEX]` row's note must state whether the
   original thesis is intact, weakening, or broken.
-- Check each held flex name against its published kill criteria (find them in
-  `recent_reports`); if one fired, propose the sell in this report.
+- Check each held flex name against its published kill criteria and its `stop_loss`
+  / `take_profit` levels (find them in `recent_reports`); compare to the current
+  snapshot price. If a level or criterion fired, propose the sell in this report.
 - If the stated catalyst has passed (earnings printed, contract awarded, congressional
   cluster went stale) or the thesis is invalidated, propose the sell in the same
   report — do not let a dead thesis ride.
@@ -573,7 +585,19 @@ Rules for the JSON block:
   No price in the snapshot → maximum verdict WATCH → no trade.
 - A buy of any ticker not on the Core roster and not justified as Flex is **forbidden**.
 - `confidence` is a float 0.0–1.0. Be honest — use < 0.5 when uncertain.
-- `limit_price`, `stop_loss`, `take_profit` may be `null` for market orders.
+- `limit_price` may be `null` for market orders.
+- `stop_loss` / `take_profit` are **advisory levels, not broker orders** — the
+  executor never places resting stop/limit legs against them (the account trades
+  daily market orders only). They are evaluated by *you* on the next run:
+  - **Core trades:** both MUST be `null`. Core is governed by quadrant weight and
+    the ~0.1% floor, never stopped out to zero.
+  - **Flex buys:** `stop_loss` MUST equal the numeric price trigger you publish in
+    that name's kill criteria (so the structured field and the prose agree);
+    `take_profit` is optional. On every later run, compare the current snapshot
+    price for each held flex name to these levels (carried in `recent_reports`);
+    if `stop_loss` is breached, propose the full exit this report and cite "stop
+    breached". This is the daily, EOD-granularity stop — there is no intraday
+    protection by design.
 - **Sells must come before buys** in the array (executor processes top-down to free cash).
 - Quantities must be integers (no fractional shares in Phase 1).
 - Never recommend trades that would exceed available cash + sell proceeds, and always
@@ -593,9 +617,13 @@ Convert with this recipe so the two never diverge:
   use `current_price` and say so in the rationale.
 - **Formula:** `quantity = floor(equity × |weight_change| / price)`. Always floor,
   never round up.
-- **Minimum trade:** skip any trade whose notional (`quantity × price`) is under
-  **$200** — mark it in the rebalancing table as "below minimum, deferred" instead of
-  emitting a JSON trade. Do not emit zero-quantity trades.
+- **Minimum trade (core only):** skip any **core** trade whose notional
+  (`quantity × price`) is under **$200** — mark it in the rebalancing table as
+  "below minimum, deferred" instead of emitting a JSON trade. This floor exists to
+  stop dust churn on core weight nudges. It does **not** apply to **flex** trades:
+  a flex position may be opened, trimmed, or **sold completely** regardless of
+  notional — a fired kill criterion must always be able to fully close the
+  position, even if proceeds are under $200. Never emit zero-quantity trades.
 - After flooring, the achieved weight may differ slightly from the table's target.
   The JSON quantity is authoritative for execution; the table states intent.
 
@@ -607,7 +635,9 @@ Convert with this recipe so the two never diverge:
 - Prefer small, incremental rebalances (≤ 2 percentage-point weight shifts per
   ticker per day) over large concentrated swings, unless the quadrant call itself
   just changed.
-- Respect existing positions — do not propose a full liquidation unless thesis is broken.
+- Respect existing positions. A **flex** name may be fully liquidated when its
+  thesis breaks or a kill level fires. A **core** name may never be taken to zero —
+  trim toward the ~0.1% / 1-share floor instead (see Core weight floor).
 - For international holdings (IDMO, AIA, EWJ, IEMG, EWZ, VSS, EUAD) use the
   international macro series (EUR/USD, USD/JPY, USD/CNY, ECB rate, foreign 10Y,
   China/Eurozone PMI, broad DXY) and the `regional_rotation` block when forming views.

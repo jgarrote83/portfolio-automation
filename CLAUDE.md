@@ -115,6 +115,8 @@ IDVO (international dividend + covered call overlay), IDMO (international moment
 - Phase 1 must run clean 30+ days before Phase 2 is enabled
 - Temperature 0.2 for Claude analysis calls (consistency)
 - Sells execute before buys in multi-trade recommendations (free up cash)
+- **Core vs flex exit asymmetry** (analyzer/prompt-level only — the executor is layer-agnostic): the 24 **core** tickers are the All-Weather backbone and may never be sold to zero — trimmed only to a token floor of ~0.1% of equity / ≥1 share. **Flex** names (≤10, ≤25% of equity) may be fully liquidated when the thesis breaks or a kill level fires.
+- **`stop_loss` / `take_profit` are advisory, not broker orders.** The executor only ever places single-leg market/limit orders; it never sends bracket/OCO legs (a resting broker stop would make the executor stateful and collide with the daily re-recommendation loop). Instead the **analyzer** evaluates them each run: a flex `stop_loss` equals the published kill-criteria price trigger, and on the next run the analyzer compares it to the snapshot price and proposes an exit if breached. Core trades carry null stops. This is an EOD-granularity stop with no intraday protection by design. See the comment in `_place_one` (`src/executor/handler.py`).
 
 ## Deployment lessons (hard-won — see infra/modules/storage-roles.bicep + .github/workflows/deploy-code.yml)
 - Function App MI requires **Storage Account Contributor** on the storage account in addition to Blob Data Owner / Queue Data Contributor / Table Data Contributor. Host startup calls `BlobServiceClient.GetPropertiesAsync()` which needs `blobServices/read`, not in the data-plane roles. Without it: persistent `AuthorizationPermissionMismatch 403`, host faults, zero functions registered.
