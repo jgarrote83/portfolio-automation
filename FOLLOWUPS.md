@@ -105,6 +105,9 @@ Resolved as advisory daily-checked levels (not broker orders), per-layer:
 Moved to Done below.
 
 ### 7. Phase C — performance feedback loop (HIGH value, largest effort)
+**Spec: `docs/specs/Phase_C_Performance_Feedback_v1.0.md`** (data contract +
+design rationale; the three open decisions were locked 2026-06-15: fully-invested
+SPY benchmark with cash_pct surfaced, 60d headline horizon, enum buckets confirmed).
 The mission is "beat SPY over 12 months" but the analyzer never sees its own
 results. Three sub-steps, shippable independently:
 - **7a.** Collector adds a `performance` block to the snapshot: paper-account

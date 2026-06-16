@@ -47,15 +47,16 @@ portfolio-automation/
 │   ├── collector/            # Timer-triggered, collects from all APIs
 │   ├── analyzer/             # Blob-triggered, assembles context, calls Claude
 │   ├── executor/             # HTTP-triggered, Phase 2 Alpaca execution
-│   ├── shared/               # Common utilities, API clients, schemas
-│   └── config/               # Packaged with the function app
-│       ├── project-instructions.md    # Claude system prompt for analysis
-│       ├── macro-series.json          # FRED series IDs
-│       └── portfolio.json             # Fallback positions if Alpaca unreachable
+│   └── shared/               # Common utilities, API clients, schemas
 ├── web/                      # Static Web App: single pane of glass
 │   ├── *.html, app.js, styles.css
 │   ├── staticwebapp.config.json  # Entra ID auth + route protection
 │   └── api/                  # SWA managed Python Functions (HTTP only)
+├── config/
+│   ├── project-instructions.md    # Claude system prompt for analysis
+│   ├── macro-series.json          # FRED series IDs
+│   ├── news-keywords.json         # News filtering keywords
+│   └── etf-watchlist.json         # IDVO, IDMO, AIA
 ├── docs/
 │   ├── specs/                # Architecture spec + companion docs
 │   └── runbooks/             # Operational runbooks
@@ -82,7 +83,7 @@ If Alpaca is unreachable the collector falls back to `src/config/portfolio.json`
 5. Collector writes denormalized rows to 6 Table Storage tables (PortfolioHistory, FundamentalsHistory, MacroHistory, ETFLookthroughHistory, SentimentHistory, TradeHistory)
 6. Blob trigger fires analyzer
 7. Analyzer reads today's snapshot + queries tables for historical trends + loads last 5 reports for continuity
-8. Analyzer calls Claude via Foundry (Sonnet 4.6, temp 0.2, max_tokens 16000)
+8. Analyzer calls Claude via Foundry (Sonnet 4.6, temp 0.2, max_tokens 8000)
 9. Analyzer parses response: markdown report + structured trade recommendations JSON
 10. Writes report to `daily-reports/YYYY-MM-DD.md`, trades to `daily-trades/YYYY-MM-DD.json`
 11. Outputs surfaced in `swa-pfauto` (no Logic App delivery; user pulls report via web UI). Optional email/OneDrive copies can be added later if needed.
@@ -115,8 +116,6 @@ IDVO (international dividend + covered call overlay), IDMO (international moment
 - Phase 1 must run clean 30+ days before Phase 2 is enabled
 - Temperature 0.2 for Claude analysis calls (consistency)
 - Sells execute before buys in multi-trade recommendations (free up cash)
-- **Core vs flex exit asymmetry** (analyzer/prompt-level only — the executor is layer-agnostic): the 24 **core** tickers are the All-Weather backbone and may never be sold to zero — trimmed only to a token floor of ~0.1% of equity / ≥1 share. **Flex** names (≤10, ≤25% of equity) may be fully liquidated when the thesis breaks or a kill level fires.
-- **`stop_loss` / `take_profit` are advisory, not broker orders.** The executor only ever places single-leg market/limit orders; it never sends bracket/OCO legs (a resting broker stop would make the executor stateful and collide with the daily re-recommendation loop). Instead the **analyzer** evaluates them each run: a flex `stop_loss` equals the published kill-criteria price trigger, and on the next run the analyzer compares it to the snapshot price and proposes an exit if breached. Core trades carry null stops. This is an EOD-granularity stop with no intraday protection by design. See the comment in `_place_one` (`src/executor/handler.py`).
 
 ## Deployment lessons (hard-won — see infra/modules/storage-roles.bicep + .github/workflows/deploy-code.yml)
 - Function App MI requires **Storage Account Contributor** on the storage account in addition to Blob Data Owner / Queue Data Contributor / Table Data Contributor. Host startup calls `BlobServiceClient.GetPropertiesAsync()` which needs `blobServices/read`, not in the data-plane roles. Without it: persistent `AuthorizationPermissionMismatch 403`, host faults, zero functions registered.
@@ -134,3 +133,4 @@ Full details in these companion documents — read them for implementation speci
 - Data Sources Reference v1.2 — all API endpoints, schemas, budget
 - Storage Architecture v1.0 — blob containers, table schemas, retention
 - Analyzer Pipeline v1.0 — context assembly, memory, response parsing, Alpaca mapping
+- Phase C — Performance Feedback v1.0 — self-measurement vs SPY + decision-outcome learning (data contract, planned; see FOLLOWUPS #7)
