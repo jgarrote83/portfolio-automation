@@ -106,10 +106,13 @@ Evaluate gates in order; the first failure stops escalation.
 - **G1 — Regime fit.** Does the name's sector/factor profile want the quadrant
   and rotation call you already made above? Consume those calls — never re-derive
   them. A great company in the wrong quadrant fails.
-- **G2 — Data sufficiency.** The snapshot must contain `fundamentals` and a price
-  for the ticker. If either is missing the verdict caps at WATCH — you cannot
-  size a trade without a price, and you may not substitute optimism for missing
-  data.
+- **G2 — Data sufficiency.** The snapshot must contain fundamentals and a price
+  for the ticker. For held names these are in `fundamentals` + `prices`; for a
+  **non-held candidate** the fundamentals are in the `flex_candidates` block and
+  the price is in `prices` (the collector pre-fetches a seed watchlist there).
+  If either is missing the verdict caps at WATCH — you cannot size a trade without
+  a price, and you may not substitute optimism for missing data. A candidate that
+  is neither held nor present in `flex_candidates` cannot clear this gate.
 - **G3 — Valuation sanity.** P/E against sector norms and growth, DCF vs price,
   FMP rating, beta. A low P/E alone is not a signal — state what it looks like
   against the cycle (is the E at a cyclical peak?). Leverage data is not on our
@@ -468,6 +471,9 @@ A single JSON snapshot for one trading day containing:
   `paper_account.available == false`, fall back to `portfolio.positions` and note the
   staleness.
 - `fundamentals` — FMP company profile per holding (P/E, beta, DCF, rating, sector)
+- `flex_candidates` — FMP profiles for a seed watchlist of **non-held** flex
+  candidate tickers (evaluation-only, not positions). Their prices are in `prices`.
+  This is what lets the gatekeeper's G2 gate clear for a brand-new flex name.
 - `earnings_calendar` — upcoming earnings dates (next ~14 days)
 - `prices` — most recent EOD price per ticker
 - `macro.data` — FRED time series (Fed funds, CPI, PCE, unemployment, yields, FX, ISM, etc.)

@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 _SRC = Path(__file__).parent.parent   # src/
 _MACRO_SERIES_FILE = _SRC / "config" / "macro-series.json"
 _PORTFOLIO_FALLBACK = _SRC / "config" / "portfolio.json"
+_FLEX_CANDIDATES_FILE = _SRC / "config" / "flex-candidates.json"
+# Cap on non-held flex candidates fetched per run — protects the FMP 250 req/day
+# budget (each candidate costs ~2 calls: profile + EOD price). See FOLLOWUPS #8.
+_FLEX_CANDIDATES_MAX = 20
 _ETF_WATCHLIST = ["IDVO", "IDMO", "AIA"]
 
 # Regional rotation universe: SPY benchmark + international ETFs in Core.
@@ -51,6 +55,27 @@ _SHOCK_KEYWORDS: dict[str, list[str]] = {
         "freeze", "run on", "margin call", "liquidation",
     ],
 }
+
+
+def _load_flex_candidates(exclude: set[str]) -> list[str]:
+    """Non-held flex candidate tickers from config/flex-candidates.json.
+
+    Deduped against current holdings (``exclude``) and capped so a single config
+    edit can't blow the FMP budget. Missing/malformed file → empty list (the
+    collector must never die over an optional enrichment). See FOLLOWUPS #8.
+    """
+    try:
+        with open(_FLEX_CANDIDATES_FILE) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        logger.warning("flex-candidates.json missing or invalid — no candidates this run")
+        return []
+    out: list[str] = []
+    for raw in data.get("candidates", []):
+        t = (raw or "").upper().strip()
+        if t and t not in exclude and t not in out:
+            out.append(t)
+    return out[:_FLEX_CANDIDATES_MAX]
 
 
 def run() -> None:
@@ -159,9 +184,16 @@ def run() -> None:
     tickers = [p["ticker"] for p in positions if p.get("ticker")]
     logger.info("Portfolio tickers (%d): %s", len(tickers), tickers)
 
+    # Non-held flex candidates (static seed) — the analyzer's gatekeeper G2 needs
+    # their fundamentals + price in the snapshot to evaluate a new flex name
+    # beyond WATCH. Deduped against holdings. FOLLOWUPS #8.
+    flex_candidate_tickers = _load_flex_candidates(exclude=set(tickers))
+    logger.info("Flex candidates (%d): %s", len(flex_candidate_tickers), flex_candidate_tickers)
+
     # --- FMP -----------------------------------------------------------------
     fmp = FMPClient(secrets["FmpApiKey"])
     profiles = fmp.get_profiles(tickers)
+    flex_candidate_profiles = fmp.get_profiles(flex_candidate_tickers) if flex_candidate_tickers else []
 
     from_2w = (date.today() - timedelta(days=1)).isoformat()
     to_2w   = (date.today() + timedelta(days=14)).isoformat()
@@ -245,7 +277,9 @@ def run() -> None:
     logger.info("FRED: %d series collected", sum(1 for v in macro_data.values() if v))
 
     # --- EOD prices (FMP batch-quote, single call) --------------------------
-    all_tickers = list(dict.fromkeys(tickers + _ETF_WATCHLIST))  # preserve order, dedupe
+    # Include flex candidates so the analyzer can size a buy (weight→shares needs
+    # a price) and so gatekeeper G2 sees a price for the candidate.
+    all_tickers = list(dict.fromkeys(tickers + _ETF_WATCHLIST + flex_candidate_tickers))  # preserve order, dedupe
     prices = fmp.get_eod_prices(all_tickers)
     logger.info("FMP prices: %d/%d collected", len(prices), len(all_tickers))
 
@@ -318,6 +352,7 @@ def run() -> None:
         },
         "paper_account": paper_account,
         "fundamentals": profiles,
+        "flex_candidates": flex_candidate_profiles,
         "earnings_calendar": earnings,
         "stock_news": stock_news,
         "congressional_trades": congressional,

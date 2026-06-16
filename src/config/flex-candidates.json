@@ -1,0 +1,9 @@
+{
+  "description": "Static seed list of NON-HELD flex candidate tickers. The collector fetches FMP profile + EOD price for each so the analyzer's flex gatekeeper G2 (data sufficiency) gate can evaluate them beyond WATCH. Without this, a brand-new flex idea can never clear G2 because its data is not in the snapshot. Deduped against current holdings and capped in code to protect the FMP 250 req/day budget. Static v1 of FOLLOWUPS #8; a dynamic analyzer-emitted list is the planned v2. Edit this list to pin names you want tracked.",
+  "candidates": [
+    "ETN",
+    "NEE",
+    "XLU",
+    "MU"
+  ]
+}

@@ -120,13 +120,19 @@ results. Three sub-steps, shippable independently:
 - **7c.** Analyzer surfaces both in the prompt context + instructions to review
   its own hit rate and recent losers before recommending.
 
-### 8. Collector: fetch data for WATCH-list names (MEDIUM — small, unlocks flex)
-~10 lines: read the previous report's WATCH list (or a small config/blob list)
-and include those tickers in the FMP profiles + prices fetch
-(`src/collector/handler.py:164`, `:249`). Without this, a brand-new flex
-candidate never gets fundamentals/price in the snapshot, so gatekeeper
-WATCH → BUY conversion is structurally impossible for new names (G2 caps them
-at WATCH forever).
+### 8. Collector: fetch data for flex candidate names — static v1 ✅ DONE 2026-06-15
+**Static v1 shipped:** `config/flex-candidates.json` (seed: ETN, NEE, XLU, MU) is
+loaded by the collector (`_load_flex_candidates`), deduped vs holdings, capped at
+20, and its tickers get FMP profiles (→ new `flex_candidates` snapshot block) +
+EOD prices (merged into `prices`). Gatekeeper G2 + the inputs list now point at
+`flex_candidates`, so a seeded non-held name can clear G2 and reach BUY. Edit the
+config to pin more names.
+- **v2 (remaining, MEDIUM):** make the candidate list **dynamic** — have the
+  analyzer emit a `watch_candidates` array in the trades JSON and have the
+  collector merge the previous run's list, so the AI self-requests data for names
+  it surfaces (e.g. a fresh congressional cluster) without a manual config edit.
+  2-day latency (name → data next run → actionable run after); acceptable.
+- Shares the `get_historical_price_light` path with Phase C §5 outcome stamping.
 
 ### 9. Collector: data tier for the deferred gatekeeper gates (LOW — after #8)
 The gatekeeper explicitly defers signals we don't collect: balance-sheet
@@ -143,6 +149,10 @@ narrow an aperture.
 ---
 
 ## Done
+- **2026-06-15** — #8 static v1: `config/flex-candidates.json` (ETN/NEE/XLU/MU) +
+  collector fetch (`flex_candidates` snapshot block, prices merged) + gatekeeper
+  G2/inputs pointers. Unblocks flex nominations for seeded non-held names. Dynamic
+  v2 (analyzer-emitted list) remains open under #8.
 - **2026-06-13** — Verified first v1.1 run (#5, PASS — see above) against the
   2026-06-12 blobs.
 - **2026-06-13** — Phase B (#6): stop_loss/take_profit settled as flex-only
