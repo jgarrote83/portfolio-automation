@@ -1,0 +1,9 @@
+# Ruff config for the portfolio-automation repo.
+# Keeps Ruff's default correctness rules (pyflakes F + pycodestyle E/W), which
+# catch real bugs — unused imports, undefined names, etc. We deliberately ignore
+# E701: the rotation/bond/labor scorers use compact one-line `if cond: score = X`
+# ladders on purpose for readability, and that's a conscious project style.
+target-version = "py311"
+
+[lint]
+ignore = ["E701"]

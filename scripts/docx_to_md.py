@@ -10,7 +10,6 @@ from pathlib import Path
 
 import docx
 from docx.document import Document
-from docx.oxml.ns import qn
 from docx.oxml.table import CT_Tbl
 from docx.oxml.text.paragraph import CT_P
 from docx.table import Table, _Cell
