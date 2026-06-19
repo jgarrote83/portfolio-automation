@@ -162,6 +162,18 @@ narrow an aperture.
 ---
 
 ## Done
+- **2026-06-18** — Barbell doctrine in `project-instructions.md`: (1) conviction-
+  scaled concentration — core tilt into the favored quadrant scales with the Risk
+  Score (0–2 → ~80–90%, … 9–10 → capital preservation); 0.1% floors reframed as
+  optionality ("all-weather toolkit, tactical deployment"). (2) Regime-adaptive flex
+  — flex is the alpha sleeve in *every* quadrant (offense Q1, cyclicals Q2, defense/
+  value Q3, stands down toward cash in acute Q4/shock-3); aggregate size scales with
+  conviction. (3) Constant quality gate — gatekeeper bar never relaxes in a bull,
+  only activity/size varies. Reconciled the ≤2pp guardrail (applies to low-conviction
+  only; cadence rule is the anti-whipsaw, not a weight cap). Roster-agnostic (works
+  on the current 24). **Still pending:** 25-ETF roster swap + KMLM ballast bucket
+  (separate, needs migration of held single names); Phase C 7a/7c (the measurement
+  that validates the aggression).
 - **2026-06-15** — #8 static v1: `config/flex-candidates.json` (ETN/NEE/XLU/MU) +
   collector fetch (`flex_candidates` snapshot block, prices merged) + gatekeeper
   G2/inputs pointers. Unblocks flex nominations for seeded non-held names. Dynamic

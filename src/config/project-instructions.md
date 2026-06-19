@@ -78,6 +78,28 @@ rebalancing action.)
 Free agent slots for tactical ideas. Total flex positions must stay at **≤ 10
 tickers** and the flex layer in aggregate at **≤ 25% of `paper_account.equity`**.
 
+#### Flex is the alpha sleeve in every regime (not just a bull accelerator)
+
+The all-weather ETF core is the ballast; **flex is where you express your highest-
+conviction idiosyncratic alpha — whatever the current quadrant rewards.** It is
+not locked to "high-beta growth":
+
+- **Q1 Goldilocks:** offense — growth, AI/thematic accelerators, the names that
+  beat SPY when risk is on. This is where flex is largest and hottest.
+- **Q2 Reflation:** cyclical/commodity-linked single names, reflation beneficiaries.
+- **Q3 Stagflation:** targeted defense — value, pricing-power names, specific
+  inflation/geopolitical beneficiaries (energy, defense, materials).
+- **Acute Q4 / `market_shock` level 3 crisis:** **flex stands down toward cash.**
+  In a liquidity crisis correlations go to 1 and single names gap — idiosyncratic
+  concentration is the enemy. Let the ETF ballast (gold, Treasuries, staples) carry
+  the defense; shrink flex toward zero rather than playing defense through single
+  names.
+
+**Flex aggregate size scales with conviction and regime** (within the 25% cap):
+toward the cap in high-conviction risk-on, toward the floor / zero in acute stress.
+The quality bar to *enter* never changes (see gatekeeper) — only how many slots you
+fill and how large.
+
 #### Step 1 — Nomination (screen-entry only; a source never justifies a buy)
 
 Candidates enter the pipeline from one of these sources. A source puts a name on
@@ -102,6 +124,12 @@ Act as a skeptical underwriter here: the default verdict is REJECT, and your job
 is to find reasons NOT to buy. Single stocks carry idiosyncratic risk that ETFs
 diversify away — the bar for a stock is higher than for an ETF, never lower.
 Evaluate gates in order; the first failure stops escalation.
+
+**The quality bar is constant across regimes** — gates G5 (what is the market
+wrong about) and G6 (excess vs SPY) are how you *find* SPY-beaters in any quadrant.
+A bull market does **not** lower the bar; loosening it in risk-on is exactly how you
+buy thematic hype at the top. What varies with regime/conviction is **activity and
+size** (how many slots you fill, how large), never what *qualifies*.
 
 - **G1 — Regime fit.** Does the name's sector/factor profile want the quadrant
   and rotation call you already made above? Consume those calls — never re-derive
@@ -148,6 +176,12 @@ one of these, cap the verdict at WATCH and name the missing data.
 - New flex single name: **3–4% of `paper_account.equity` maximum**, scaled to
   confidence — at confidence ≤ 0.5 size 1–2% or downgrade to WATCH. The ~15%
   single-name soft cap on the book still applies.
+- **Aggregate flex scales with conviction and regime:** in high-conviction risk-on
+  (Risk Score ≤ 4, Q1/Q2) push the sleeve toward its 25% cap with more/larger
+  positions; in mixed regimes keep it light; in acute Q4 / shock-level-3 stress
+  shrink it toward zero (see "Flex is the alpha sleeve in every regime"). Per-name
+  quality still must clear every gate — size up by adding *qualified* names, not by
+  lowering the bar.
 - Every flex BUY must publish **kill criteria in the report** (Themes & flex
   pipeline section): at minimum one price trigger (e.g. "close below X") and one
   catalyst trigger (e.g. "earnings show the margin story broke"). The price
@@ -217,6 +251,34 @@ Notes on the multi-quadrant tickers:
 - **IDMO** — Q1 (DM ex-US momentum) + Q2 when international cyclicals lead.
 - **EWJ** — Q1 primary (pure Japan growth on BoJ normalisation + governance reform); partial Q2 if global reflation lifts Japanese cyclicals.
 - **IEMG** — Q1 (broad EM growth) + Q2 (commodity-exposed EM).
+
+### Conviction-scaled concentration (how hard to tilt)
+
+You hold an **all-weather toolkit but deploy it tactically.** The roster always
+contains a tool for every quadrant, and the ~0.1% / 1-share core floor keeps every
+out-of-favor name *held* (not deleted) — so you can scale any quadrant back up in a
+single move when the regime turns. That floor is **optionality, not sentiment.**
+
+**How hard you concentrate the core into the favored quadrant scales with your
+conviction**, measured by the Risk Score (see Calculated Risk Score):
+
+| Risk Score | Conviction | Core posture — share of *core* in the favored quadrant |
+|---|---|---|
+| 0–2 | very high | Concentrate hard: ~80–90%; trim out-of-favor quadrants toward the floor |
+| 3–4 | high | Strong tilt: ~60–75% |
+| 5–6 | mixed | Modest tilt: ~40–55%; stay broadly diversified |
+| 7–8 | low | Defensive: no strong tilt; lean to ballast (cash, gold, Treasuries, staples) |
+| 9–10 | no read | Capital preservation: overweight SGOV + GLD; minimal quadrant bet |
+
+- **Be decisive when conviction is high** — do not water a high-conviction call down
+  to a 2pp nudge. Concentration rides the *standing* quadrant call; it does **not**
+  justify re-calling the quadrant (you re-call only on a cadence trigger below).
+- **Always reserve room for flex and cash.** In a high-conviction risk-on regime:
+  core concentrates to roughly its share of equity, flex runs toward its 25% cap,
+  and you keep the ≥1.5% cash floor. The percentages above are *within the core*,
+  not the whole book.
+- **Trim out-of-favor quadrants toward the floor, never to zero** — that is exactly
+  what lets you re-expand them in one move when the cadence flips the call.
 
 ### How to call the quadrant
 
@@ -638,9 +700,13 @@ Convert with this recipe so the two never diverge:
 ## Analytical guardrails
 
 - Anchor every claim in the data provided. If the snapshot lacks something, say so.
-- Prefer small, incremental rebalances (≤ 2 percentage-point weight shifts per
-  ticker per day) over large concentrated swings, unless the quadrant call itself
-  just changed.
+- Rebalance size scales with conviction, not a fixed per-day cap. In mixed/low-
+  conviction regimes (Risk Score ≥ 5) prefer small incremental shifts (≤ ~2pp per
+  ticker per day) to avoid churn. When conviction is high (Risk Score ≤ 4) or the
+  quadrant call just changed, concentrate **decisively** toward the target in
+  "Conviction-scaled concentration" — do not dilute a high-conviction call into
+  noise-level nudges. The anti-whipsaw guardrail is the *cadence* rule (re-call the
+  quadrant only on a threshold crossing), not a per-day weight cap.
 - Respect existing positions. A **flex** name may be fully liquidated when its
   thesis breaks or a kill level fires. A **core** name may never be taken to zero —
   trim toward the ~0.1% / 1-share floor instead (see Core weight floor).
