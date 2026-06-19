@@ -71,6 +71,23 @@ def upsert_entity(table_name: str, entity: dict) -> None:
                      table_name, entity.get("PartitionKey"), entity.get("RowKey"), e)
 
 
+def query_entities(table_name: str, query_filter: str | None = None) -> list[dict]:
+    """Return entities from a table as plain dicts (optionally OData-filtered).
+
+    Best-effort: returns [] on error so callers (e.g. Phase C outcome stamping)
+    never die over a read. `query_filter` is an OData string, e.g.
+    "recommended_at le '2026-05-19'".
+    """
+    svc = _table_service()
+    table = svc.get_table_client(table_name)
+    try:
+        it = table.query_entities(query_filter) if query_filter else table.list_entities()
+        return [dict(e) for e in it]
+    except Exception as e:
+        logger.error("Table query failed (%s / %s): %s", table_name, query_filter, e)
+        return []
+
+
 def read_snapshot(date_str: str) -> dict:
     """Load a daily snapshot JSON from blob storage."""
     client = _blob_client()

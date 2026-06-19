@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from shared.keyvault import load_secrets
-from shared.storage import ensure_tables, upsert_entity, write_snapshot
+from shared.storage import ensure_tables, query_entities, upsert_entity, write_snapshot
 from shared.clients.fmp import FMPClient
 from shared.clients.fred import FREDClient
 from shared.clients.finnhub import FinnhubClient
@@ -21,6 +21,9 @@ _FLEX_CANDIDATES_FILE = _SRC / "config" / "flex-candidates.json"
 # budget (each candidate costs ~2 calls: profile + EOD price). See FOLLOWUPS #8.
 _FLEX_CANDIDATES_MAX = 20
 _ETF_WATCHLIST = ["IDVO", "IDMO", "AIA"]
+# Phase C §5: horizons (calendar days) at which a recommendation's outcome vs SPY
+# is stamped onto its TradeHistory row.
+_OUTCOME_HORIZONS = [30, 60, 90]
 
 # Regional rotation universe: SPY benchmark + international ETFs in Core.
 # Used to compute 60-trading-day relative strength + 50/200d MA cross so the
@@ -76,6 +79,127 @@ def _load_flex_candidates(exclude: set[str]) -> list[str]:
         if t and t not in exclude and t not in out:
             out.append(t)
     return out[:_FLEX_CANDIDATES_MAX]
+
+
+def _close_by_date(fmp: FMPClient, symbol: str) -> dict[str, float]:
+    """{'YYYY-MM-DD': close} from FMP's ~5yr EOD light series (one call)."""
+    out: dict[str, float] = {}
+    for row in fmp.get_historical_price_light(symbol):
+        d = row.get("date")
+        c = row.get("price") if row.get("price") is not None else row.get("close")
+        if d and c is not None:
+            try:
+                out[str(d)[:10]] = float(c)
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def _close_on_or_before(close_map: dict[str, float], target: str) -> float | None:
+    """Close on `target`, else the most recent trading day before it (weekends/holidays)."""
+    if target in close_map:
+        return close_map[target]
+    earlier = [d for d in close_map if d <= target]
+    return close_map[max(earlier)] if earlier else None
+
+
+def _outcome_level(status: str | None) -> int:
+    return {"30d": 30, "60d": 60, "90d": 90, "closed": 90}.get(status or "", 0)
+
+
+def _max_matured_horizon(rec_date: str, today: date) -> int:
+    best = 0
+    for n in _OUTCOME_HORIZONS:
+        if date.fromisoformat(rec_date) + timedelta(days=n) <= today:
+            best = n
+    return best
+
+
+def _outcome_metrics(side: str, p0: float, s0: float, pn: float, sn: float) -> dict:
+    """Pure: symbol vs SPY return over a window + whether the call was correct.
+
+    A buy is correct if the symbol beat SPY (excess > 0); a sell/trim is correct
+    if it lagged SPY (excess < 0). `correct` is omitted for non-buy/sell sides.
+    """
+    ret = (pn / p0 - 1.0) * 100.0
+    spy_ret = (sn / s0 - 1.0) * 100.0
+    excess = ret - spy_ret
+    out = {"ret": round(ret, 3), "spy_ret": round(spy_ret, 3), "excess": round(excess, 3)}
+    s = (side or "").lower()
+    if s in ("buy", "sell"):
+        out["correct"] = (excess > 0) if s == "buy" else (excess < 0)
+    return out
+
+
+def _stamp_trade_outcomes(fmp: FMPClient) -> None:
+    """Phase C §5: stamp matured TradeHistory rows with N-day return vs SPY.
+
+    For each recommendation whose 30/60/90-day mark has passed and isn't yet
+    stamped, compute the symbol's excess return vs SPY over the window and whether
+    the call was correct (buy beat SPY / sell lagged SPY). Read-only on prices;
+    caller wraps in try/except so this can never break the collector. One FMP call
+    per unique symbol needing work + one for SPY. FOLLOWUPS #7 / Phase C spec §5.
+    """
+    today = date.today()
+    hi = (today - timedelta(days=min(_OUTCOME_HORIZONS))).isoformat()  # >= 30d old
+    rows = query_entities("TradeHistory", f"recommended_at le '{hi}'")
+
+    # Rows with a horizon that has matured beyond what's already stamped.
+    pending = []
+    for r in rows:
+        rec, sym = r.get("recommended_at"), r.get("symbol")
+        if not rec or not sym:
+            continue
+        if _max_matured_horizon(rec, today) > _outcome_level(r.get("outcome_status")):
+            pending.append(r)
+    if not pending:
+        logger.info("Outcome stamping: nothing matured to stamp")
+        return
+
+    # One price series per unique symbol + SPY (cached for this run).
+    series: dict[str, dict[str, float]] = {}
+    for s in {r["symbol"] for r in pending} | {"SPY"}:
+        series[s] = _close_by_date(fmp, s)
+    spy_map = series.get("SPY") or {}
+    if not spy_map:
+        logger.warning("Outcome stamping: no SPY series — skipping")
+        return
+
+    stamped = 0
+    for r in pending:
+        rec = r["recommended_at"]
+        sym_map = series.get(r["symbol"]) or {}
+        p0 = _close_on_or_before(sym_map, rec)
+        s0 = _close_on_or_before(spy_map, rec)
+        if not p0 or not s0:
+            continue
+        side = (r.get("side") or "").lower()
+        patch = {
+            "PartitionKey": r["PartitionKey"], "RowKey": r["RowKey"],
+            "price_at_rec": round(p0, 4), "spy_at_rec": round(s0, 4),
+        }
+        highest = 0
+        for n in _OUTCOME_HORIZONS:
+            if date.fromisoformat(rec) + timedelta(days=n) > today:
+                continue  # not matured yet
+            target = (date.fromisoformat(rec) + timedelta(days=n)).isoformat()
+            pn = _close_on_or_before(sym_map, target)
+            sn = _close_on_or_before(spy_map, target)
+            if not pn or not sn:
+                continue
+            m = _outcome_metrics(side, p0, s0, pn, sn)
+            patch[f"ret_{n}d_pct"] = m["ret"]
+            patch[f"spy_ret_{n}d_pct"] = m["spy_ret"]
+            patch[f"excess_{n}d_pp"] = m["excess"]
+            if "correct" in m:
+                patch[f"call_correct_{n}d"] = m["correct"]
+            highest = n
+        if highest == 0:
+            continue
+        patch["outcome_status"] = "closed" if highest >= max(_OUTCOME_HORIZONS) else f"{highest}d"
+        upsert_entity("TradeHistory", patch)
+        stamped += 1
+    logger.info("Outcome stamping: %d row(s) stamped (of %d pending)", stamped, len(pending))
 
 
 def run() -> None:
@@ -384,6 +508,12 @@ def run() -> None:
     _write_macro_history(today, macro_data, macro_meta)
     _write_etf_history(today, etf_holdings, prices)
     _write_sentiment_history(today, snapshot)
+
+    # --- Phase C §5: stamp matured trade outcomes (read-only; non-fatal) ------
+    try:
+        _stamp_trade_outcomes(fmp)
+    except Exception:  # noqa: BLE001
+        logger.exception("Outcome stamping failed (non-fatal)")
 
     logger.info("=== Collector completed for %s ===", today)
 

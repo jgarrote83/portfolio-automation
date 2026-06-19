@@ -109,16 +109,29 @@ Moved to Done below.
 design rationale; the three open decisions were locked 2026-06-15: fully-invested
 SPY benchmark with cash_pct surfaced, 60d headline horizon, enum buckets confirmed).
 The mission is "beat SPY over 12 months" but the analyzer never sees its own
-results. Three sub-steps, shippable independently:
-- **7a.** Collector adds a `performance` block to the snapshot: paper-account
-  equity vs SPY total return since inception + rolling 30/60/90d (equity history
-  already in PortfolioHistory / Alpaca portfolio-history API; the web chart in
-  `04343b4` does similar math).
-- **7b.** Trade outcome stamping: daily collector step finds TradeHistory rows
-  aged 30/60/90 days and stamps realized/unrealized P&L vs SPY over the same
-  window (the schema documents this lifecycle; nothing computes it today).
-- **7c.** Analyzer surfaces both in the prompt context + instructions to review
-  its own hit rate and recent losers before recommending.
+results. Sub-steps, shippable independently:
+- **§9 prerequisite ✅ (2026-06-18):** executor `_write_trade_history` now writes
+  lowercase keys aligned with the analyzer's recommendation row, so the upsert
+  MERGES into one coherent TradeHistory entity (no more duplicate mixed-case
+  columns). `status` transitions recommended → submitted/error; adds `exec_qty`,
+  `executed_at`, `alpaca_*`.
+- **7b. Outcome stamping ✅ (2026-06-18):** collector `_stamp_trade_outcomes(fmp)`
+  runs each day (non-fatal, wrapped): finds recommendation rows whose 30/60/90d
+  marks passed and stamps `ret_Nd_pct` / `spy_ret_Nd_pct` / `excess_Nd_pp` /
+  `call_correct_Nd` (buy beat SPY / sell lagged SPY) + `outcome_status`. One FMP
+  `get_historical_price_light` call per maturing symbol + SPY; nearest-trading-day
+  snap for weekends/holidays. Added `storage.query_entities()` to read aged rows.
+  *Not yet verifiable live until the first rows hit their 30d mark (~late June, the
+  account began ~2026-05-26) — check a stamped row then.*
+- **7a. `performance` block (REMAINING):** collector computes equity vs
+  fully-invested SPY since inception + rolling 30/60/90d + `cash_pct` into the
+  snapshot. Reuse the web `performance` endpoint math (`04343b4`); data already in
+  every snapshot (`paper_account.equity` + `prices.SPY.c`).
+- **7c. `track_record` + prompt wiring (REMAINING):** aggregate stamped rows into
+  the compact `track_record` block (hit-rate by layer/trigger/thesis, calibration,
+  sample sizes) and add a prompt section telling the analyzer to review it as a
+  calibration signal (not a per-name veto). Depends on the §7 reasoning-capture
+  enum fields (`primary_trigger`/`thesis_type`) also being emitted — not yet added.
 
 ### 8. Collector: fetch data for flex candidate names — static v1 ✅ DONE 2026-06-15
 **Static v1 shipped:** `config/flex-candidates.json` (seed: ETN, NEE, XLU, MU) is

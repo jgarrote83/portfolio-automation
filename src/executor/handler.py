@@ -253,19 +253,23 @@ def _write_trade_history(date_str: str, executions: list[dict]) -> None:
     year_month = date_str[:7]  # YYYY-MM
     for ex in executions:
         try:
+            # Lowercase keys align with the analyzer's recommendation row (same
+            # PK/RK), so this upsert MERGES execution status onto that one row
+            # rather than creating duplicate mixed-case columns. `status`
+            # transitions recommended -> submitted/error. Phase C §9.
             upsert_entity("TradeHistory", {
                 "PartitionKey": year_month,
                 "RowKey": str(ex.get("id")),
-                "Date": date_str,
-                "Symbol": ex.get("symbol") or "",
-                "Side": ex.get("side") or "",
-                "Quantity": str(ex.get("qty") or ""),
-                "OrderType": ex.get("order_type") or "",
-                "Status": ex.get("status") or "",
-                "AlpacaOrderId": ex.get("alpaca_order_id") or "",
-                "AlpacaStatus": ex.get("alpaca_status") or "",
-                "Error": ex.get("error") or "",
-                "SubmittedAt": ex.get("submitted_at") or "",
+                "symbol": ex.get("symbol") or "",
+                "side": ex.get("side") or "",
+                "order_type": ex.get("order_type") or "",
+                "status": ex.get("status") or "",
+                "exec_qty": int(ex.get("qty") or 0),   # actually submitted (may be trimmed)
+                "executed_at": date_str,
+                "alpaca_order_id": ex.get("alpaca_order_id") or "",
+                "alpaca_status": ex.get("alpaca_status") or "",
+                "error": ex.get("error") or "",
+                "submitted_at": ex.get("submitted_at") or "",
             })
         except Exception as e:  # noqa: BLE001
             logger.warning("TradeHistory upsert failed for %s: %s", ex.get("id"), e)
