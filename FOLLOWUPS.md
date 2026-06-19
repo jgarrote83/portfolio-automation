@@ -3,6 +3,35 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
+**▶ START HERE — last session 2026-06-18.** All work committed & pushed (HEAD
+`295f5b9`); GitHub is the source of truth. Shipped this session: **Phase C step 1**
+(outcome stamping + TradeHistory casing fix + 12 passing tests, `6b4e355`); the
+first-ever **CI pipeline** (ruff + pytest on push, `d11236d`); the **barbell
+doctrine** in the prompt (conviction-scaled concentration + regime-adaptive flex +
+constant quality gate, `295f5b9`); GH action bumps for Node 24 (`c9341c7`); and #8
+static v1 verified working (flex_candidates ETN/NEE/XLU/MU now evaluated by the AI).
+
+**Next priorities (in order):**
+1. **Phase C 7a + 7c** (Open #7) — the `performance` scoreboard block and the
+   `track_record` aggregates + prompt wiring. This is the keystone: it *measures*
+   whether the new aggressive concentration/flex doctrine actually beats SPY. Also
+   needs the §7 reasoning enums (`primary_trigger`/`thesis_type`) emitted.
+2. **25-ETF roster swap + KMLM ballast bucket** — analyzed & agreed in principle
+   (all-weather ETF core, single names move to flex). Needs migrating the held
+   single names (INTC/AMZN/GOOGL/MCK) into flex + a new convexity/ballast bucket
+   for KMLM (token floor, scale up on stress). Not yet drafted.
+3. **Verify first stamped 30d outcomes** (~late June, account began ~2026-05-26) —
+   check a TradeHistory row has `ret_30d_pct`/`call_correct_30d` populated.
+
+**Environment notes (read before editing):** repo is mirrored to a fresh clone at
+`C:\dev\portfolio-automation` to escape OneDrive — if you're working from the
+OneDrive path still, the **OneDrive silent-revert hazard** applies (it clobbered
+the prompt and executor working copies twice — verify `git status` / line counts
+before committing; `[[repo-onedrive-revert-hazard]]`). Local dev: Python 3.11 via
+`py`; a venv with deps lives in `%TEMP%\pfvenv` (run `ruff check .` + `PYTHONPATH=src
+pytest -q`). Azure mgmt: portfolio resources are in the **EasyGridsProduction**
+subscription (`az account set --subscription EasyGridsProduction`).
+
 **Last session: 2026-06-12** — overhauled the analyzer system prompt
 (`src/config/project-instructions.md`, commit `1de4624`): fixed the stale E*TRADE
 inputs description, added weight→shares conversion recipe, cash floor,
