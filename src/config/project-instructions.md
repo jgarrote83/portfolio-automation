@@ -268,17 +268,60 @@ conviction**, measured by the Risk Score (see Calculated Risk Score):
 | 3–4 | high | Strong tilt: ~60–75% |
 | 5–6 | mixed | Modest tilt: ~40–55%; stay broadly diversified |
 | 7–8 | low | Defensive: no strong tilt; lean to ballast (cash, gold, Treasuries, staples) |
-| 9–10 | no read | Capital preservation: overweight SGOV + GLD; minimal quadrant bet |
+| 9–10 | no read | Capital preservation: overweight GLD + long-duration Treasuries (TLT); cash sleeve toward 15%; minimal quadrant bet |
 
 - **Be decisive when conviction is high** — do not water a high-conviction call down
   to a 2pp nudge. Concentration rides the *standing* quadrant call; it does **not**
   justify re-calling the quadrant (you re-call only on a cadence trigger below).
-- **Always reserve room for flex and cash.** In a high-conviction risk-on regime:
-  core concentrates to roughly its share of equity, flex runs toward its 25% cap,
-  and you keep the ≥1.5% cash floor. The percentages above are *within the core*,
-  not the whole book.
+- **Always reserve room for flex and the cash sleeve.** In a high-conviction risk-on
+  regime: core concentrates to roughly its share of equity, flex runs toward its 25%
+  cap, and the cash sleeve sits near its 5% floor (see Cash sleeve). The percentages
+  above are *within the core*, not the whole book.
 - **Trim out-of-favor quadrants toward the floor, never to zero** — that is exactly
   what lets you re-expand them in one move when the cadence flips the call.
+
+### Cash sleeve — cash + SGOV held to a 5–15% band
+
+Treat **literal cash (`paper_account.cash`) plus SGOV** as one **cash sleeve**, and
+keep that sleeve between **5% and 15% of equity**. SGOV counts as cash: it is a
+0–3-month T-bill proxy (near-zero duration and credit risk, ~stable NAV, ~5% yield)
+— economically it *is* cash, just cash that earns yield.
+
+- **Deploy the excess.** Any time the sleeve is **above 15%**, put the surplus to
+  work — into the core per the quadrant/concentration call and into flex — not left
+  sitting. Idle cash above the band is the single biggest drag on beating SPY, and
+  the book has historically carried far too much of it. Begin deploying immediately;
+  a *large* surplus (e.g. the current ~50%) may be deployed decisively **over a few
+  sessions** rather than all in one open, to avoid timing the entire book on a single
+  day — but it must reach the 5–15% band promptly, not drift there.
+- **Position within the band by conviction** (mirrors Conviction-scaled
+  concentration): high-conviction risk-on (Risk Score ≤ 2, Q1/Q2) → hold the sleeve
+  near **5%** (fully deployed); low conviction / defensive (Risk Score ≥ 7) → toward
+  **15%** dry powder.
+- **Inside the sleeve, prefer SGOV over idle cash** — SGOV earns the bill yield while
+  `paper_account.cash` earns ~0. Keep only a small literal-cash buffer (~1–2% of
+  equity) for settlement/execution, and hold the rest of the sleeve in SGOV. To fund
+  a buy, raise cash from SGOV first (sell SGOV before buys, like any sell).
+- **The 5–15% sleeve cap supersedes any larger SGOV "defensive overweight."** True
+  Q4 / capital-preservation defense comes from long-duration Treasuries (TLT) and
+  gold (GLD), **not** from parking in cash or T-bills — so SGOV stays inside the
+  sleeve even in a deep risk-off call; the defense is expressed through duration and
+  gold, not by hoarding cash.
+- **5% is the hard floor** (it replaces the old 1.5% floor). Two documented
+  exceptions lift the 15% ceiling:
+  - **Acute shock** (`market_shock` level 3): raise the sleeve up to +10pp
+    *temporarily*, reverting to the band as the shock passes.
+  - **Confirmed structural depression / deep deflationary bear:** when a *sustained*
+    capital-preservation regime is confirmed — Risk Score 9–10 **and**
+    `labor_signals` = labor_breaking **and** `bond_signals` = defensive/acute_defensive,
+    persisting across **multiple** reports (not a one-day blip) — the ceiling lifts to
+    **~40%** for as long as the thesis holds, reverting only as the regime normalizes.
+- **Defense first goes into assets that *win* in a crisis, not idle cash.** In a
+  deflationary depression long Treasuries (TLT) and gold (GLD) appreciate as rates
+  collapse — express defense there, so the *portfolio* can be 60%+ defensive while the
+  cash sleeve stays modest. Breach the cash band specifically when **bonds are not safe
+  either** — a stagflationary stock+bond crash (2022) or a sovereign/credit event —
+  which is the only case where cash itself is the safe haven.
 
 ### How to call the quadrant
 
@@ -357,7 +400,7 @@ can override the slow framework when an event truly hits the tape.
 - **0 — none**: business as usual. Apply the 60d rotation framework and the quadrant cadence rule verbatim.
 - **1 — watch**: keep the framework verbatim but call out the elevated indicator in the narrative. No window changes, no extra tilts.
 - **2 — elevated**: you MAY shorten the relative-strength horizon from 60 trading days to **20 trading days** when reading `tickers.<T>.return_60d_pct` is clearly stale relative to the event (state explicitly that you are doing this). Tilt limit lifts from ±3pp to **±5pp** on the dimension the shock points at (intl/US split, or sector). Quadrant cadence rule is suspended for this report only if the news plainly invalidates the prior quadrant call (e.g. tariff shock invalidates a Q1 Goldilocks read).
-- **3 — acute**: you MAY act on **1–5 day signals** alone. Tilt limit lifts to **±8pp** on the affected dimension and you may propose immediate de-risking (raise SGOV/short-duration cash by up to 10pp from any overweight). Re-call the quadrant if the news warrants it. Always pair an acute call with at least one defensive trade (trim, hedge, or cash raise) even if the directional view is bullish — you are buying optionality, not certainty.
+- **3 — acute**: you MAY act on **1–5 day signals** alone. Tilt limit lifts to **±8pp** on the affected dimension and you may propose immediate de-risking by raising the **cash sleeve (cash + SGOV) by up to 10pp** — this is the one allowed breach of the 15% sleeve ceiling (see Cash sleeve), and it must revert to the band as the shock passes. Re-call the quadrant if the news warrants it. Always pair an acute call with at least one defensive trade (trim, hedge, or cash raise) even if the directional view is bullish — you are buying optionality, not certainty.
 
 **Discipline guards (do not violate these even at level 3):**
 
@@ -508,7 +551,7 @@ A single number describing your confidence in the quadrant call and the next
 - **3–4:** high conviction, one or two contradicting signals.
 - **5–6:** mixed picture, late-cycle ambiguity, central-bank pivot in play.
 - **7–8:** low conviction, key data missing or in conflict, regime change underway.
-- **9–10:** no actionable read; recommend defensive posture (overweight SGOV+GLD).
+- **9–10:** no actionable read; recommend defensive posture — overweight GLD + long-duration Treasuries (TLT) and push the cash sleeve toward its 15% ceiling (defense via duration/gold, not by hoarding cash beyond the sleeve).
 
 Print the score as `Risk Score: X/10` in the Summary section.
 
@@ -570,7 +613,27 @@ Sections, in this order:
    transition, and `Risk Score: X/10`. One-line headline thesis.
 2. **Macro & quadrant** — what the FRED data, FX, yields, and news flow imply.
    Cite specific numbers and series names. Confirm whether any quadrant-cadence
-   threshold was crossed since the last report.
+   threshold was crossed since the last report. **End this section with a Quadrant
+   allocation table** — this is how the user verifies the book actually concentrates
+   rather than just re-labelling the regime:
+
+   | Quadrant | Current % of equity | Recommended % (post-trade) |
+   |---|---|---|
+   | Q1 Goldilocks | … | … |
+   | Q2 Reflation | … | … |
+   | Q3 Stagflation | … | … |
+   | Q4 Deflation | … | … |
+   | Cash sleeve (cash + SGOV) | … | … |
+
+   - Assign each held name to its **primary** quadrant only (per "Notes on the
+     multi-quadrant tickers") so the rows sum to ~100% without double-counting; put
+     cash + SGOV in the Cash sleeve row, **not** in Q4.
+   - Then state the **favored quadrant**, its concentration target from
+     Conviction-scaled concentration (e.g. Risk Score 0–2 → ~80–90% of core), and
+     **one line on whether today's trades actually move Current toward the target or
+     merely tweak it.** If the quadrant call or conviction changed since the last
+     report but Current ≈ Recommended, you are **under-trading** — revisit the weights
+     and concentrate decisively (this is the most common failure mode).
 3. **Geopolitical overlay** — the most material 1–3 items from the last ~30 days
    that affect supply chains, energy, defense, or trade.
 4. **Portfolio review** — table of current holdings with weight, day P/L, total P/L,
@@ -668,10 +731,11 @@ Rules for the JSON block:
     protection by design.
 - **Sells must come before buys** in the array (executor processes top-down to free cash).
 - Quantities must be integers (no fractional shares in Phase 1).
-- Never recommend trades that would exceed available cash + sell proceeds, and always
-  leave a **cash floor of at least 1.5% of `paper_account.equity`** after all proposed
-  buys settle — prices can gap between the 09:00 snapshot and the 09:35 execution, and
-  a buy that overdraws buying power fails silently.
+- Never recommend trades that would exceed available cash + sell proceeds. Keep the
+  **cash sleeve (cash + SGOV) within its 5–15% band** (see Cash sleeve), and never let
+  it fall below the **5% floor** — and within that, keep ~1–2% of equity as literal
+  `cash` after all proposed buys settle, since prices can gap between the 09:00
+  snapshot and the 09:35 execution and a buy that overdraws buying power fails silently.
 - Do not recommend short selling, options, or margin in Phase 1.
 
 ### Converting weights to share quantities (use this recipe exactly)
