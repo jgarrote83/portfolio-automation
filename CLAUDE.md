@@ -102,7 +102,10 @@ If Alpaca is unreachable the collector falls back to `src/config/portfolio.json`
 - **MacroHistory**: PK=series_id, RK=date — FRED values with deltas
 - **ETFLookthroughHistory**: PK=etf_ticker, RK=date — holdings, country/sector allocation
 - **SentimentHistory**: PK=date, RK=indicator — VIX, spreads, P/C ratios, percentiles
-- **TradeHistory**: PK=year-month, RK=trade_id — full lifecycle from recommendation to 30/60/90d outcome
+- **TradeHistory**: PK=year-month, RK=trade_id — full lifecycle from recommendation to 30/60/90d outcome. Phase C adds (write-once at recommendation, flex trades) the §7 reasoning enums `primary_trigger`/`thesis_type`/`trigger_evidence`/`catalyst_date`, and (stamped later by the collector at maturity) `price_at_rec`/`spy_at_rec`/`ret_Nd_pct`/`spy_ret_Nd_pct`/`excess_Nd_pp`/`call_correct_Nd`/`outcome_status`. Keys are **lowercase** across analyzer + executor + collector writes — Azure Tables is case-sensitive and upserts MERGE onto one entity (Phase C §9 casing fix).
+
+## Snapshot analytics blocks (collector pre-computes; analyzer consumes)
+Beyond raw API data, the collector injects pre-computed analysis blocks into each `daily-snapshots/{date}.json` so the analyzer reads conclusions, not raw series: `regional_rotation`, `bond_signals`, `labor_signals`, `market_shock`, and (Phase C) `performance` (account equity vs fully-invested SPY since inception + rolling 30/60/90d + `cash_pct`) and `track_record` (hit-rate by layer/trigger/thesis at the 60d headline + confidence calibration, aggregated from stamped TradeHistory rows). Phase C 7a also maintains a compact `performance/equity-series.json` blob (collector-owned cache: backfilled once from snapshots, then append-only). Planned (Open #10, specced not built): a `flex-stops/state.json` cache + `flex_stops` snapshot block for the volatility-scaled trailing stop.
 
 ## International holdings requiring special treatment
 IDVO (international dividend + covered call overlay), IDMO (international momentum), AIA (Asia 50). Need: ETF look-through from FMP, international macro from FRED (EUR/USD, USD/JPY, USD/CNY, ECB rate, China PMI, Japan 10Y).

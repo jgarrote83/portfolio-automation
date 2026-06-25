@@ -12,25 +12,33 @@ the snapshot now carries both blocks (account **+0.88pp vs SPY** since inception
 live). Also refined the **flex gatekeeper G4/G5** this session: catalyst timing
 loosened to the flex horizon (~1–2 quarters) with a thematic-milestone path, paired
 with a G5 anti-chase guard (a name already at a 52-wk high on its cited theme has
-re-rated → fails G5). See the two newest Done entries. Prior session shipped Phase C
-step 1 (`6b4e355`), the CI pipeline (`d11236d`), and the barbell doctrine (`295f5b9`).
+re-rated → fails G5). See the Done entries. This session also **specced (not yet
+built) the flex trailing stop + catalyst-gated relative exit** —
+`docs/specs/Flex_Trailing_Stop_v1.0.md`, committed `e78e25a`, fully decision-locked;
+**implementing it is tomorrow's task (Open #10).** And **reviewed the wheel-strategy
+spec** (`Future_Project_Wheel_Strategy.md`), found it stale (E*TRADE-dependent data
+layer, Logic-App approval, short-vol mandate) and **parked it** (see Done). Prior
+session shipped Phase C step 1 (`6b4e355`), the CI pipeline (`d11236d`), and the
+barbell doctrine (`295f5b9`).
 
 **Next priorities (in order):**
-1. **Finish Phase C live verification (mostly done).** Confirmed 2026-06-25 via a
-   manual collector run: `performance` block populates (no pre-funding equity
-   step; cache built clean), `track_record` populates, and 7b stamping is live
-   (30d n=13). **Still unverified:** that a *real flex buy* emits the §7 enums
-   (`primary_trigger`/`thesis_type`/`trigger_evidence`/`catalyst_date`) into
-   `daily-trades` + TradeHistory — today's MU buy predated the deploy and the
-   afternoon re-run only re-affirmed MU, so the path hasn't run under the new
-   code yet. Also watch the **first 60d maturation (~late July)** to confirm the
-   headline `track_record` hit-rate fills in.
-2. **25-ETF roster swap + KMLM ballast bucket** — analyzed & agreed in principle
+1. **Implement Flex Trailing Stop v1 (Open #10) — TOMORROW'S TASK.** Spec is done &
+   committed (`docs/specs/Flex_Trailing_Stop_v1.0.md`, `e78e25a`), all decisions
+   locked. Build: collector `_build_flex_stops` (V = P95 of |Δclose| over 60d,
+   trail = 1.5×V, monotonic ratchet, vol-derived entry stop, catalyst-gated relative
+   exit) + `flex-stops/state.json` + `flex_stops` snapshot block + prompt wiring
+   (spec §10) + pure-function tests. Collector-computed, analyzer acts, executor
+   unchanged.
+2. **Finish Phase C live verification (mostly done).** Confirmed 2026-06-25 via a
+   manual collector run: `performance` + `track_record` populate, 7b stamping live
+   (30d n=13). **Still unverified:** a *real flex buy* emitting the §7 enums
+   (`primary_trigger`/`thesis_type`/`trigger_evidence`/`catalyst_date`) — today's MU
+   buy predated the deploy and the afternoon re-run only re-affirmed MU. Also watch
+   the **first 60d maturation (~late July)** for the headline hit-rate to fill in.
+3. **25-ETF roster swap + KMLM ballast bucket** — analyzed & agreed in principle
    (all-weather ETF core, single names move to flex). Needs migrating the held
    single names (INTC/AMZN/GOOGL/MCK) into flex + a new convexity/ballast bucket
    for KMLM (token floor, scale up on stress). Not yet drafted.
-3. **Verify first stamped 30d outcomes** (~late June, account began ~2026-05-26) —
-   check a TradeHistory row has `ret_30d_pct`/`call_correct_30d` populated.
 
 **Environment notes (read before editing):** repo is mirrored to a fresh clone at
 `C:\dev\portfolio-automation` to escape OneDrive — if you're working from the
@@ -212,9 +220,59 @@ capital-flow fingerprints (capex, backlog, shortage, subsidy) into a
 `news.capex` block — feeds the thematic cascade if 50 headlines prove too
 narrow an aperture.
 
+### 10. Implement Flex Trailing Stop v1 (HIGH — next task)
+**Spec: `docs/specs/Flex_Trailing_Stop_v1.0.md`** (v1.0, decision-locked, committed
+`e78e25a`). A volatility-scaled, one-directional ratcheting stop for the flex sleeve
++ the catalyst-gated relative exit. Locked design:
+- **Volatility unit V** = P95 of |Δclose| over 60 trading days (outlier-robust — the
+  earnings-gap day sits above P95, so no earnings-date exclusion needed).
+- **Trail / entry stop** = `peak_close_since_entry − 1.5V`; published stop is
+  **monotonic** (never decreases). Entry stop is vol-derived (`entry − 1.5V`,
+  emergent at peak = entry); the fundamental kill price is a deeper max-loss cap.
+  Break-even is emergent; `take_profit = null` for flex (let winners run).
+- **Catalyst-gated relative exit** (core exit beyond the trail): an analyst-confirmed
+  exit *candidate* when a held flex name lags SPY by ≥5pp, sustained 60d/two reports,
+  AND its catalyst has passed (30d = WATCH flag). Fills the absolute trail's blind
+  spot (rising-but-lagging dead money). Plus concentration trim + thesis-complete.
+- **Build (v1):** collector `_build_flex_stops` + `flex-stops/state.json` cache +
+  `flex_stops` snapshot block (trailing stop **and** relative-exit fields) + prompt
+  wiring (spec §10) + pure-function tests (spec §14). Reuses the Phase C SPY series +
+  `catalyst_date` enum. Non-fatal in the collector; executor unchanged (advisory
+  daily EOD levels, no broker stops). Params in `config/flex-stops.json`.
+- **Deferred to v1.1:** extension tightening, beta-adjusted relative return,
+  true-range V (if OHLC confirmed).
+
+### 11. Refresh the v1.0 design specs to match the implemented system (MEDIUM — doc debt)
+The `docs/specs/*` v1.0 docs (May 2026) describe the *original* design and have drifted
+from reality over ~2 months of implementation. Worst offender `Storage_Architecture.md`:
+- references **E*TRADE** (CashBalance, put/call option chains) and **Polygon** (ClosePrice)
+  — neither is used (E*TRADE removed `bc60604`; Polygon never integrated; prices are FMP);
+- **Logic Apps / Teams / email / OneDrive** delivery — dropped for the SWA single-pane;
+- a **mixed-case `Ticker`/`Action`/`Outcome`** TradeHistory schema with `Confidence` as
+  HIGH/MED/LOW — the code uses lowercase `symbol`/`side`/`outcome_status`, `confidence` as
+  a float, plus Phase C columns + §7 enums (now documented in CLAUDE.md);
+- blob paths (`daily-approvals/`, `daily-rejections/`, `diffs/`, `daily-reports/*.json`)
+  that don't match the actual (`approvals/`, `daily-executions/`, `performance/`,
+  `daily-reports/_debug/`); no `performance`/`track_record`/`flex_stops` snapshot blocks.
+`Analyzer_Pipeline.md` and `Data_Sources_Reference` likely carry similar drift. **CLAUDE.md
+is the current source of truth** and is maintained; these companion specs need a v1.1 pass
+(or a deprecation header pointing at CLAUDE.md). Pre-existing doc debt, not caused by
+today's work — flagged 2026-06-25 while updating storage docs for Phase C.
+
 ---
 
 ## Done
+- **2026-06-25** — Specced the **flex trailing stop + catalyst-gated relative exit**
+  (`docs/specs/Flex_Trailing_Stop_v1.0.md`, `e78e25a`); decision-locked, not yet
+  built — tracked as Open #10 for implementation. Design summary in #10.
+- **2026-06-25** — Reviewed the **wheel-strategy** placeholder
+  (`Future_Project_Wheel_Strategy.md`) at the account holder's request and **parked
+  it**: data foundation is stale (assumes E*TRADE options chains/IV/Greeks, but
+  E*TRADE was removed — the system collects zero options data and would need a new,
+  likely paid, source), the approval design predates the SWA single-pane (proposes
+  Logic Apps/Teams), and the wheel structurally caps upside (short-vol) so it trails
+  SPY in a bull — a different mandate than "beat SPY". Account holder not convinced
+  for now; revisit only per the spec's §3 prerequisites.
 - **2026-06-25** — Flex gatekeeper G4/G5 refinement in `project-instructions.md`:
   G4's "earnings within 14 days" was being read as a blanket near-term-catalyst
   requirement, rejecting `thematic` Tier-2/3 nominations whose recognition event is
