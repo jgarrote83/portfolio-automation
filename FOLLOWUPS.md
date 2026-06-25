@@ -3,23 +3,28 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-06-18.** All work committed & pushed (HEAD
-`295f5b9`); GitHub is the source of truth. Shipped this session: **Phase C step 1**
-(outcome stamping + TradeHistory casing fix + 12 passing tests, `6b4e355`); the
-first-ever **CI pipeline** (ruff + pytest on push, `d11236d`); the **barbell
-doctrine** in the prompt (conviction-scaled concentration + regime-adaptive flex +
-constant quality gate, `295f5b9`); GH action bumps for Node 24 (`c9341c7`); and #8
-static v1 verified working (flex_candidates ETN/NEE/XLU/MU now evaluated by the AI).
+**▶ START HERE — last session 2026-06-25.** All work committed & pushed; GitHub is
+the source of truth. **Phase C is complete (closes Open #7):** 7a (`performance`
+scoreboard) + 7c (`track_record` + §7 reasoning enums + "Track record" prompt
+section) shipped in `c41ea6c`, **deployed to func-pfauto**, and **live-verified** —
+the snapshot now carries both blocks (account **+0.88pp vs SPY** since inception
+2026-05-26; 30d hit-rate 0.46 on n=13, which also confirms 7b outcome-stamping is
+live). Also refined the **flex gatekeeper G4/G5** this session: catalyst timing
+loosened to the flex horizon (~1–2 quarters) with a thematic-milestone path, paired
+with a G5 anti-chase guard (a name already at a 52-wk high on its cited theme has
+re-rated → fails G5). See the two newest Done entries. Prior session shipped Phase C
+step 1 (`6b4e355`), the CI pipeline (`d11236d`), and the barbell doctrine (`295f5b9`).
 
 **Next priorities (in order):**
-1. **Verify the Phase C loop end-to-end on live data** — 7a (`performance`) and 7c
-   (`track_record` + §7 reasoning enums + prompt wiring) both shipped 2026-06-25,
-   completing Open #7. On the next collector run confirm the snapshot carries a
-   populated `performance` block (and the `performance/equity-series.json` cache
-   built cleanly — eyeball for any pre-funding equity steps), and that a fresh
-   flex buy emits `primary_trigger`/`thesis_type`/`trigger_evidence`/`catalyst_date`
-   into `daily-trades` + TradeHistory. `track_record` stays near-empty until 60d
-   outcomes mature (~late July); 30d context shows first.
+1. **Finish Phase C live verification (mostly done).** Confirmed 2026-06-25 via a
+   manual collector run: `performance` block populates (no pre-funding equity
+   step; cache built clean), `track_record` populates, and 7b stamping is live
+   (30d n=13). **Still unverified:** that a *real flex buy* emits the §7 enums
+   (`primary_trigger`/`thesis_type`/`trigger_evidence`/`catalyst_date`) into
+   `daily-trades` + TradeHistory — today's MU buy predated the deploy and the
+   afternoon re-run only re-affirmed MU, so the path hasn't run under the new
+   code yet. Also watch the **first 60d maturation (~late July)** to confirm the
+   headline `track_record` hit-rate fills in.
 2. **25-ETF roster swap + KMLM ballast bucket** — analyzed & agreed in principle
    (all-weather ETF core, single names move to flex). Needs migrating the held
    single names (INTC/AMZN/GOOGL/MCK) into flex + a new convexity/ballast bucket
@@ -210,6 +215,21 @@ narrow an aperture.
 ---
 
 ## Done
+- **2026-06-25** — Flex gatekeeper G4/G5 refinement in `project-instructions.md`:
+  G4's "earnings within 14 days" was being read as a blanket near-term-catalyst
+  requirement, rejecting `thematic` Tier-2/3 nominations whose recognition event is
+  a quarter or two out (systematically late vs the cascade's "catch it before it
+  re-rates" intent — surfaced by the 2026-06-23 ETN reject). G4 now requires a
+  *dated* catalyst within the flex horizon (~1–2 quarters / 60-day re-affirm), with
+  14-day earnings as the *tightest example, not the bar*; the next scheduled print
+  or a specific demand-visibility milestone qualifies if dated. Paired with a G5
+  tightening: a name at/near a 52-week high on the cited theme has already re-rated
+  → fails G5 (no edge left), preserving the anti-hype discipline. Loosens catalyst
+  *timing*, not the *requirement*. No code change; takes effect next analyzer run.
+- **2026-06-25** — Phase C 7a (`performance` scoreboard) + 7c (`track_record` +
+  §7 reasoning enums + prompt wiring) shipped & deployed (`c41ea6c`); closes #7.
+  Verified live: snapshot carries both blocks (account +0.88pp vs SPY since
+  inception; 30d hit-rate 0.46 n=13 confirming 7b stamping is live). Details in #7.
 - **2026-06-18** — Barbell doctrine in `project-instructions.md`: (1) conviction-
   scaled concentration — core tilt into the favored quadrant scales with the Risk
   Score (0–2 → ~80–90%, … 9–10 → capital preservation); 0.1% floors reframed as

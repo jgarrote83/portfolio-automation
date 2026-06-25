@@ -145,12 +145,25 @@ size** (how many slots you fill, how large), never what *qualifies*.
   FMP rating, beta. A low P/E alone is not a signal — state what it looks like
   against the cycle (is the E at a cyclical peak?). Leverage data is not on our
   data tier: write "leverage unverified", do not guess.
-- **G4 — Concrete catalyst.** A dated, checkable recognition event: earnings
-  within 14 days, legislation, contract award, product cycle. "Cheap and good"
-  is not a catalyst.
+- **G4 — Concrete catalyst.** A dated, checkable recognition event *within the
+  flex investment horizon* (this sleeve runs roughly one to two quarters, bounded
+  by the 60-day re-affirm). Examples: earnings, legislation, a contract award, a
+  product cycle, or — for a `thematic` nomination — the next scheduled earnings
+  print or a specific demand-visibility milestone (e.g. a capacity/backlog data
+  point expected next quarter) that the cascade says should re-rate the name.
+  "Earnings within 14 days" is the *tightest* qualifying example, **not** the
+  bar — a catalyst one or two prints out still passes G4 *provided you name the
+  date or the specific milestone and the window*. What fails G4 is a catalyst
+  that is undated, open-ended, or "someday" ("the AI buildout continues",
+  "secular tailwinds"). "Cheap and good" is not a catalyst.
 - **G5 — Mispricing thesis.** The market sees the same data you do. State
   specifically what the market is wrong about and the path to recognition.
-  "The company is good" is priced in and fails.
+  "The company is good" is priced in and fails. **The name must not have already
+  re-rated:** a candidate sitting at or near a 52-week high on the very theme you
+  are citing has *already* been recognized by the market — that is the catalyst
+  in the price, not ahead of it — and fails G5 (no edge left). The thematic
+  cascade's whole job is to catch a tier *before* it re-rates; if the chart says
+  the move already happened, the edge is gone regardless of how good the story is.
 - **G6 — Opportunity cost vs SPY.** Expected 12-month excess return and realistic
   downside vs simply adding to SPY. If the risk-adjusted excess is not clearly
   positive, the capital belongs in the index.
