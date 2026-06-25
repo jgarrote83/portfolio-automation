@@ -555,6 +555,41 @@ A single number describing your confidence in the quadrant call and the next
 
 Print the score as `Risk Score: X/10` in the Summary section.
 
+### Track record — calibrate against your own results (Phase C)
+
+The `track_record` block is how you learn whether your *process* is working — not a
+veto on any specific name. Review it before sizing trades, and use it as a
+**calibration signal only**, governed by these rules:
+
+- **Sample size is everything.** `track_record.sample_size` is the matured-outcome
+  count at the 60d headline horizon. Below ~10 it is anecdotal — note it and move
+  on; do **not** change behavior on a handful of outcomes (short-horizon
+  single-name returns are mostly noise). The block carries an explicit `caveat`;
+  respect it. Early in the account's life this block is near-empty — that is
+  expected, not a signal.
+- **Calibration is the point.** If `calibration` shows your high-confidence buckets
+  (e.g. predicted 0.75) realizing far lower (actual 0.50) with adequate n,
+  you are **overconfident** — compress your `confidence` values toward what the
+  data supports. If actual ≈ predicted, your confidence is well-calibrated; keep
+  sizing as is.
+- **Reasoning-type signal.** `by_trigger` / `by_thesis` show which *kinds* of flex
+  ideas have paid off (with n). With adequate samples, lean toward the trigger/
+  thesis types that beat SPY and demand a higher bar from the ones that lagged —
+  but never skip a gatekeeper gate because a *category* has done well, and never
+  reject a fully-qualified name because its category has done poorly. This tunes
+  emphasis, not the gates.
+- **Cash drag vs. stock picking.** Read `track_record` together with
+  `performance`: if the book trails SPY but `by_layer` hit-rates are ≥0.5, the lag
+  is cash drag (deploy the sleeve), not bad selection. If hit-rates are weak, the
+  selection process needs tightening, not more capital deployed faster.
+- **Over-trading.** If `over_trading.avg_trades_per_day` is high while hit-rates
+  are mediocre, you are churning — widen the cadence, trade less, size more
+  deliberately.
+
+Never quote individual past trades from this block in the report — it contains only
+aggregates by design. Summarize the calibration takeaway in one or two lines in the
+Recommendations or Themes section when `sample_size` is meaningful.
+
 ---
 
 ## Inputs you will receive (every run)
@@ -591,6 +626,8 @@ A single JSON snapshot for one trading day containing:
 - `bond_signals` — four-signal bond market scorecard (yield curve regime + recession probability, HY/IG credit OAS + credit_stress flag, breakeven inflation, MBS proxy + real yields), composite -8..+8 with label
 - `labor_signals` — four-signal labor-market scorecard (jobless claims trend, payrolls momentum, unemployment + Sahm Rule, wages vs Fed funds), composite -8..+8 with label `labor_strong` / `neutral` / `labor_softening` / `labor_breaking`
 - `market_shock` — short-horizon shock detector: 1d/5d price moves (SPY/DXY/VIX) with z-scores + news keyword scan, composite `shock_level` 0-3 with `triggers` and `news_examples`
+- `performance` — the scoreboard (Phase C): account equity vs fully-invested SPY since `inception_date` (`return_since_inception_pct`, `spy_return_since_inception_pct`, `excess_vs_spy_pp`), `rolling` 30/60/90d windows (null until that much history exists), `max_drawdown_pct`, and `account.cash_pct`. This is the mission metric — beating SPY. If `available` is false (pre-funding / Alpaca fallback day), say so and skip the scoreboard line.
+- `track_record` — the learning signal (Phase C): aggregate hit-rates of your own past recommendations vs SPY at the 60d headline horizon (`by_layer` / `by_trigger` / `by_thesis`), a confidence `calibration` table, `over_trading.avg_trades_per_day`, `sample_size`, and `horizons` (30/90d for context). See "Track record" below for how to use it. Aggregates only — never per-name.
 - `recent_reports` — up to 5 of your previous daily reports for continuity
 
 If a field is empty or stale, say so — do not invent the missing data.
@@ -610,7 +647,11 @@ Return **two parts**, separated by the exact literal marker on its own line:
 Sections, in this order:
 
 1. **Summary** — 3–5 sentences. State today's quadrant call, the projected 6-month
-   transition, and `Risk Score: X/10`. One-line headline thesis.
+   transition, and `Risk Score: X/10`. One-line headline thesis. When
+   `performance.available` is true, add one **scoreboard line**: account vs SPY
+   since inception (`excess_vs_spy_pp`) and current `account.cash_pct` — and if the
+   book is trailing SPY while cash is high, attribute it to cash drag rather than
+   stock selection (this is the mission metric; surface it, do not bury it).
 2. **Macro & quadrant** — what the FRED data, FX, yields, and news flow imply.
    Cite specific numbers and series names. Confirm whether any quadrant-cadence
    threshold was crossed since the last report. **End this section with a Quadrant
@@ -688,7 +729,11 @@ A single JSON object — no prose, no code fences, no markdown:
       "rationale": "1–2 sentence reason grounded in today's data and the quadrant call",
       "confidence": 0.0,
       "stop_loss": 100.00,
-      "take_profit": 150.00
+      "take_profit": 150.00,
+      "primary_trigger": "news_catalyst" | "earnings" | "congressional_cluster" | "thematic_tier" | "valuation" | "technical" | null,
+      "thesis_type": "catalyst" | "mispricing" | "macro_fit" | null,
+      "trigger_evidence": "the specific headline+source+date or data point that triggered it" | null,
+      "catalyst_date": "YYYY-MM-DD" | null
     }
   ]
 }
@@ -729,6 +774,20 @@ Rules for the JSON block:
     if `stop_loss` is breached, propose the full exit this report and cite "stop
     breached". This is the daily, EOD-granularity stop — there is no intraday
     protection by design.
+- **Reasoning-capture fields (Phase C — write-once, never edited later).** These
+  feed the `track_record` learning loop, so they must be honest at the moment of
+  recommendation:
+  - For every **flex buy that introduces or adds to a name**, all four are
+    **required and non-null**: `primary_trigger` (what caught your attention —
+    the fine enum), `thesis_type` (which gatekeeper gate carried it: `catalyst`
+    = G4, `mispricing` = G5, `macro_fit` = G1), `trigger_evidence` (the specific
+    headline + source + date, or the data point), and `catalyst_date` (the
+    expected recognition date, or null if not event-driven).
+  - `primary_trigger` must be consistent with `flex_source` (e.g. a
+    `congressional` source → `congressional_cluster` trigger; a `thematic` source
+    → `thematic_tier`).
+  - For **core** trades and **flex sells/trims**, set all four to `null` — the
+    taxonomy measures stock-picking entry skill, which lives in flex entries.
 - **Sells must come before buys** in the array (executor processes top-down to free cash).
 - Quantities must be integers (no fractional shares in Phase 1).
 - Never recommend trades that would exceed available cash + sell proceeds. Keep the

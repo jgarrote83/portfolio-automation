@@ -102,6 +102,52 @@ def read_blob_bytes(container: str, name: str) -> bytes:
     return blob.download_blob().readall()
 
 
+# ---------------------------------------------------------------------------
+# Phase C §4 — performance scoreboard series (compact equity-vs-SPY cache)
+# ---------------------------------------------------------------------------
+_PERF_SERIES_CONTAINER = "performance"
+_PERF_SERIES_NAME = "equity-series.json"
+
+
+def list_snapshot_dates() -> list[str]:
+    """Sorted-ascending YYYY-MM-DD names present in daily-snapshots (metadata only)."""
+    client = _blob_client()
+    container = client.get_container_client("daily-snapshots")
+    out: list[str] = []
+    try:
+        for b in container.list_blobs():
+            stem = b.name.rsplit("/", 1)[-1]
+            if stem.endswith(".json"):
+                stem = stem[:-5]
+                if len(stem) == 10 and stem[4] == "-" and stem[7] == "-":
+                    out.append(stem)
+    except Exception as e:
+        logger.warning("Could not list daily-snapshots: %s", e)
+        return []
+    out.sort()
+    return out
+
+
+def read_perf_series() -> list[dict]:
+    """The cached compact equity-vs-SPY series; [] if not yet created."""
+    data = _read_json_blob(_PERF_SERIES_CONTAINER, _PERF_SERIES_NAME)
+    return data if isinstance(data, list) else []
+
+
+def write_perf_series(series: list[dict]) -> None:
+    client = _blob_client()
+    container = client.get_container_client(_PERF_SERIES_CONTAINER)
+    try:
+        container.create_container()
+    except Exception:
+        pass
+    blob = client.get_blob_client(_PERF_SERIES_CONTAINER, _PERF_SERIES_NAME)
+    data = json.dumps(series, default=str, indent=2)
+    blob.upload_blob(data.encode("utf-8"), overwrite=True)
+    logger.info("Perf series written: %s/%s (%d points)",
+                _PERF_SERIES_CONTAINER, _PERF_SERIES_NAME, len(series))
+
+
 def list_recent_reports(limit: int = 5) -> list[tuple[str, str]]:
     """Return up to `limit` most recent (date, markdown) pairs from daily-reports.
 

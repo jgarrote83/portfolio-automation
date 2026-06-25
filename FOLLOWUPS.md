@@ -12,10 +12,14 @@ constant quality gate, `295f5b9`); GH action bumps for Node 24 (`c9341c7`); and 
 static v1 verified working (flex_candidates ETN/NEE/XLU/MU now evaluated by the AI).
 
 **Next priorities (in order):**
-1. **Phase C 7a + 7c** (Open #7) — the `performance` scoreboard block and the
-   `track_record` aggregates + prompt wiring. This is the keystone: it *measures*
-   whether the new aggressive concentration/flex doctrine actually beats SPY. Also
-   needs the §7 reasoning enums (`primary_trigger`/`thesis_type`) emitted.
+1. **Verify the Phase C loop end-to-end on live data** — 7a (`performance`) and 7c
+   (`track_record` + §7 reasoning enums + prompt wiring) both shipped 2026-06-25,
+   completing Open #7. On the next collector run confirm the snapshot carries a
+   populated `performance` block (and the `performance/equity-series.json` cache
+   built cleanly — eyeball for any pre-funding equity steps), and that a fresh
+   flex buy emits `primary_trigger`/`thesis_type`/`trigger_evidence`/`catalyst_date`
+   into `daily-trades` + TradeHistory. `track_record` stays near-empty until 60d
+   outcomes mature (~late July); 30d context shows first.
 2. **25-ETF roster swap + KMLM ballast bucket** — analyzed & agreed in principle
    (all-weather ETF core, single names move to flex). Needs migrating the held
    single names (INTC/AMZN/GOOGL/MCK) into flex + a new convexity/ballast bucket
@@ -152,15 +156,30 @@ results. Sub-steps, shippable independently:
   snap for weekends/holidays. Added `storage.query_entities()` to read aged rows.
   *Not yet verifiable live until the first rows hit their 30d mark (~late June, the
   account began ~2026-05-26) — check a stamped row then.*
-- **7a. `performance` block (REMAINING):** collector computes equity vs
-  fully-invested SPY since inception + rolling 30/60/90d + `cash_pct` into the
-  snapshot. Reuse the web `performance` endpoint math (`04343b4`); data already in
-  every snapshot (`paper_account.equity` + `prices.SPY.c`).
-- **7c. `track_record` + prompt wiring (REMAINING):** aggregate stamped rows into
-  the compact `track_record` block (hit-rate by layer/trigger/thesis, calibration,
-  sample sizes) and add a prompt section telling the analyzer to review it as a
-  calibration signal (not a per-name veto). Depends on the §7 reasoning-capture
-  enum fields (`primary_trigger`/`thesis_type`) also being emitted — not yet added.
+- **7a. `performance` block ✅ (2026-06-25):** collector now computes equity vs
+  fully-invested SPY since inception + rolling 30/60/90d (null until enough
+  history) + `max_drawdown_pct` + `account.cash_pct` into the snapshot
+  (`performance` block, non-fatal). Reuses the web endpoint basis (a day counts
+  only with both `paper_account.equity` and `prices.SPY.c`) but is backed by a
+  compact self-healing cache blob `performance/equity-series.json` (each ~1 MB
+  snapshot downloaded at most once ever, not re-read daily — collector-runtime
+  safe). Prompt: `performance` added to the Inputs list + a Summary scoreboard
+  line (surfaces cash drag). 10 unit tests on the pure builder. Still no live row
+  until the cache first populates on the next collector run.
+- **7c. `track_record` + prompt wiring ✅ (2026-06-25):** collector
+  `_aggregate_track_record` rolls all TradeHistory rows into the compact
+  `track_record` snapshot block — hit-rate `by_layer` / `by_trigger` / `by_thesis`
+  at the 60d headline (with `horizons` 30/90d for context), confidence
+  `calibration`, `over_trading`, `sample_size` + `caveat`. Capture-fine/report-
+  coarse with the n≥10 promotion rule (§8). The §7 reasoning enums
+  (`primary_trigger`/`thesis_type`/`trigger_evidence`/`catalyst_date`) are now
+  emitted in the trades JSON (prompt schema + rules) and persisted write-once by
+  the analyzer (`_write_trade_history`); a new "Track record — calibrate against
+  your own results" prompt section tells the analyzer to use it as a calibration
+  signal, not a per-name veto. Non-fatal in the collector; 12 unit tests on the
+  pure aggregator. **This closes Open #7 (Phase C).** Remaining = live verification
+  (priority #1 above) + the v1 caveats in the spec (price-return only, core-layer
+  taxonomy deferred).
 
 ### 8. Collector: fetch data for flex candidate names — static v1 ✅ DONE 2026-06-15
 **Static v1 shipped:** `config/flex-candidates.json` (seed: ETN, NEE, XLU, MU) is

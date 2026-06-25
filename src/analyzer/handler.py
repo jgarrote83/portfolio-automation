@@ -219,6 +219,12 @@ def _write_trade_history(date_str: str, trades_obj: dict) -> None:
                 "confidence":           float(t.get("confidence") or 0.0),
                 "stop_loss":            t.get("stop_loss"),
                 "take_profit":          t.get("take_profit"),
+                # Phase C §7 reasoning capture (write-once, flex trades; core
+                # trades emit nulls). Feeds the track_record learning aggregates.
+                "primary_trigger":      t.get("primary_trigger") or "",
+                "thesis_type":          t.get("thesis_type") or "",
+                "trigger_evidence":     (t.get("trigger_evidence") or "")[:32000],
+                "catalyst_date":        t.get("catalyst_date"),
                 "quadrant_current":     quadrant_current,
                 "quadrant_projected_6m": quadrant_projected_6m,
                 "risk_score":           risk_score,

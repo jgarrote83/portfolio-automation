@@ -4,7 +4,16 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from shared.keyvault import load_secrets
-from shared.storage import ensure_tables, query_entities, upsert_entity, write_snapshot
+from shared.storage import (
+    ensure_tables,
+    list_snapshot_dates,
+    query_entities,
+    read_perf_series,
+    read_snapshot,
+    upsert_entity,
+    write_perf_series,
+    write_snapshot,
+)
 from shared.clients.fmp import FMPClient
 from shared.clients.fred import FREDClient
 from shared.clients.finnhub import FinnhubClient
@@ -24,6 +33,19 @@ _ETF_WATCHLIST = ["IDVO", "IDMO", "AIA"]
 # Phase C §5: horizons (calendar days) at which a recommendation's outcome vs SPY
 # is stamped onto its TradeHistory row.
 _OUTCOME_HORIZONS = [30, 60, 90]
+# Phase C §6: headline hit-rate horizon (30d/90d shown for context); enum-coarsening
+# map for primary_trigger (capture fine, report coarse) and the per-fine-bucket
+# sample size at which a fine trigger gets promoted to its own reported line.
+_HEADLINE_HORIZON = 60
+_COARSE_TRIGGER = {
+    "news_catalyst": "catalyst",
+    "earnings": "catalyst",
+    "congressional_cluster": "catalyst",
+    "thematic_tier": "thematic",
+    "valuation": "valuation",
+    "technical": "technical",
+}
+_TRIGGER_PROMOTION_MIN = 10
 
 # Regional rotation universe: SPY benchmark + international ETFs in Core.
 # Used to compute 60-trading-day relative strength + 50/200d MA cross so the
@@ -200,6 +222,257 @@ def _stamp_trade_outcomes(fmp: FMPClient) -> None:
         upsert_entity("TradeHistory", patch)
         stamped += 1
     logger.info("Outcome stamping: %d row(s) stamped (of %d pending)", stamped, len(pending))
+
+
+# ---------------------------------------------------------------------------
+# Phase C §4 — performance scoreboard (account equity vs fully-invested SPY)
+# ---------------------------------------------------------------------------
+
+def _load_equity_spy_series(
+    today: str,
+    equity: float | None,
+    spy_close: float | None,
+    cash: float | None,
+) -> list[dict]:
+    """Compact, self-healing (date, equity, spy_close, cash_pct) series.
+
+    Reuses the web `performance` endpoint basis: a day counts only when it has
+    BOTH `paper_account.equity` and `prices.SPY.c` (so the series begins on the
+    first funded/trading day and normalized %-change is the true time-weighted
+    return vs SPY — no external cash flows). Backed by a tiny cached blob so the
+    collector downloads each ~1 MB snapshot at most once ever; any missing prior
+    day is backfilled from its snapshot, and today's point is taken from the
+    in-memory values (today's snapshot blob isn't written yet). Phase C §4.
+    """
+    series = read_perf_series()
+    have = {p.get("date") for p in series}
+    changed = False
+
+    for d in list_snapshot_dates():
+        if d >= today or d in have:
+            continue
+        try:
+            snap = read_snapshot(d)
+        except Exception:  # noqa: BLE001
+            continue
+        eq = (snap.get("paper_account") or {}).get("equity")
+        sp = ((snap.get("prices") or {}).get("SPY") or {}).get("c")
+        if eq is None or sp is None:
+            continue
+        csh = (snap.get("paper_account") or {}).get("cash")
+        series.append(_perf_point(d, eq, sp, csh))
+        have.add(d)
+        changed = True
+
+    if equity is not None and spy_close is not None:
+        point = _perf_point(today, equity, spy_close, cash)
+        existing = next((p for p in series if p.get("date") == today), None)
+        if existing != point:
+            series = [p for p in series if p.get("date") != today]
+            series.append(point)
+            changed = True
+
+    series.sort(key=lambda p: p.get("date") or "")
+    if changed:
+        try:
+            write_perf_series(series)
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not persist perf series (non-fatal)")
+    return series
+
+
+def _perf_point(d: str, equity, spy_close, cash) -> dict:
+    eq = round(float(equity), 2)
+    return {
+        "date": d,
+        "equity": eq,
+        "spy_close": round(float(spy_close), 4),
+        "cash_pct": round(float(cash) / eq * 100, 2) if (cash is not None and eq) else None,
+    }
+
+
+def _build_performance(series: list[dict]) -> dict:
+    """Scoreboard block: return-since-inception + rolling 30/60/90d vs SPY.
+
+    Pure function over the compact series (last point is today). Rolling windows
+    that predate inception are reported null (not yet available). Phase C §4.
+    """
+    if not series:
+        return {"available": False, "note": "no funded snapshots yet"}
+
+    eq_map = {p["date"]: p["equity"] for p in series}
+    spy_map = {p["date"]: p["spy_close"] for p in series}
+    first, last = series[0], series[-1]
+    inception, latest = first["date"], last["date"]
+    days_live = (date.fromisoformat(latest) - date.fromisoformat(inception)).days
+    eq0, spy0, eqN, spyN = first["equity"], first["spy_close"], last["equity"], last["spy_close"]
+
+    ret = (eqN / eq0 - 1.0) * 100.0 if eq0 else 0.0
+    spy_ret = (spyN / spy0 - 1.0) * 100.0 if spy0 else 0.0
+
+    rolling: dict[str, dict] = {}
+    for n in _OUTCOME_HORIZONS:
+        target = (date.fromisoformat(latest) - timedelta(days=n)).isoformat()
+        eq_then = _close_on_or_before(eq_map, target)
+        spy_then = _close_on_or_before(spy_map, target)
+        if eq_then and spy_then:
+            a = (eqN / eq_then - 1.0) * 100.0
+            s = (spyN / spy_then - 1.0) * 100.0
+            rolling[f"{n}d"] = {
+                "account_pct": round(a, 3),
+                "spy_pct": round(s, 3),
+                "excess_pp": round(a - s, 3),
+            }
+        else:
+            rolling[f"{n}d"] = {"account_pct": None, "spy_pct": None, "excess_pp": None}
+
+    peak: float | None = None
+    max_dd = 0.0
+    for p in series:
+        e = p["equity"]
+        if peak is None or e > peak:
+            peak = e
+        if peak:
+            dd = (e / peak - 1.0) * 100.0
+            if dd < max_dd:
+                max_dd = dd
+
+    return {
+        "available": True,
+        "inception_date": inception,
+        "days_live": days_live,
+        "account": {"equity": eqN, "cash_pct": last.get("cash_pct")},
+        "return_since_inception_pct": round(ret, 3),
+        "spy_return_since_inception_pct": round(spy_ret, 3),
+        "excess_vs_spy_pp": round(ret - spy_ret, 3),
+        "rolling": rolling,
+        "max_drawdown_pct": round(max_dd, 3),
+        "note": (
+            f"12-month rolling not yet available (only {days_live} days live)"
+            if days_live < 365 else None
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase C §6 — track_record (compact learning aggregates the analyzer reads)
+# ---------------------------------------------------------------------------
+
+def _hit_rate(rows: list[dict], field: str) -> float | None:
+    """Fraction of `field` (a call_correct_Nd bool) that is truthy; None if empty."""
+    vals = [r.get(field) for r in rows if r.get(field) is not None]
+    return round(sum(1 for v in vals if v) / len(vals), 2) if vals else None
+
+
+def _hit_cell(rows: list[dict], field: str) -> dict:
+    return {"n": len(rows), "hit_rate": _hit_rate(rows, field)}
+
+
+def _aggregate_track_record(rows: list[dict], headline: int = _HEADLINE_HORIZON) -> dict:
+    """Roll stamped TradeHistory rows into the compact track_record block.
+
+    Pure over `rows` (dicts with `layer`, `confidence`, `primary_trigger`,
+    `thesis_type`, `recommended_at`, and stamped `call_correct_Nd`). Reports
+    hit-rate at the headline horizon (per-horizon `horizons` for 30/90d context),
+    by layer, and — flex only — by coarse trigger/thesis with confidence
+    calibration. Patterns + sample sizes only, never per-name logs. Phase C §6.
+    """
+    field = f"call_correct_{headline}d"
+
+    block: dict = {"headline_horizon": f"{headline}d"}
+
+    # Per-horizon overall hit-rate — gives launch-time signal (30d matures first).
+    block["horizons"] = {
+        f"{h}d": _hit_cell([r for r in rows if r.get(f"call_correct_{h}d") is not None],
+                           f"call_correct_{h}d")
+        for h in _OUTCOME_HORIZONS
+    }
+
+    # Over-trading uses every recommendation row (not just matured ones).
+    rec_dates = {r.get("recommended_at") for r in rows if r.get("recommended_at")}
+    block["over_trading"] = {
+        "avg_trades_per_day": round(len(rows) / len(rec_dates), 2) if rec_dates else None
+    }
+
+    matured = [r for r in rows if r.get(field) is not None]
+    block["sample_size"] = len(matured)
+    if not matured:
+        block["note"] = f"no matured {headline}d outcomes yet — scoreboard only"
+        block["caveat"] = "no matured outcomes at the headline horizon; do not infer skill yet"
+        return block
+
+    # By layer (core + flex).
+    by_layer = {}
+    for layer in ("core", "flex"):
+        subset = [r for r in matured if (r.get("layer") or "").lower() == layer]
+        if subset:
+            by_layer[layer] = _hit_cell(subset, field)
+    if by_layer:
+        block["by_layer"] = by_layer
+
+    # Flex-only reasoning aggregates (the §7 enums live on flex trades).
+    flex = [r for r in matured if (r.get("layer") or "").lower() == "flex"]
+
+    # by_trigger: capture fine, report coarse; promote a fine bucket to its own
+    # line only once it reaches _TRIGGER_PROMOTION_MIN samples (§8).
+    fine_groups: dict[str, list[dict]] = {}
+    for r in flex:
+        pt = (r.get("primary_trigger") or "").strip()
+        if pt:
+            fine_groups.setdefault(pt, []).append(r)
+    by_trigger: dict[str, dict] = {}
+    coarse_acc: dict[str, list[dict]] = {}
+    for fine, subset in fine_groups.items():
+        if len(subset) >= _TRIGGER_PROMOTION_MIN:
+            by_trigger[fine] = _hit_cell(subset, field)
+        else:
+            coarse_acc.setdefault(_COARSE_TRIGGER.get(fine, "other"), []).extend(subset)
+    for parent, subset in coarse_acc.items():
+        by_trigger[parent] = _hit_cell(subset, field)
+    if by_trigger:
+        block["by_trigger"] = by_trigger
+
+    # by_thesis: coarse from the start (3 gatekeeper-gate values).
+    thesis_groups: dict[str, list[dict]] = {}
+    for r in flex:
+        tt = (r.get("thesis_type") or "").strip()
+        if tt:
+            thesis_groups.setdefault(tt, []).append(r)
+    if thesis_groups:
+        block["by_thesis"] = {k: _hit_cell(v, field) for k, v in thesis_groups.items()}
+
+    # Confidence calibration: 0.1-wide buckets, predicted (avg confidence) vs
+    # actual (hit rate). The centerpiece — "when I said 0.8, was I right ~80%?"
+    buckets: dict[float, list[dict]] = {}
+    for r in matured:
+        try:
+            c = float(r.get("confidence"))
+        except (TypeError, ValueError):
+            continue
+        lo = min(int(c * 10) / 10, 0.9)  # clamp 1.0 into the 0.9-1.0 bucket
+        buckets.setdefault(round(lo, 1), []).append(r)
+    calibration = []
+    for lo in sorted(buckets):
+        subset = buckets[lo]
+        confs = [float(r["confidence"]) for r in subset]
+        calibration.append({
+            "bucket": f"{lo:.1f}-{lo + 0.1:.1f}",
+            "n": len(subset),
+            "predicted": round(sum(confs) / len(confs), 2),
+            "actual": _hit_rate(subset, field),
+        })
+    if calibration:
+        block["calibration"] = calibration
+
+    block["caveat"] = (
+        f"n={len(matured)} is anecdotal; treat as calibration signal, not per-name veto"
+    )
+    return block
+
+
+def _build_track_record() -> dict:
+    """Query all TradeHistory rows and aggregate them. Phase C §6."""
+    return _aggregate_track_record(query_entities("TradeHistory"))
 
 
 def run() -> None:
@@ -465,6 +738,40 @@ def run() -> None:
         market_shock.get("news_hits_total"),
     )
 
+    # --- Phase C §4: performance scoreboard (account equity vs SPY) ---------
+    # Non-fatal: a scoreboard failure must never block the daily snapshot.
+    performance: dict = {"available": False}
+    try:
+        today_equity = paper_account.get("equity") if paper_account.get("available") else None
+        today_cash = paper_account.get("cash") if paper_account.get("available") else None
+        today_spy = (prices.get("SPY") or {}).get("c")
+        series = _load_equity_spy_series(today, today_equity, today_spy, today_cash)
+        performance = _build_performance(series)
+        logger.info(
+            "Performance: days_live=%s ret=%s%% spy=%s%% excess=%spp cash=%s%%",
+            performance.get("days_live"),
+            performance.get("return_since_inception_pct"),
+            performance.get("spy_return_since_inception_pct"),
+            performance.get("excess_vs_spy_pp"),
+            (performance.get("account") or {}).get("cash_pct"),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Performance scoreboard build failed (non-fatal)")
+
+    # --- Phase C §6: track_record (learning signal from stamped outcomes) ----
+    # Non-fatal. Reads TradeHistory (stamped by _stamp_trade_outcomes on prior
+    # runs); compact aggregates only — never raw trade logs in the snapshot.
+    track_record: dict = {}
+    try:
+        track_record = _build_track_record()
+        logger.info(
+            "Track record: sample_size=%s avg_trades/day=%s",
+            track_record.get("sample_size"),
+            (track_record.get("over_trading") or {}).get("avg_trades_per_day"),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Track record build failed (non-fatal)")
+
     # --- Assemble snapshot ---------------------------------------------------
     snapshot = {
         "date": today,
@@ -494,6 +801,8 @@ def run() -> None:
         "bond_signals": bond_signals,
         "labor_signals": labor_signals,
         "market_shock": market_shock,
+        "performance": performance,
+        "track_record": track_record,
         "news": {
             "market": market_news[:50],
             "forex": forex_news[:20],
