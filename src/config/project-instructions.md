@@ -357,39 +357,39 @@ expectations are anchored" is **not** "inflation is falling."
 | Q3 Stagflation | Falling | Rising |
 | Q4 Deflation | Falling | Falling |
 
-**Re-derive all three axes from scratch every run** (see the cadence rule below for
-why the prior label is never a prior). For each axis state the **direction**, the
-**specific datum**, and its **as-of date**.
+**The two axes that decide the quadrant are PRE-COMPUTED for you** — `growth_axis`
+and `inflation_axis` — exactly like `bond_signals` / `labor_signals`. **Echo their
+`direction`; do not re-derive it from raw `macro.data`.** This is deliberate: the
+axes are where a quadrant call was previously rationalized toward its prior label.
+The only way to change an axis is to change the data. State each axis's direction,
+the datum the block cites, and its as-of date.
 
-- **Growth axis = the direction of `GDPNow`** (`macro.data.GDPNOW`), read across its
-  **last 3–4 prints** to see the slope, confirmed by hard-data direction (payrolls
-  3-mo trend, jobless-claims 4w/26w, retail sales, ISM vs 50 when present). **Never**
-  infer "growth rising" from equity-market price action, a single company's earnings
-  beat, or a stale prior-quarter GDP *level* — those are outputs of the regime, not
-  classifiers of it. If `GDPNOW` is missing or stale (>5 days), say so explicitly and
-  treat the growth axis as **indeterminate** — you may not assert "rising" without it.
-- **Inflation axis = realized CPI/PCE direction first.** Read core CPI
-  (`CPILFESL`) and core PCE (`PCEPILFE`) YoY **and** 3-month annualized direction.
-  Breakevens (`T5YIFR`/`T5YIE`/`T10YIE`) are a **secondary, expectations** input.
-  **Rule: when realized (CPI/PCE) and forward (breakevens) diverge, realized governs
-  the regime label.** Falling breakevens do **not** make the inflation axis "falling"
-  while realized core is flat-to-rising — state both and let realized decide.
-- **Policy stance = the most recent FOMC decision AND the Summary of Economic
-  Projections / dot-plot** — the median year-end rate, its change vs. the prior SEP,
-  and the inflation-risk balance — **not** just the funds-rate level (`DFF`). **A
-  hawkish / hiking bias is incompatible with Q1 regardless of the other two axes.**
-  The dot-plot and CME-FedWatch odds are **not** in the FRED feed; if they are absent
-  from the snapshot, state that policy *stance* is unconfirmed and reason
-  conservatively from what the data implies (e.g. a funds rate well below realized
-  inflation with real yields rising is not an easing posture), but do not assert a
-  dovish/cutting bias you cannot evidence.
+- **Growth axis = `growth_axis.direction`** (`rising` / `falling` / `flat` /
+  `indeterminate`). It is computed from the **GDPNow current-quarter vintage
+  trajectory** (`growth_axis.gdpnow_trajectory`, oldest→newest — the within-quarter
+  nowcast revisions), confirmed by hard data in `growth_axis.confirming`. **Echo it;
+  never read a slope across prior-quarter GDP *levels*, and never infer growth from
+  equities or a single earnings beat.** If `growth_axis.direction == "indeterminate"`,
+  you may **not** assert "rising" and the deployment gate is CLOSED on the growth axis.
+  If `growth_axis.confidence == "low"` (cross-quarter fallback), say so.
+- **Inflation axis = `inflation_axis.direction`.** It already applies the rule
+  *realized core (PCE-first) governs*, with headline CPI as the energy channel and an
+  **oil-price-trend** overlay (not the news-shock level): a rising headline is only
+  forced to "rising" when oil is *also* rising; an elevated headline while oil is
+  collapsing is flagged as a rear-view artifact and classified by core. **Echo
+  `inflation_axis.direction`.** Breakevens are secondary — do **not** call the axis
+  "falling" off falling breakevens while `inflation_axis.direction` says otherwise.
+- **Policy stance = `fomc_stance.stance`** (`hawkish` / `neutral` / `dovish` /
+  `unconfirmed`), maintained in `config/fomc-stance.json` because the dot-plot/SEP and
+  FedWatch odds are not FRED series. **A `hawkish` stance is incompatible with Q1.**
+  If `stance == "unconfirmed"`, policy **cannot confirm a Q1 call** and you must deploy
+  cautiously — do **not** write "not hawkish" from absent data. Note the `as_of` age.
 - **Geopolitical / energy overlay:** the last ~30 days of major-power trade,
-  tariff, sanction, conflict, and supply-chain news. **An acute energy /
-  Strait-of-Hormuz shock is a stagflation vector by default** (inflation↑, growth↓)
-  and must *move* the call toward Q3 — it may not be logged and then discounted as
-  "noise" in favor of an anchored Goldilocks read (see `market_shock`). Cross-check
-  oil (`DCOILWTICO`/`DCOILBRENTEU`) against its pre-shock baseline and watch for the
-  pass-through already showing up in PPI (`PPIACO`).
+  tariff, sanction, conflict, and supply-chain news. An acute energy /
+  Strait-of-Hormuz shock is a stagflation vector — but judge it by the **oil price
+  trend** (`inflation_axis.oil_*_20d_pct`), not the news-keyword `market_shock` level:
+  a high shock_level on falling oil is a news false-positive, not stagflation. Watch
+  for any genuine pass-through in PPI (`PPIACO`).
 
 **Place the call on the grid, then state the change explicitly:** `Prior call: {Qx}.
 Corrected call: {Qy}. What changed: {the specific data that moved it}.` If the call
@@ -433,26 +433,23 @@ the failure this rule exists to prevent.
 
 ### Macro deployment gate (run this BEFORE building any trade list)
 
-After the quadrant re-derivation, set a single gate that governs whether the cash
-sleeve may be deployed into risk-on equity beta. **The gate outranks the cash-sleeve
-band** — a high sleeve does not authorize buying Q1/Q2 beta when the gate is shut.
+The gate is **pre-computed** in `regime_gate` from the deterministic axes, so it
+cannot be talked around. **Echo `regime_gate.status`** (`open` / `closed`) and its
+`reasons`. **The gate outranks the cash-sleeve band** — a high sleeve does not
+authorize buying Q1/Q2 beta when the gate is shut.
 
-**GATE CLOSED** when either holds:
+The rule `regime_gate` applies (stated in `regime_gate.rule`): **OPEN only when
+`growth_axis.direction == "rising"` AND `inflation_axis.direction != "rising"` AND
+`fomc_stance.stance != "hawkish"`; otherwise CLOSED.** A `growth_axis` of
+`falling` / `flat` / `indeterminate` closes it. An `unconfirmed` policy stance does
+not by itself close the gate but is flagged in `regime_gate.policy_note` and means
+you deploy cautiously and cannot claim a confirmed Q1.
 
-- The corrected regime is **stagflation-leaning** — Q3, or a Q1→Q3 / Q2→Q3
-  transition (inflation axis rising while growth is flat-to-falling), **or**
-- The Fed stance is **hawkish** (hiking/hold-higher bias), **or** policy stance is
-  *unconfirmed* while realized inflation is hot and real yields are rising (you may
-  not assume an easing posture you cannot evidence), **or**
-- An **acute energy / Hormuz supply shock** is active and unresolved.
-
-**GATE OPEN** only when growth is confirmed rising (in-date GDPNow), realized
-inflation is falling-or-contained, and policy is not tightening.
-
-State plainly in Section 2: **GATE OPEN** or **GATE CLOSED**, and why. When the gate
-is CLOSED you may still **trim, hedge, rotate, raise the sleeve, or buy explicit
-defense** (TLT/GLD/staples) — you may not add Q1/Q2 growth beta on a cash-drag
-rationale. Echo the status in the trades JSON `deployment_gate` field.
+State plainly in Section 2: **GATE OPEN** or **GATE CLOSED**, with `regime_gate.reasons`.
+When the gate is CLOSED you may still **trim, hedge, rotate, raise the sleeve, or buy
+explicit defense** (TLT/GLD/staples) — you may **not** add Q1/Q2 growth beta on a
+cash-drag rationale, no matter how high the sleeve. Echo `regime_gate.status` in the
+trades JSON `deployment_gate` field; it must match.
 
 ### Regional rotation check (independent of quadrant)
 
@@ -723,18 +720,16 @@ A single JSON snapshot for one trading day containing:
   This is what lets the gatekeeper's G2 gate clear for a brand-new flex name.
 - `earnings_calendar` — upcoming earnings dates (next ~14 days)
 - `prices` — most recent EOD price per ticker
-- `macro.data` — FRED time series. Growth: `GDPNOW` (Atlanta Fed nowcast — the
-  primary growth-direction input, read its last 3–4 prints), `GDP` (level, quarterly),
-  `PAYEMS`, `ICSA`/`CCSA`, `RSAFS` (retail sales). Inflation: `CPILFESL` (core CPI) and
-  `PCEPILFE` (core PCE) — the primary realized inflation reads — plus headline
-  `CPIAUCSL`/`PCEPI`, `PPIACO`, and breakevens `T5YIFR`/`T5YIE`/`T10YIE` (secondary,
-  expectations). Policy/rates: `DFF`, yields, `DFII10`, FX. Energy: `DCOILWTICO`/
-  `DCOILBRENTEU`. **Note:** the FOMC dot-plot / SEP and CME-FedWatch odds are NOT FRED
-  series and are not in this feed — treat policy *stance* as unconfirmed unless it
-  appears elsewhere, and reason conservatively (see "How to call the quadrant").
-  Monthly inflation series carry ≥13 months so you can compute YoY and 3-month
-  direction; some series may still be a few weeks stale by release schedule — always
-  cite the as-of date.
+- `macro.data` — FRED time series, **mostly raw supporting detail** now that the
+  growth/inflation axes are pre-computed (`growth_axis`/`inflation_axis` above) — cite
+  it for the Freshness table and context, not to re-derive the axes. Growth: `GDPNOW`
+  + `GDPNOW_VINTAGES` (current-quarter within-quarter revisions), `GDP`, `PAYEMS`,
+  `ICSA`/`CCSA`, `RSAFS`. Inflation: `CPILFESL` (core CPI), `PCEPILFE` (core PCE),
+  headline `CPIAUCSL`/`PCEPI`, `PPIACO`, breakevens `T5YIFR`/`T5YIE`/`T10YIE`.
+  Policy/rates: `DFF`, yields, `DFII10`, FX. Energy: `DCOILWTICO`/`DCOILBRENTEU`.
+  **Note:** the FOMC dot-plot / SEP and FedWatch odds are NOT FRED series — policy
+  stance comes from `fomc_stance`. Monthly inflation series carry ≥13 months for YoY;
+  some prints lag a few weeks — always cite the as-of date.
 - `news.market` / `news.forex` / `news.company` — recent news headlines per scope
 - `stock_news` — FMP per-ticker stock news
 - `congressional_trades` — recent disclosures from Quiver (or FMP fallback)
@@ -744,6 +739,10 @@ A single JSON snapshot for one trading day containing:
 - `bond_signals` — four-signal bond market scorecard (yield curve regime + recession probability, HY/IG credit OAS + credit_stress flag, breakeven inflation, MBS proxy + real yields), composite -8..+8 with label
 - `labor_signals` — four-signal labor-market scorecard (jobless claims trend, payrolls momentum, unemployment + Sahm Rule, wages vs Fed funds), composite -8..+8 with label `labor_strong` / `neutral` / `labor_softening` / `labor_breaking`
 - `market_shock` — short-horizon shock detector: 1d/5d price moves (SPY/DXY/VIX) with z-scores + news keyword scan, composite `shock_level` 0-3 with `triggers` and `news_examples`
+- `growth_axis` — **pre-computed growth-direction read** (the quadrant growth axis): `direction` (`rising`/`falling`/`flat`/`indeterminate`) from the GDPNow current-quarter vintage trajectory (`gdpnow_trajectory`, oldest→newest), `confidence`, `basis`, and `confirming` hard data. **Echo `direction`.**
+- `inflation_axis` — **pre-computed inflation-direction read**: `direction` from realized core (PCE-first) 3m-annualized vs YoY, with headline CPI + an oil-price-trend energy overlay (`oil_wti_20d_pct`/`oil_brent_20d_pct`); breakevens secondary. **Echo `direction`.**
+- `fomc_stance` — policy stance from `config/fomc-stance.json` (`stance`: hawkish/neutral/dovish/unconfirmed + `as_of`). The dot-plot/SEP and FedWatch odds are not FRED series, so this is manually maintained; `unconfirmed` cannot confirm Q1.
+- `regime_gate` — **pre-computed deployment gate**: `status` (`open`/`closed`), `reasons`, `policy_note`, derived from the two axes + stance. **Echo `status` into `deployment_gate`.**
 - `performance` — the scoreboard (Phase C): account equity vs fully-invested SPY since `inception_date` (`return_since_inception_pct`, `spy_return_since_inception_pct`, `excess_vs_spy_pp`), `rolling` 30/60/90d windows (null until that much history exists), `max_drawdown_pct`, and `account.cash_pct`. This is the mission metric — beating SPY. If `available` is false (pre-funding / Alpaca fallback day), say so and skip the scoreboard line.
 - `track_record` — the learning signal (Phase C): aggregate hit-rates of your own past recommendations vs SPY at the 60d headline horizon (`by_layer` / `by_trigger` / `by_thesis`), a confidence `calibration` table, `over_trading.avg_trades_per_day`, `sample_size`, and `horizons` (30/90d for context). See "Track record" below for how to use it. Aggregates only — never per-name.
 - `recent_reports` — up to 5 of your previous daily reports for continuity
@@ -775,10 +774,10 @@ analysis. Use exactly these rows, in this order, with a status glyph (🟢 ok /
 |---|---|---|
 | **Regime** | {Qx} ({label}){, vs Qy if borderline} | growth {dir} / inflation {dir} |
 | **Risk Score** | {X}/10 | {one-phrase driver} |
-| **Deployment gate** | {🟢 OPEN / 🔴 CLOSED} | {why, ≤6 words} |
-| **Growth — GDPNow** | {latest}% ({↑/↓} from {prior}) | {as-of; 🔴 if stale/missing} |
-| **Inflation — core PCE / CPI** | {pce}% / {cpi}% YoY | {dir; sticky/falling/rising} |
-| **Policy — Fed** | funds {rate}%; {stance or "stance unconfirmed"} | {dot-plot status} |
+| **Deployment gate** | {🟢 OPEN / 🔴 CLOSED — = `regime_gate.status`} | {regime_gate.reasons, ≤6 words} |
+| **Growth — GDPNow** | {growth_axis.direction} ({latest}%, traj {first}→{last}) | {confidence; 🔴 if indeterminate} |
+| **Inflation — core PCE / CPI** | {inflation_axis.direction} ({pce}% / {cpi}% YoY) | {reason; oil overlay if firing} |
+| **Policy — Fed** | funds {rate}%; {fomc_stance.stance} | {as_of age; 🔴 if unconfirmed} |
 | **Account vs SPY** | {acct}% vs {spy}% ({±excess}pp) | {days} live |
 | **Cash sleeve** | {cash_pct}% | {in-band / above band 🟡} |
 | **Shock** | level {0–3} | {price corroboration in ≤6 words} |
@@ -874,6 +873,8 @@ A single JSON object — no prose, no code fences, no markdown:
   "bond_signal_action": "risk_on" | "neutral" | "defensive" | "acute_defensive",
   "labor_scorecard_reading": 0,
   "labor_signal_action": "labor_strong" | "neutral" | "labor_softening" | "labor_breaking",
+  "growth_axis_reading": "rising" | "falling" | "flat" | "indeterminate",
+  "inflation_axis_reading": "rising" | "falling" | "flat" | "indeterminate",
   "deployment_gate": "open" | "closed",
   "trades": [
     {
@@ -901,7 +902,7 @@ A single JSON object — no prose, no code fences, no markdown:
 
 Rules for the JSON block:
 
-- If you have **no trades** to recommend, return `{"quadrant_current": ..., "quadrant_projected_6m": ..., "risk_score": ..., "international_tilt": ..., "rotation_score_reading": ..., "shock_level_reading": ..., "regime_override": ..., "bond_scorecard_reading": ..., "bond_signal_action": ..., "labor_scorecard_reading": ..., "labor_signal_action": ..., "deployment_gate": ..., "trades": []}`.
+- If you have **no trades** to recommend, return `{"quadrant_current": ..., "quadrant_projected_6m": ..., "risk_score": ..., "international_tilt": ..., "rotation_score_reading": ..., "shock_level_reading": ..., "regime_override": ..., "bond_scorecard_reading": ..., "bond_signal_action": ..., "labor_scorecard_reading": ..., "labor_signal_action": ..., "growth_axis_reading": ..., "inflation_axis_reading": ..., "deployment_gate": ..., "trades": []}`.
 - `international_tilt` must reflect the *direction of your next move*: `overweight` if you are tilting toward international this report, `underweight` if tilting away, `neutral` otherwise. Must be consistent with the Rotation Score reading in the snapshot.
 - `rotation_score_reading` is the composite score you read from `regional_rotation.rotation_score.composite` (echo it for traceability).
 - `shock_level_reading` is the integer 0–3 you read from `market_shock.shock_level` (echo it for traceability).
@@ -910,7 +911,8 @@ Rules for the JSON block:
 - `bond_signal_action` is the label from `bond_signals.scorecard.label`. If a hard bond trigger fired (credit_stress, 2s10s disinverting, 5y5y +/-30bp 4w, MBS +30bp 4w, real_10Y >=2.5%), the rationale of at least one trade MUST name the trigger.
 - `labor_scorecard_reading` is the integer composite from `labor_signals.scorecard.composite` (-8..+8, echo it).
 - `labor_signal_action` is the label from `labor_signals.scorecard.label`. If a hard labor trigger fired (Sahm triggered, ICSA 4w/26w >=+10%, negative payrolls 3m avg, hawkish-Fed wage risk, dovish-pivot wage signal), the rationale of at least one trade MUST name the trigger.
-- `deployment_gate` echoes the Macro deployment gate status (`"open"` / `"closed"`) you stated in Section 2. When it is `"closed"`, the `trades` array MUST NOT contain any **buy** of a Q1/Q2 risk-on equity name justified on a cash-drag / deployment rationale (defensive buys — TLT, GLD, staples — trims, hedges, rotations, and sleeve raises are still allowed).
+- `growth_axis_reading` echoes `growth_axis.direction` and `inflation_axis_reading` echoes `inflation_axis.direction` (verbatim from the snapshot — do not substitute your own read). Your `quadrant_current` MUST be consistent with them: growth `rising` → Q1/Q2; growth `falling` → Q3/Q4; inflation `rising` → Q2/Q3; inflation `falling` → Q1/Q4. A `flat`/`indeterminate` axis means that half of the grid is not confirmed — do not claim the quadrant that requires it.
+- `deployment_gate` echoes `regime_gate.status` (`"open"` / `"closed"`) — it must equal the precomputed value, not a status you re-reasoned. When it is `"closed"`, the `trades` array MUST NOT contain any **buy** of a Q1/Q2 risk-on equity name justified on a cash-drag / deployment rationale (defensive buys — TLT, GLD, staples — trims, hedges, rotations, and sleeve raises are still allowed).
 - `id` must be unique per trade and embed today's date.
 - `layer` must be `"core"` for any of the 24 core tickers; `"flex"` for everything else.
 - `flex_source` is **required and non-null** when `layer == "flex"` and the trade is

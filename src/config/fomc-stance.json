@@ -1,0 +1,12 @@
+{
+  "_comment": "Manually-maintained FOMC policy stance — the dot-plot/SEP and CME-FedWatch odds are NOT FRED series. Update after each SEP (8x/year) and after material Fedspeak. The collector loads this into snapshot.fomc_stance; the analyzer echoes it. 'stance' must be one of: hawkish | neutral | dovish | unconfirmed. While 'unconfirmed', policy cannot confirm a Q1 (Goldilocks) call and the analyzer deploys cautiously.",
+  "stance": "unconfirmed",
+  "median_dot_year_end": null,
+  "change_vs_prior_sep_bp": null,
+  "hike_odds_next_meeting": null,
+  "cut_odds_next_meeting": null,
+  "participants_seeing_upside_inflation_risk": null,
+  "guidance_language": "",
+  "as_of": null,
+  "source": ""
+}

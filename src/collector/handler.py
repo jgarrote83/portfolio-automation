@@ -26,6 +26,7 @@ _SRC = Path(__file__).parent.parent   # src/
 _MACRO_SERIES_FILE = _SRC / "config" / "macro-series.json"
 _PORTFOLIO_FALLBACK = _SRC / "config" / "portfolio.json"
 _FLEX_CANDIDATES_FILE = _SRC / "config" / "flex-candidates.json"
+_FOMC_STANCE_FILE = _SRC / "config" / "fomc-stance.json"
 # Cap on non-held flex candidates fetched per run — protects the FMP 250 req/day
 # budget (each candidate costs ~2 calls: profile + EOD price). See FOLLOWUPS #8.
 _FLEX_CANDIDATES_MAX = 20
@@ -101,6 +102,27 @@ def _load_flex_candidates(exclude: set[str]) -> list[str]:
         if t and t not in exclude and t not in out:
             out.append(t)
     return out[:_FLEX_CANDIDATES_MAX]
+
+
+def _load_fomc_stance() -> dict:
+    """Manually-maintained FOMC policy stance from config/fomc-stance.json.
+
+    The dot-plot / SEP and CME-FedWatch odds are NOT FRED series, so the funds-rate
+    *level* (DFF) is all the automated feed carries. This file is the policy *stance*
+    the analyzer echoes; update it after each SEP. Missing/malformed/blank → an
+    ``unconfirmed`` stance (policy cannot confirm Q1; see _build_regime_gate). Goes
+    stale by design — the analyzer should flag the ``as_of`` age.
+    """
+    try:
+        with open(_FOMC_STANCE_FILE) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"stance": "unconfirmed", "note": "fomc-stance.json missing/invalid"}
+    stance = (data.get("stance") or "unconfirmed").lower().strip()
+    if stance not in ("hawkish", "neutral", "dovish", "unconfirmed"):
+        stance = "unconfirmed"
+    data["stance"] = stance
+    return data
 
 
 def _close_by_date(fmp: FMPClient, symbol: str) -> dict[str, float]:
@@ -676,9 +698,22 @@ def run() -> None:
     # realized-CPI/PCE read that governs the regime label over forward breakevens).
     for _infl_sid in ("CPIAUCSL", "CPILFESL", "PCEPI", "PCEPILFE", "PPIACO", "RSAFS"):
         macro_data[_infl_sid] = fred.get_series_latest(_infl_sid, limit=18)
-    # Growth axis: GDPNow is the primary growth-direction input — keep the last ~8
-    # nowcast prints so the analyzer can read its slope (rising vs falling).
+    # Growth axis: the standard observations endpoint returns ONE latest value per
+    # quarter, so limit=N yields N *quarters*, not the within-quarter nowcast
+    # revisions. Keep the quarterly series for cross-quarter context, and pull the
+    # current-quarter ALFRED vintages so the analyzer reads the real intra-quarter
+    # slope (e.g. 3.70 -> 4.26 -> 2.54) — the deceleration the quarterly view hides.
     macro_data["GDPNOW"] = fred.get_series_latest("GDPNOW", limit=8)
+    _t = date.today()
+    _q_start = date(_t.year, 3 * ((_t.month - 1) // 3) + 1, 1).isoformat()
+    _gdpnow_vint = fred.get_series_vintages(
+        "GDPNOW", realtime_start=_q_start, realtime_end=_t.isoformat()
+    )
+    macro_data["GDPNOW_VINTAGES"] = [
+        {"date": r.get("date"), "asof": r.get("realtime_start"), "value": r.get("value")}
+        for r in _gdpnow_vint
+        if r.get("date") == _q_start and r.get("value") not in (None, ".", "")
+    ]
     # Energy axis: oil spot for the stagflation/Hormuz-shock read (~90d for baseline).
     for _oil_sid in ("DCOILWTICO", "DCOILBRENTEU"):
         macro_data[_oil_sid] = fred.get_series_latest(_oil_sid, limit=90)
@@ -749,6 +784,21 @@ def run() -> None:
         market_shock.get("news_hits_total"),
     )
 
+    # --- Quadrant axes (deterministic; analyzer ECHOES these, see prompt) ----
+    # Growth + inflation direction are the two axes that decide the quadrant. They
+    # were previously left to the LLM on raw macro.data — the discretion point where
+    # it rationalized its prior label. Now pre-computed like bond/labor signals.
+    growth_axis = _build_growth_axis(macro_data)
+    inflation_axis = _build_inflation_axis(macro_data)
+    fomc_stance = _load_fomc_stance()
+    regime_gate = _build_regime_gate(growth_axis, inflation_axis, fomc_stance)
+    logger.info(
+        "Quadrant axes: growth=%s(%s) inflation=%s gate=%s policy=%s",
+        growth_axis.get("direction"), growth_axis.get("confidence"),
+        inflation_axis.get("direction"), regime_gate.get("status"),
+        fomc_stance.get("stance"),
+    )
+
     # --- Phase C §4: performance scoreboard (account equity vs SPY) ---------
     # Non-fatal: a scoreboard failure must never block the daily snapshot.
     performance: dict = {"available": False}
@@ -812,6 +862,10 @@ def run() -> None:
         "bond_signals": bond_signals,
         "labor_signals": labor_signals,
         "market_shock": market_shock,
+        "growth_axis": growth_axis,
+        "inflation_axis": inflation_axis,
+        "fomc_stance": fomc_stance,
+        "regime_gate": regime_gate,
         "performance": performance,
         "track_record": track_record,
         "news": {
@@ -1698,6 +1752,239 @@ def _build_labor_signals(macro_data: dict) -> dict:
     }
 
     return out
+
+
+def _macro_vals(macro_data: dict, sid: str) -> list[float]:
+    """Latest-first float list for a FRED series (shared idiom; drops '.'/None)."""
+    rows = macro_data.get(sid) or []
+    vals: list[float] = []
+    for r in rows:
+        v = r.get("value")
+        if v in (None, ".", ""):
+            continue
+        try:
+            vals.append(float(v))
+        except (TypeError, ValueError):
+            continue
+    return vals
+
+
+def _build_growth_axis(macro_data: dict) -> dict:
+    """Deterministic growth-direction read — the quadrant *growth axis*, computed in
+    Python so the analyzer ECHOES it (mirrors bond_signals/labor_signals) rather than
+    re-deriving it from raw series (where a temperature-0.2 model rationalizes toward
+    its prior label).
+
+    Primary signal: the GDPNow *current-quarter vintage trajectory*
+    (``GDPNOW_VINTAGES``, oldest-first) — the within-quarter nowcast revisions. The
+    standard /observations endpoint hides this (one latest value per quarter), so a
+    naive cross-quarter "slope" can read 'rising' while the live quarter is being
+    marked down. Fallback: cross-quarter GDPNOW slope (low confidence) only when
+    fewer than 3 vintages are available; 'indeterminate' only with no GDPNow at all.
+    """
+    traj = [
+        float(r["value"]) for r in (macro_data.get("GDPNOW_VINTAGES") or [])
+        if r.get("value") not in (None, ".", "")
+    ]  # oldest-first
+
+    BAND = 0.1
+    confidence = "high"
+    basis = "within_quarter_vintages"
+    if len(traj) >= 3:
+        first, last = traj[0], traj[-1]
+        latest = last
+    else:
+        # Fallback: cross-quarter quarterly prints (newest-first from get_series_latest)
+        q = _macro_vals(macro_data, "GDPNOW")  # newest-first
+        if len(q) >= 2:
+            first, last = q[1], q[0]   # prior quarter -> latest quarter
+            latest = q[0]
+            confidence = "low"
+            basis = "cross_quarter_fallback"
+        else:
+            return {
+                "direction": "indeterminate",
+                "confidence": "none",
+                "basis": "no_gdpnow_data",
+                "gdpnow_latest": None,
+                "gdpnow_trajectory": traj,
+                "gdpnow_vintage_count": len(traj),
+                "confirming": {},
+                "note": (
+                    "INDETERMINATE: no GDPNow data — the deployment gate must NOT "
+                    "assert 'rising' and should fail closed on the growth axis."
+                ),
+            }
+
+    if last > first + BAND:
+        direction = "rising"
+    elif last < first - BAND:
+        direction = "falling"
+    else:
+        direction = "flat"
+
+    pay = _macro_vals(macro_data, "PAYEMS")            # 000s, level; newest-first
+    pay_3m = round((pay[0] - pay[3]) / 3.0, 1) if len(pay) > 3 else None
+    claims = _macro_vals(macro_data, "ICSA")
+    retail = _macro_vals(macro_data, "RSAFS")
+    retail_dir = (
+        "up" if len(retail) > 1 and retail[0] > retail[1]
+        else "down" if len(retail) > 1 else None
+    )
+
+    note = ""
+    if direction == "rising" and confidence == "low":
+        note = (
+            "Cross-quarter fallback only (no within-quarter vintages) — 'rising' is "
+            "the coarse Q/Q comparison and may hide an in-quarter markdown; treat as "
+            "low confidence."
+        )
+
+    return {
+        "direction": direction,
+        "confidence": confidence,
+        "basis": basis,
+        "gdpnow_latest": round(latest, 2),
+        "gdpnow_trajectory": [round(v, 2) for v in traj],   # oldest -> newest
+        "gdpnow_vintage_count": len(traj),
+        "confirming": {
+            "payrolls_3m_avg_k": pay_3m,
+            "initial_claims_latest_k": round(claims[0] / 1000.0, 1) if claims else None,
+            "retail_sales_dir": retail_dir,
+        },
+        "note": note,
+    }
+
+
+def _build_inflation_axis(macro_data: dict) -> dict:
+    """Deterministic inflation-direction read — the quadrant *inflation axis*.
+
+    Realized core (PCE-first, then CPI) governs via the 3-month-annualized-vs-YoY
+    trend. Headline CPI is the energy channel: when headline is elevated AND rising
+    AND oil is *also* rising, that is genuine energy inflation -> 'rising'. But when
+    headline is elevated while oil is collapsing (the rear-view artifact of a prior
+    oil spike), the headline is about to roll over -> do NOT force 'rising'; classify
+    by core and flag the pending disinflation. Breakevens are secondary (expectations).
+
+    NOTE: the energy overlay keys off the *actual oil price trend* (DCOILWTICO /
+    DCOILBRENTEU 20-session change), NOT the news-keyword ``market_shock`` level — the
+    shock detector is a headline-count signal prone to false positives, and binding
+    realized-inflation direction to it would hard-wire stagflation off a news flurry.
+    """
+    def _yoy(sid: str, base: int = 0) -> float | None:
+        v = _macro_vals(macro_data, sid)
+        return round((v[base] / v[base + 12] - 1) * 100, 2) if len(v) > base + 12 else None
+
+    def _ann3(sid: str) -> float | None:
+        v = _macro_vals(macro_data, sid)
+        return round(((v[0] / v[3]) ** 4 - 1) * 100, 2) if len(v) > 3 else None
+
+    def _oil_20d_pct(sid: str) -> float | None:
+        v = _macro_vals(macro_data, sid)   # newest-first
+        return round((v[0] / v[20] - 1) * 100, 1) if len(v) > 20 else None
+
+    head_yoy = _yoy("CPIAUCSL")
+    head_yoy_prev = _yoy("CPIAUCSL", base=1)
+    core_cpi_yoy = _yoy("CPILFESL")
+    core_pce_yoy = _yoy("PCEPILFE")
+    core_cpi_ann3 = _ann3("CPILFESL")
+    core_pce_ann3 = _ann3("PCEPILFE")
+    be_5y5y = _macro_vals(macro_data, "T5YIFR")
+
+    head_rising = (
+        head_yoy is not None and head_yoy_prev is not None and head_yoy >= head_yoy_prev
+    )
+    oil_wti_20d = _oil_20d_pct("DCOILWTICO")
+    oil_brent_20d = _oil_20d_pct("DCOILBRENTEU")
+    oil_chgs = [c for c in (oil_wti_20d, oil_brent_20d) if c is not None]
+    oil_rising = bool(oil_chgs) and max(oil_chgs) >= 10.0      # genuine energy push
+    oil_falling = bool(oil_chgs) and min(oil_chgs) <= -10.0    # spike reversing
+
+    headline_hot = head_yoy is not None and head_yoy >= 3.5 and head_rising
+
+    # classify by realized core trend (3m annualized vs YoY); PCE-first
+    ref_ann3 = core_pce_ann3 if core_pce_ann3 is not None else core_cpi_ann3
+    ref_yoy = core_pce_yoy if core_pce_yoy is not None else core_cpi_yoy
+
+    if headline_hot and oil_rising:
+        direction = "rising"
+        reason = "headline elevated & rising with oil rising (active energy push)"
+    elif ref_ann3 is None or ref_yoy is None:
+        direction = "indeterminate"
+        reason = "insufficient realized core history"
+    elif ref_ann3 > ref_yoy + 0.2:
+        direction = "rising"
+        reason = "core 3m-annualized accelerating above YoY"
+    elif ref_ann3 < ref_yoy - 0.2:
+        direction = "falling"
+        reason = "core 3m-annualized below YoY"
+    else:
+        direction = "flat"
+        reason = "core 3m-annualized ~ YoY (sticky)"
+
+    note = (
+        "Realized core governs; breakevens are secondary. Energy overlay keys on the "
+        "oil price trend, not the news-shock level."
+    )
+    if headline_hot and oil_falling:
+        note = (
+            f"Headline CPI elevated/rising ({head_yoy}% YoY) but oil reversing "
+            f"(WTI {oil_wti_20d}% / Brent {oil_brent_20d}% 20d) — the headline is a "
+            f"rear-view artifact of a prior oil spike; disinflation pending. "
+            f"Classified by realized core."
+        )
+
+    return {
+        "direction": direction,
+        "reason": reason,
+        "headline_cpi_yoy": head_yoy,
+        "headline_cpi_rising": head_rising,
+        "core_cpi_yoy": core_cpi_yoy,
+        "core_pce_yoy": core_pce_yoy,
+        "core_cpi_ann3": core_cpi_ann3,
+        "core_pce_ann3": core_pce_ann3,
+        "oil_wti_20d_pct": oil_wti_20d,
+        "oil_brent_20d_pct": oil_brent_20d,
+        "breakeven_5y5y": be_5y5y[0] if be_5y5y else None,
+        "realized_governs": True,
+        "note": note,
+    }
+
+
+def _build_regime_gate(growth_axis: dict, inflation_axis: dict, fomc_stance: dict) -> dict:
+    """Deterministic macro deployment gate from the precomputed axes + policy stance.
+
+    CLOSED unless growth is confirmed rising, realized inflation is not rising, and
+    policy is not hawkish. An unconfirmed policy stance cannot *confirm* Q1 but does
+    not by itself hard-close the gate (it is flagged); growth/inflation drive it. The
+    analyzer echoes ``status`` into the trades JSON ``deployment_gate`` field.
+    """
+    reasons: list[str] = []
+    g = (growth_axis or {}).get("direction")
+    i = (inflation_axis or {}).get("direction")
+    stance = (fomc_stance or {}).get("stance", "unconfirmed")
+
+    if g != "rising":
+        reasons.append(f"growth axis {g} (not rising)")
+    if i == "rising":
+        reasons.append("inflation axis rising")
+    if stance == "hawkish":
+        reasons.append("FOMC stance hawkish")
+
+    status = "closed" if reasons else "open"
+    policy_note = ""
+    if stance == "unconfirmed":
+        policy_note = "policy stance UNCONFIRMED — cannot confirm Q1; deploy cautiously."
+    return {
+        "status": status,
+        "reasons": reasons,
+        "policy_note": policy_note,
+        "derived_from": {"growth": g, "inflation": i, "policy_stance": stance},
+        "rule": (
+            "OPEN only when growth rising AND inflation not rising AND policy not "
+            "hawkish; else CLOSED. Cash-sleeve band is subordinate to this gate."
+        ),
+    }
 
 
 def _build_market_shock(
