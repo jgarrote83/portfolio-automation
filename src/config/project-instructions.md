@@ -277,11 +277,16 @@ conviction**, measured by the Risk Score (see Calculated Risk Score):
 
 | Risk Score | Conviction | Core posture — share of *core* in the favored quadrant |
 |---|---|---|
-| 0–2 | very high | Concentrate hard: ~80–90%; trim out-of-favor quadrants toward the floor |
-| 3–4 | high | Strong tilt: ~60–75% |
+| 0–2 | very high | Concentrate hard: ~90–95% (95% is the ceiling); trim out-of-favor quadrants to the floor |
+| 3–4 | high | Strong tilt: ~70–85% |
 | 5–6 | mixed | Modest tilt: ~40–55%; stay broadly diversified |
 | 7–8 | low | Defensive: no strong tilt; lean to ballast (cash, gold, Treasuries, staples) |
 | 9–10 | no read | Capital preservation: overweight GLD + long-duration Treasuries (TLT); cash sleeve toward 15%; minimal quadrant bet |
+
+At the **very-high-conviction ceiling (~95%)**, the favored quadrant takes essentially
+all of the core; the out-of-favor quadrants sit at their ~0.1% / 1-share floors only
+(the all-weather toolkit stays *held* and re-expandable in one move — never deleted).
+Do not exceed ~95%: the floors are deliberate optionality, not dead weight.
 
 - **Be decisive when conviction is high** — do not water a high-conviction call down
   to a 2pp nudge. Concentration rides the *standing* quadrant call; it does **not**
@@ -822,7 +827,7 @@ Then the numbered sections, in this order:
      multi-quadrant tickers") so the rows sum to ~100% without double-counting; put
      cash + SGOV in the Cash sleeve row, **not** in Q4.
    - Then state the **favored quadrant**, its concentration target from
-     Conviction-scaled concentration (e.g. Risk Score 0–2 → ~80–90% of core), and
+     Conviction-scaled concentration (e.g. Risk Score 0–2 → ~90–95% of core), and
      **one line on whether today's trades actually move Current toward the target or
      merely tweak it.** If the quadrant call or conviction changed since the last
      report but Current ≈ Recommended, you are **under-trading** — revisit the weights
