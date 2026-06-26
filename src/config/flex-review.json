@@ -1,0 +1,8 @@
+{
+  "_comment": "Tunable knobs for the conviction-sleeve flex review (collector _build_flex_review). The review is the PRIMARY exit for the flex sleeve (performance-based, dual-benchmark), replacing the old catalyst/mispricing gates. All values are read deterministically; the LLM echoes the resulting review_status. Edit to retune.",
+  "REVIEW_DAYS": 60,
+  "LAG_TOL_PP": -2.0,
+  "BREAK_PP": -5.0,
+  "EXTENSION_DAYS": 30,
+  "DEADBAND_PP": 1.0
+}

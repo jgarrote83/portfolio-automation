@@ -24,6 +24,7 @@ from shared.storage import (
     write_trades,
 )
 from shared.clients.foundry import FoundryClient
+from shared.quadrants import active_quadrant, benchmark_etf_for
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,7 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
     report_md, trades_obj = _split_response(raw, date_str)
     write_report(date_str, report_md)
     write_trades(date_str, trades_obj)
-    _write_trade_history(date_str, trades_obj)
+    _write_trade_history(date_str, trades_obj, snapshot)
 
     logger.info(
         "=== Analyzer completed for %s — %d trades recommended ===",
@@ -194,15 +195,37 @@ def _extract_json(text: str) -> dict | None:
 # Table writer
 # ---------------------------------------------------------------------------
 
-def _write_trade_history(date_str: str, trades_obj: dict) -> None:
+def _write_trade_history(date_str: str, trades_obj: dict, snapshot: dict | None = None) -> None:
     year_month = date_str[:7]  # YYYY-MM
     quadrant_current = trades_obj.get("quadrant_current") or ""
     quadrant_projected_6m = trades_obj.get("quadrant_projected_6m") or ""
     risk_score = trades_obj.get("risk_score")
+
+    # Entry metadata for the conviction-sleeve flex review (computed here, NOT
+    # taken from the LLM): the active quadrant at entry, its representative sleeve
+    # ETF, and the snapshot entry price. Persisted write-once on a flex BUY so the
+    # collector's `_build_flex_review` can score the name against its benchmarks.
+    snap = snapshot or {}
+    prices = snap.get("prices") or {}
+    entry_quadrant = active_quadrant(
+        (snap.get("growth_axis") or {}).get("direction"),
+        (snap.get("inflation_axis") or {}).get("direction"),
+    )
+    entry_bench_etf = benchmark_etf_for(entry_quadrant)
+
+    def _entry_price(symbol: str) -> float | None:
+        row = prices.get(symbol) or {}
+        c = row.get("c") if isinstance(row, dict) else None
+        try:
+            return round(float(c), 4) if c is not None else None
+        except (TypeError, ValueError):
+            return None
+
     for t in trades_obj.get("trades", []):
         trade_id = t.get("id") or f"T-{date_str.replace('-', '')}-X"
+        is_flex_buy = (t.get("layer") == "flex") and (t.get("side") == "buy")
         try:
-            upsert_entity("TradeHistory", {
+            entity = {
                 "PartitionKey":         year_month,
                 "RowKey":               trade_id,
                 "recommended_at":       date_str,
@@ -228,7 +251,14 @@ def _write_trade_history(date_str: str, trades_obj: dict) -> None:
                 "quadrant_current":     quadrant_current,
                 "quadrant_projected_6m": quadrant_projected_6m,
                 "risk_score":           risk_score,
-            })
+            }
+            if is_flex_buy:
+                # Conviction-sleeve entry metadata (write-once on the flex BUY).
+                entity["entry_date"] = date_str
+                entity["entry_price"] = _entry_price(t.get("symbol", ""))
+                entity["entry_quadrant"] = entry_quadrant
+                entity["flex_benchmark_etf"] = entry_bench_etf
+            upsert_entity("TradeHistory", entity)
         except Exception as e:  # noqa: BLE001
             logger.error("TradeHistory upsert failed for %s: %s", trade_id, e)
 

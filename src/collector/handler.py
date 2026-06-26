@@ -19,6 +19,7 @@ from shared.clients.fred import FREDClient
 from shared.clients.finnhub import FinnhubClient
 from shared.clients.quiver import QuiverClient
 from shared.clients.alpaca import AlpacaClient
+from shared.quadrants import active_quadrant, benchmark_etf_for
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,16 @@ _MACRO_SERIES_FILE = _SRC / "config" / "macro-series.json"
 _PORTFOLIO_FALLBACK = _SRC / "config" / "portfolio.json"
 _FLEX_CANDIDATES_FILE = _SRC / "config" / "flex-candidates.json"
 _FOMC_STANCE_FILE = _SRC / "config" / "fomc-stance.json"
+_FLEX_REVIEW_FILE = _SRC / "config" / "flex-review.json"
+
+# Conviction-sleeve flex-review defaults (overridable via config/flex-review.json).
+_FLEX_REVIEW_DEFAULTS = {
+    "REVIEW_DAYS": 60,
+    "LAG_TOL_PP": -2.0,
+    "BREAK_PP": -5.0,
+    "EXTENSION_DAYS": 30,
+    "DEADBAND_PP": 1.0,
+}
 # Cap on non-held flex candidates fetched per run — protects the FMP 250 req/day
 # budget (each candidate costs ~2 calls: profile + EOD price). See FOLLOWUPS #8.
 _FLEX_CANDIDATES_MAX = 20
@@ -123,6 +134,24 @@ def _load_fomc_stance() -> dict:
         stance = "unconfirmed"
     data["stance"] = stance
     return data
+
+
+def _load_flex_review_config() -> dict:
+    """Conviction-sleeve flex-review knobs from config/flex-review.json.
+
+    Missing/malformed file or absent keys → the documented defaults. Numeric only.
+    """
+    cfg = dict(_FLEX_REVIEW_DEFAULTS)
+    try:
+        with open(_FLEX_REVIEW_FILE) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return cfg
+    for k in _FLEX_REVIEW_DEFAULTS:
+        v = data.get(k)
+        if isinstance(v, (int, float)):
+            cfg[k] = v
+    return cfg
 
 
 def _close_by_date(fmp: FMPClient, symbol: str) -> dict[str, float]:
@@ -799,6 +828,25 @@ def run() -> None:
         fomc_stance.get("stance"),
     )
 
+    # --- Flex review (conviction-sleeve dual-benchmark exit; non-fatal) ------
+    flex_review: dict = {"available": False, "names": []}
+    try:
+        flex_review = _build_flex_review(
+            fmp=fmp,
+            paper_account=paper_account,
+            trade_rows=query_entities("TradeHistory"),
+            growth_axis=growth_axis,
+            inflation_axis=inflation_axis,
+            cfg=_load_flex_review_config(),
+        )
+        logger.info(
+            "Flex review: %d held flex name(s); statuses=%s",
+            len(flex_review.get("names", [])),
+            [n.get("review_status") for n in flex_review.get("names", [])],
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Flex review build failed (non-fatal)")
+
     # --- Phase C §4: performance scoreboard (account equity vs SPY) ---------
     # Non-fatal: a scoreboard failure must never block the daily snapshot.
     performance: dict = {"available": False}
@@ -866,6 +914,7 @@ def run() -> None:
         "inflation_axis": inflation_axis,
         "fomc_stance": fomc_stance,
         "regime_gate": regime_gate,
+        "flex_review": flex_review,
         "performance": performance,
         "track_record": track_record,
         "news": {
@@ -1983,6 +2032,231 @@ def _build_regime_gate(growth_axis: dict, inflation_axis: dict, fomc_stance: dic
         "rule": (
             "OPEN only when growth rising AND inflation not rising AND policy not "
             "hawkish; else CLOSED. Cash-sleeve band is subordinate to this gate."
+        ),
+    }
+
+
+def _classify_flex_review(
+    *,
+    days_held: int,
+    excess_vs_etf_pp: float,
+    excess_vs_spy_pp: float,
+    spy_return_since_entry_pct: float | None,
+    regime_fit_lost: bool,
+    cfg: dict,
+) -> dict:
+    """PURE classifier — the conviction-sleeve dual-benchmark review matrix.
+
+    Resolves `spy_direction` (DEADBAND_PP band) → the binding benchmark (SPY when
+    rising/flat, the active-quadrant ETF when falling), then the `review_status`.
+    AHEAD := excess >= LAG_TOL_PP (keeping pace, absorbs noise); BEHIND otherwise.
+    The LLM echoes the status; it computes none of these inputs.
+    """
+    review_days = cfg["REVIEW_DAYS"]
+    lag = cfg["LAG_TOL_PP"]
+    brk = cfg["BREAK_PP"]
+    dead = cfg["DEADBAND_PP"]
+
+    if spy_return_since_entry_pct is None:
+        spy_dir = "flat"
+    elif spy_return_since_entry_pct > dead:
+        spy_dir = "rising"
+    elif spy_return_since_entry_pct < -dead:
+        spy_dir = "falling"
+    else:
+        spy_dir = "flat"
+    # SPY binds in a rising/flat tape (the mission is to beat a rising SPY); the
+    # quadrant ETF binds in a drawdown (SPY is a low bar a defensive name clears
+    # just by falling less — the honest test is value added over the sleeve).
+    binding = "etf" if spy_dir == "falling" else "spy"
+
+    def _result(status: str, reason: str) -> dict:
+        return {
+            "review_status": status,
+            "binding_benchmark": binding,
+            "spy_direction": spy_dir,
+            "reason": reason,
+        }
+
+    # Regime fit is the entry gate; if it is void the position has no thesis —
+    # cut regardless of performance or holding window.
+    if regime_fit_lost:
+        return _result("breaking", "regime fit lost — entry quadrant left the active quadrant")
+    if days_held < review_days:
+        return _result("ok", f"within holding window (<{review_days}d)")
+
+    ahead_etf = excess_vs_etf_pp >= lag
+    ahead_spy = excess_vs_spy_pp >= lag
+    binding_excess = excess_vs_spy_pp if binding == "spy" else excess_vs_etf_pp
+    binding_ahead = ahead_spy if binding == "spy" else ahead_etf
+
+    if ahead_etf and ahead_spy:
+        return _result("ok", "ahead of both SPY and the quadrant ETF")
+    if binding_ahead:
+        # ahead on the binding benchmark, behind on the non-binding one
+        if binding == "spy":
+            return _result(
+                "ok_flagged",
+                "mission met (ahead SPY) but lagging the quadrant ETF — selection "
+                "weak; a higher-conviction name should bump it",
+            )
+        return _result(
+            "ok",
+            "drawdown: beating the quadrant sleeve (SPY is a low bar while falling)",
+        )
+    # behind on the binding benchmark
+    if binding_excess < brk:
+        return _result(
+            "breaking",
+            f"lagging the binding benchmark ({binding}) by more than {brk}pp",
+        )
+    return _result(
+        "review_due",
+        f"lagging the binding benchmark ({binding}) within the break threshold",
+    )
+
+
+def _build_flex_review(
+    fmp: FMPClient,
+    paper_account: dict,
+    trade_rows: list[dict],
+    growth_axis: dict,
+    inflation_axis: dict,
+    cfg: dict,
+    today: date | None = None,
+) -> dict:
+    """Conviction-sleeve performance review for every HELD flex name.
+
+    Deterministic dual-benchmark scoring (vs SPY and the active-quadrant ETF the
+    name displaced). Reads write-once entry metadata from TradeHistory, computes
+    days_held / returns / excesses / spy_direction / binding benchmark / status,
+    and forces ``breaking`` if the regime moved away from the entry quadrant. The
+    analyzer ECHOES the status and writes only the narrative for ``review_due``.
+    Non-fatal: any name lacking entry/benchmark/return data → status ``unknown``.
+    """
+    today = today or date.today()
+    active_q = active_quadrant(
+        (growth_axis or {}).get("direction"),
+        (inflation_axis or {}).get("direction"),
+    )
+
+    # Latest flex-BUY entry row per symbol (carries the write-once entry metadata).
+    entry_by_sym: dict[str, dict] = {}
+    for r in trade_rows or []:
+        if (r.get("layer") or "").lower() != "flex" or (r.get("side") or "").lower() != "buy":
+            continue
+        sym = r.get("symbol")
+        if not sym:
+            continue
+        rec = r.get("entry_date") or r.get("recommended_at") or ""
+        prev = entry_by_sym.get(sym)
+        if prev is None or rec >= (prev.get("entry_date") or prev.get("recommended_at") or ""):
+            entry_by_sym[sym] = r
+
+    held = {
+        p.get("ticker"): p
+        for p in (paper_account.get("positions") or [])
+        if float(p.get("qty") or 0) > 0
+    }
+
+    series_cache: dict[str, dict] = {}
+
+    def _series(sym: str) -> dict:
+        if sym not in series_cache:
+            series_cache[sym] = _close_by_date(fmp, sym)
+        return series_cache[sym]
+
+    names: list[dict] = []
+    for sym, pos in held.items():
+        entry = entry_by_sym.get(sym)
+        if entry is None:
+            continue  # core position — not a flex name
+
+        entry_date = entry.get("entry_date") or entry.get("recommended_at")
+        entry_price = entry.get("entry_price")
+        if entry_price in (None, ""):
+            entry_price = entry.get("price_at_rec")  # fallback to the stamped rec price
+        entry_q = entry.get("entry_quadrant") or entry.get("quadrant_current") or ""
+        bench = entry.get("flex_benchmark_etf") or benchmark_etf_for(entry_q)
+
+        def _unknown(missing: str) -> dict:
+            return {
+                "symbol": sym,
+                "review_status": "unknown",
+                "entry_date": entry_date,
+                "benchmark_etf": bench or None,
+                "missing": missing,
+                "note": f"flex review unavailable — missing {missing}; cannot score deterministically",
+            }
+
+        try:
+            entry_price = float(entry_price) if entry_price not in (None, "") else None
+        except (TypeError, ValueError):
+            entry_price = None
+        if not entry_date or entry_price is None:
+            names.append(_unknown("entry_date/entry_price"))
+            continue
+        if not bench:
+            names.append(_unknown("benchmark_etf"))
+            continue
+
+        sym_map, spy_map, bench_map = _series(sym), _series("SPY"), _series(bench)
+        cur = _close_on_or_before(sym_map, today.isoformat())
+        if cur is None:
+            cur = float(pos.get("current_price") or 0) or None
+        s0 = _close_on_or_before(spy_map, entry_date)
+        sn = _close_on_or_before(spy_map, today.isoformat())
+        b0 = _close_on_or_before(bench_map, entry_date)
+        bn = _close_on_or_before(bench_map, today.isoformat())
+        if not all((cur, s0, sn, b0, bn)):
+            names.append(_unknown("price series (symbol/SPY/benchmark)"))
+            continue
+
+        ret = (cur / entry_price - 1.0) * 100.0
+        spy_ret = (sn / s0 - 1.0) * 100.0
+        bench_ret = (bn / b0 - 1.0) * 100.0
+        excess_spy = ret - spy_ret
+        excess_etf = ret - bench_ret
+        days_held = (today - date.fromisoformat(str(entry_date)[:10])).days
+        regime_fit_lost = bool(active_q) and bool(entry_q) and active_q != entry_q
+
+        verdict = _classify_flex_review(
+            days_held=days_held,
+            excess_vs_etf_pp=excess_etf,
+            excess_vs_spy_pp=excess_spy,
+            spy_return_since_entry_pct=spy_ret,
+            regime_fit_lost=regime_fit_lost,
+            cfg=cfg,
+        )
+        names.append({
+            "symbol": sym,
+            "entry_date": entry_date,
+            "entry_quadrant": entry_q or None,
+            "active_quadrant": active_q or None,
+            "benchmark_etf": bench,
+            "days_held": days_held,
+            "return_since_entry_pct": round(ret, 3),
+            "spy_return_since_entry_pct": round(spy_ret, 3),
+            "benchmark_return_since_entry_pct": round(bench_ret, 3),
+            "excess_vs_spy_pp": round(excess_spy, 3),
+            "excess_vs_etf_pp": round(excess_etf, 3),
+            "spy_direction": verdict["spy_direction"],
+            "binding_benchmark": verdict["binding_benchmark"],
+            "regime_fit_lost": regime_fit_lost,
+            "review_status": verdict["review_status"],
+            "reason": verdict["reason"],
+        })
+
+    return {
+        "available": bool(names),
+        "as_of": today.isoformat(),
+        "review_days": cfg["REVIEW_DAYS"],
+        "config": cfg,
+        "names": names,
+        "note": (
+            "Conviction-sleeve dual-benchmark review (primary flex exit). Statuses are "
+            "computed here; the analyzer echoes them and writes the review_due narrative. "
+            "binding = SPY when its tape is rising/flat, the quadrant ETF when falling."
         ),
     }
 

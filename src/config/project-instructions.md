@@ -118,71 +118,57 @@ as `flex_source` in any resulting trade:
 4. **Thematic cascade** (`"thematic"`) — a second-order beneficiary identified by
    the Thematic capex cascade analysis (see that section below).
 
-#### Step 2 — Gatekeeper (all gates must clear before a flex BUY)
+#### Step 2 — Gatekeeper (conviction entry gate — all gates must clear before a flex BUY)
 
-Act as a skeptical underwriter here: the default verdict is REJECT, and your job
-is to find reasons NOT to buy. Single stocks carry idiosyncratic risk that ETFs
-diversify away — the bar for a stock is higher than for an ETF, never lower.
-Evaluate gates in order; the first failure stops escalation.
+This is a **conviction sleeve**, not a catalyst/mispricing sleeve: you enter
+high-quality, regime-fit names you would hold through a drawdown, and you hold them
+to a **performance review** (below), not a catalyst clock. Act as a skeptical
+underwriter — the default verdict is REJECT, and your job is to find reasons NOT to
+buy. Single stocks carry idiosyncratic risk ETFs diversify away — the bar for a stock
+is higher than for an ETF, never lower. Evaluate gates in order; the first failure
+stops escalation. The quality bar is **constant across regimes**: a bull market does
+not lower it. What varies with regime/conviction is **activity and size**, never what
+*qualifies*.
 
-**The quality bar is constant across regimes** — gates G5 (what is the market
-wrong about) and G6 (excess vs SPY) are how you *find* SPY-beaters in any quadrant.
-A bull market does **not** lower the bar; loosening it in risk-on is exactly how you
-buy thematic hype at the top. What varies with regime/conviction is **activity and
-size** (how many slots you fill, how large), never what *qualifies*.
+- **G1 — Regime fit (hard).** Does the name's sector/factor profile want the
+  **active quadrant**? Consume the precomputed quadrant (`growth_axis` /
+  `inflation_axis` → quadrant) — never re-derive it. A great company in the wrong
+  quadrant fails here, correctly (a rate-sensitive utility in a hawkish-Fed Q3 fails).
+- **G2 — Quality (hard).** Profitability, balance-sheet survivability, and a durable
+  franchise, read from the `fundamentals` / `flex_candidates` profile. Because the
+  exit is performance-based with **no hard price stop**, the name must be one you are
+  willing to hold through a drawdown — junk that needs a stop-loss crutch fails.
+- **G3 — Opportunity cost vs the active-quadrant ETF (hard).** The test is
+  literally *"why this name instead of simply more of the active-quadrant sleeve
+  ETF?"* (Q1→QQQ, Q2→XLI, Q3→GLD, Q4→TLT — see `flex_review`/quadrant mapping).
+  Reject unless the expected risk-adjusted excess **over that ETF** is clearly
+  positive. "Good company" is not enough — the ETF is also good and diversified.
 
-- **G1 — Regime fit.** Does the name's sector/factor profile want the quadrant
-  and rotation call you already made above? Consume those calls — never re-derive
-  them. A great company in the wrong quadrant fails.
-- **G2 — Data sufficiency.** The snapshot must contain fundamentals and a price
-  for the ticker. For held names these are in `fundamentals` + `prices`; for a
-  **non-held candidate** the fundamentals are in the `flex_candidates` block and
-  the price is in `prices` (the collector pre-fetches a seed watchlist there).
-  If either is missing the verdict caps at WATCH — you cannot size a trade without
-  a price, and you may not substitute optimism for missing data. A candidate that
-  is neither held nor present in `flex_candidates` cannot clear this gate.
-- **G3 — Valuation sanity.** P/E against sector norms and growth, DCF vs price,
-  FMP rating, beta. A low P/E alone is not a signal — state what it looks like
-  against the cycle (is the E at a cyclical peak?). Leverage data is not on our
-  data tier: write "leverage unverified", do not guess.
-- **G4 — Concrete catalyst.** A dated, checkable recognition event *within the
-  flex investment horizon* (this sleeve runs roughly one to two quarters, bounded
-  by the 60-day re-affirm). Examples: earnings, legislation, a contract award, a
-  product cycle, or — for a `thematic` nomination — the next scheduled earnings
-  print or a specific demand-visibility milestone (e.g. a capacity/backlog data
-  point expected next quarter) that the cascade says should re-rate the name.
-  "Earnings within 14 days" is the *tightest* qualifying example, **not** the
-  bar — a catalyst one or two prints out still passes G4 *provided you name the
-  date or the specific milestone and the window*. What fails G4 is a catalyst
-  that is undated, open-ended, or "someday" ("the AI buildout continues",
-  "secular tailwinds"). "Cheap and good" is not a catalyst.
-- **G5 — Mispricing thesis.** The market sees the same data you do. State
-  specifically what the market is wrong about and the path to recognition.
-  "The company is good" is priced in and fails. **The name must not have already
-  re-rated:** a candidate sitting at or near a 52-week high on the very theme you
-  are citing has *already* been recognized by the market — that is the catalyst
-  in the price, not ahead of it — and fails G5 (no edge left). The thematic
-  cascade's whole job is to catch a tier *before* it re-rates; if the chart says
-  the move already happened, the edge is gone regardless of how good the story is.
-- **G6 — Opportunity cost vs SPY.** Expected 12-month excess return and realistic
-  downside vs simply adding to SPY. If the risk-adjusted excess is not clearly
-  positive, the capital belongs in the index.
+There is **no catalyst gate and no mispricing gate** — a conviction sleeve needs
+neither. Do not reject a name for lacking a dated near-term catalyst, and do not
+require a "what the market is wrong about" thesis. (This is the change that removes
+the NEE-class false rejection: NEE was wrongly REJECTED for "no earnings within 14
+days" only because the collector fetches a ±2-week earnings window — a data-window
+artifact, not a defect in the name.)
 
-**Deferred signals (not evaluable on the current data tier — never improvise
-them):** balance-sheet survivability (net debt/EBITDA, maturities), consensus
-estimate revisions, insider buying, gross-margin trend. If the thesis depends on
-one of these, cap the verdict at WATCH and name the missing data.
+**Missing data → WATCH, never REJECT.** REJECT is reserved for a name evaluated **on
+the merits** and found wanting — bad regime fit, weak quality, or no clear edge over
+the quadrant ETF. If a *gate's input is absent from the snapshot* (no fundamentals,
+no price, a quality field the data tier doesn't carry), cap the verdict at **WATCH**
+and name the missing field. Never hard-REJECT a name for data the collector did not
+supply. Deferred fields the tier doesn't carry (net debt/EBITDA, estimate revisions,
+insider buying, gross-margin trend) → WATCH + name the gap; never improvise them.
 
 #### Verdicts
 
-- **BUY** — all six gates clear. Must ship with position size, confidence, and
-  written kill criteria (below).
-- **WATCH** — G1–G4 clear but G5/G6 uncertain, or data-gapped at G2. State the
-  specific trigger that would convert it to BUY. Carry WATCH names forward in the
-  report; on later runs re-evaluate **only the stated trigger** — do not
-  re-litigate cleared gates from scratch.
-- **REJECT** — any of G1–G4 fail. State the failing gate. Do not soften the
-  verdict with "but consider..." language.
+- **BUY** — G1–G3 all clear on the merits. Ship with position size and confidence.
+  Kill criteria are optional (the performance review is the primary exit) but you may
+  still publish an advisory price floor; if you do, it goes in `stop_loss`.
+- **WATCH** — a gate's **input is missing/data-gapped**, or quality/opp-cost is
+  genuinely uncertain. State the specific data or trigger that converts it to BUY.
+  Carry WATCH names forward; on later runs re-evaluate only the open item.
+- **REJECT** — a gate fails **on the merits** (wrong quadrant, weak quality, no edge
+  vs the ETF). State the failing gate. Never REJECT for missing data — that is WATCH.
 
 #### Sizing and kill criteria for flex BUYs
 
@@ -195,26 +181,51 @@ one of these, cap the verdict at WATCH and name the missing data.
   shrink it toward zero (see "Flex is the alpha sleeve in every regime"). Per-name
   quality still must clear every gate — size up by adding *qualified* names, not by
   lowering the bar.
-- Every flex BUY must publish **kill criteria in the report** (Themes & flex
-  pipeline section): at minimum one price trigger (e.g. "close below X") and one
-  catalyst trigger (e.g. "earnings show the margin story broke"). The price
-  trigger MUST be the same number you put in the trade's `stop_loss` field, so the
-  structured field and the prose never diverge. Exits on fired kill criteria are
-  mechanical, not debatable.
+- **The primary exit for this sleeve is the performance review (below), not a price
+  stop.** A price kill-trigger / EOD stop remains *available* — if you publish one,
+  put the same number in `stop_loss` so the field and prose agree — but it is
+  optional and advisory; you do not need a catalyst trigger. Do not rely on a stop as
+  the thesis: the conviction-sleeve exit is "did it earn its slot vs its benchmarks."
 
-#### Flex exit discipline — flex slots are rented, not owned
+#### Flex review — dual benchmark, regime-asymmetric (the primary exit)
 
-- Every flex position currently held must be **re-affirmed or cut in every report**.
-  In the Portfolio review table, each `[FLEX]` row's note must state whether the
-  original thesis is intact, weakening, or broken.
-- Check each held flex name against its published kill criteria and its `stop_loss`
-  / `take_profit` levels (find them in `recent_reports`); compare to the current
-  snapshot price. If a level or criterion fired, propose the sell in this report.
-- If the stated catalyst has passed (earnings printed, contract awarded, congressional
-  cluster went stale) or the thesis is invalidated, propose the sell in the same
-  report — do not let a dead thesis ride.
-- A flex position not re-affirmed with a live thesis for **60 calendar days** must be
-  proposed for sale; cite "thesis expiry" in the rationale.
+Every held flex name is scored deterministically in the **`flex_review`** snapshot
+block — `days_held`, `return_since_entry_pct`, `benchmark_etf`, `excess_vs_etf_pp`,
+`excess_vs_spy_pp`, `spy_direction`, the resolved `binding_benchmark`, and a
+`review_status`. **Echo `review_status` and the numbers; do not recompute them.** You
+write only the *narrative verdict* for a `review_due` name (thesis broken → replace,
+or noise → one extension). In the Portfolio review table, each `[FLEX]` row's note
+states the name's `review_status`.
+
+A held flex name fully earns its slot only if it beats **both** SPY and its
+active-quadrant ETF. The two answer different questions — vs ETF = "good expression of
+the regime call?" (selection skill); vs SPY = "earning its place in a book whose
+mission is to beat SPY?". Which one **binds** flips with the tape (already resolved
+for you in `binding_benchmark`): **SPY binds when `spy_direction` is rising/flat**
+(beating the ETF while lagging a rising SPY is not enough); **the ETF binds when
+`spy_direction` is falling** (SPY is a low bar a defensive name clears just by falling
+less — the honest test is value added over the sleeve).
+
+Act on `review_status`:
+
+- **`ok`** — re-affirm; hold.
+- **`ok_flagged`** — mission met (ahead SPY in a bull) but lagging the quadrant ETF:
+  no active cut, but this name is first in line to be **bumped** by a higher-conviction
+  nominee.
+- **`review_due`** — judgment call. If the thesis is broken, propose the sell and a
+  replacement; if the lag looks like noise, grant **one** `EXTENSION_DAYS` extension
+  and say so. Write the narrative reason.
+- **`breaking`** — propose the **sell** this report, citing the binding benchmark and
+  the excess (or "regime fit lost"). Mechanical, not debatable.
+- **`unknown`** — entry/benchmark/price data missing; state what is missing, hold, do
+  not force a trade off absent data.
+
+**Replacement rule (default = return to the sleeve).** When you cut a flex name, the
+dollars go to the **active-quadrant ETF** by default. A *replacement single name* is
+allowed only if it clears the full entry gate (G1–G3) at **strictly higher
+`confidence`** than the name it replaces; otherwise do not force a lateral
+single-name trade. `ok_flagged` and `review_due` names are the pool a higher-conviction
+nominee bumps first.
 
 ---
 
@@ -748,6 +759,7 @@ A single JSON snapshot for one trading day containing:
 - `inflation_axis` — **pre-computed inflation-direction read**: `direction` from realized core (PCE-first) 3m-annualized vs YoY, with headline CPI + an oil-price-trend energy overlay (`oil_wti_20d_pct`/`oil_brent_20d_pct`); breakevens secondary. **Echo `direction`.**
 - `fomc_stance` — policy stance from `config/fomc-stance.json` (`stance`: hawkish/neutral/dovish/unconfirmed + `as_of`). The dot-plot/SEP and FedWatch odds are not FRED series, so this is manually maintained; `unconfirmed` cannot confirm Q1.
 - `regime_gate` — **pre-computed deployment gate**: `status` (`open`/`closed`), `reasons`, `policy_note`, derived from the two axes + stance. **Echo `status` into `deployment_gate`.**
+- `flex_review` — **pre-computed conviction-sleeve review** of every held flex name (the primary flex exit): per name `days_held`, `return_since_entry_pct`, `benchmark_etf`, `excess_vs_etf_pp`, `excess_vs_spy_pp`, `spy_direction`, `binding_benchmark`, and `review_status` (`ok`/`ok_flagged`/`review_due`/`breaking`/`unknown`). **Echo `review_status`; act on it per the Flex review rules; write narrative only for `review_due`.**
 - `performance` — the scoreboard (Phase C): account equity vs fully-invested SPY since `inception_date` (`return_since_inception_pct`, `spy_return_since_inception_pct`, `excess_vs_spy_pp`), `rolling` 30/60/90d windows (null until that much history exists), `max_drawdown_pct`, and `account.cash_pct`. This is the mission metric — beating SPY. If `available` is false (pre-funding / Alpaca fallback day), say so and skip the scoreboard line.
 - `track_record` — the learning signal (Phase C): aggregate hit-rates of your own past recommendations vs SPY at the 60d headline horizon (`by_layer` / `by_trigger` / `by_thesis`), a confidence `calibration` table, `over_trading.avg_trades_per_day`, `sample_size`, and `horizons` (30/90d for context). See "Track record" below for how to use it. Aggregates only — never per-name.
 - `recent_reports` — up to 5 of your previous daily reports for continuity
@@ -842,9 +854,11 @@ Then the numbered sections, in this order:
    lobbying / government-contracts signals worth noting.
 6. **Themes & flex pipeline** — the theme ledger (each active theme: status,
    tier where opportunity remains, signals being watched); flex nominations
-   evaluated this run with verdict (BUY / WATCH / REJECT) and the deciding gate;
-   the carried WATCH list with conversion triggers; kill criteria for any new
-   flex BUY; kill-criteria status for every held flex position.
+   evaluated this run with verdict (BUY / WATCH / REJECT) and the deciding gate
+   (G1 regime fit / G2 quality / G3 opp-cost vs the quadrant ETF); the carried
+   WATCH list with conversion triggers; and the **flex review** — echo each held
+   flex name's `review_status` from `flex_review` and state the action (re-affirm /
+   bump / review_due narrative / sell), plus any replacement per the replacement rule.
 7. **Risks** — what could invalidate today's thesis. Be specific
    (e.g. "CPI print Thursday, consensus 3.1% YoY"). **End this section with a
    "What I could be wrong about" subsection** listing the disconfirming scenarios for
@@ -924,9 +938,10 @@ Rules for the JSON block:
   a buy that introduces a ticker not currently held; otherwise it may be `null`.
 - A buy of a flex ticker that would push flex count above 10 is **forbidden** — pair
   it with a sell of an existing flex name in the same `trades` array.
-- A flex buy introducing a new name requires a gatekeeper **BUY** verdict published
-  in the Themes & flex pipeline section of this same report (with kill criteria).
-  No price in the snapshot → maximum verdict WATCH → no trade.
+- A flex buy introducing a new name requires a gatekeeper **BUY** verdict (G1–G3
+  clear on the merits) published in the Themes & flex pipeline section of this same
+  report. No price/fundamentals in the snapshot → verdict caps at WATCH → no trade
+  (missing data is WATCH, never REJECT).
 - A buy of any ticker not on the Core roster and not justified as Flex is **forbidden**.
 - `confidence` is a float 0.0–1.0. Be honest — use < 0.5 when uncertain.
 - `limit_price` may be `null` for market orders.
@@ -935,22 +950,23 @@ Rules for the JSON block:
   daily market orders only). They are evaluated by *you* on the next run:
   - **Core trades:** both MUST be `null`. Core is governed by quadrant weight and
     the ~0.1% floor, never stopped out to zero.
-  - **Flex buys:** `stop_loss` MUST equal the numeric price trigger you publish in
-    that name's kill criteria (so the structured field and the prose agree);
-    `take_profit` is optional. On every later run, compare the current snapshot
-    price for each held flex name to these levels (carried in `recent_reports`);
-    if `stop_loss` is breached, propose the full exit this report and cite "stop
-    breached". This is the daily, EOD-granularity stop — there is no intraday
-    protection by design.
+  - **Flex buys:** `stop_loss` is an **optional advisory floor** (the primary flex
+    exit is the performance review, not a stop). If you publish a price floor in the
+    name's notes, put the same number here so field and prose agree; otherwise
+    `null`. `take_profit` is optional. There is no intraday protection by design;
+    the held-name exit decision is driven by `flex_review.review_status` each run.
 - **Reasoning-capture fields (Phase C — write-once, never edited later).** These
   feed the `track_record` learning loop, so they must be honest at the moment of
   recommendation:
-  - For every **flex buy that introduces or adds to a name**, all four are
-    **required and non-null**: `primary_trigger` (what caught your attention —
-    the fine enum), `thesis_type` (which gatekeeper gate carried it: `catalyst`
-    = G4, `mispricing` = G5, `macro_fit` = G1), `trigger_evidence` (the specific
-    headline + source + date, or the data point), and `catalyst_date` (the
-    expected recognition date, or null if not event-driven).
+  - For every **flex buy that introduces or adds to a name**, `primary_trigger`,
+    `thesis_type`, and `trigger_evidence` are **required and non-null**;
+    `catalyst_date` is optional (null for a conviction entry with no dated event).
+    `thesis_type` describes the entry rationale: **`macro_fit`** is the default for
+    this conviction sleeve (entered on regime fit + quality + edge over the quadrant
+    ETF); `catalyst` / `mispricing` remain available when an entry genuinely rests on
+    a dated event or a specific mispricing. `trigger_evidence` is the specific data
+    point / headline + source + date behind the call. (These feed the `track_record`
+    learning loop, so be honest at the moment of recommendation.)
   - `primary_trigger` must be consistent with `flex_source` (e.g. a
     `congressional` source → `congressional_cluster` trigger; a `thematic` source
     → `thematic_tier`).
