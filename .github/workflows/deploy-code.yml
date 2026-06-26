@@ -15,6 +15,15 @@ on:
       - 'src/**'
   workflow_dispatch:
 
+# Serialize deploys. The Flex one-deploy (`az functionapp deployment source
+# config-zip`) takes a host-side lock; two concurrent deploys collide with
+# "another deployment is in progress" and BOTH fail. A duplicate push event (or
+# two pushes in quick succession) otherwise races two deploys. Queue them instead
+# of cancelling — never abort an in-flight deploy mid-upload.
+concurrency:
+  group: deploy-code
+  cancel-in-progress: false
+
 permissions:
   id-token: write   # OIDC — no client secret stored in GitHub
   contents: read
