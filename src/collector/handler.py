@@ -671,6 +671,17 @@ def run() -> None:
     for _labor_sid in ("PAYEMS", "UNRATE", "CES0500000003", "JTSJOL",
                        "CIVPART", "SAHMREALTIME"):
         macro_data[_labor_sid] = fred.get_series_latest(_labor_sid, limit=24)
+    # Inflation pre-compute (quadrant inflation axis): monthly series need >=13 obs
+    # so the analyzer can compute YoY and the 3-month annualized direction (the
+    # realized-CPI/PCE read that governs the regime label over forward breakevens).
+    for _infl_sid in ("CPIAUCSL", "CPILFESL", "PCEPI", "PCEPILFE", "PPIACO", "RSAFS"):
+        macro_data[_infl_sid] = fred.get_series_latest(_infl_sid, limit=18)
+    # Growth axis: GDPNow is the primary growth-direction input — keep the last ~8
+    # nowcast prints so the analyzer can read its slope (rising vs falling).
+    macro_data["GDPNOW"] = fred.get_series_latest("GDPNOW", limit=8)
+    # Energy axis: oil spot for the stagflation/Hormuz-shock read (~90d for baseline).
+    for _oil_sid in ("DCOILWTICO", "DCOILBRENTEU"):
+        macro_data[_oil_sid] = fred.get_series_latest(_oil_sid, limit=90)
     logger.info("FRED: %d series collected", sum(1 for v in macro_data.values() if v))
 
     # --- EOD prices (FMP batch-quote, single call) --------------------------
