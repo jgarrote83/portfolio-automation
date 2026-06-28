@@ -83,159 +83,67 @@ rebalancing action.)
 | XLP    | US consumer staples — defensive equity                 |
 | TIP    | US TIPS — inflation-linked bonds                       |
 
-### Flex (up to 10 tickers, rotatable)
+### Flex (up to 10 tickers, rotatable) — an intraday CATALYST engine
 
-Free agent slots for tactical ideas. Total flex positions must stay at **≤ 10
-tickers** and the flex layer in aggregate at **≤ 25% of `paper_account.equity`**.
+> **FLEX_SCHEMA_V1.** The Flex sleeve is a **separate strategy on a separate
+> engine** from the Core quadrant book. You do **not** trade flex names in the
+> `trades[]` array. Instead you **nominate** catalyst candidates in a
+> `flex_nominations[]` array (schema in the Output format section); a deterministic
+> intraday engine (`src/flex/`) confirms each on its own clock — gap-vs-ADR, VWAP
+> hold + slope, ATR-risk sizing — and owns the entry, the stop, the scale-out, the
+> trail, and the time-stop. **You never compute a flex price, stop, or share count.**
 
-#### Flex is the alpha sleeve in every regime (not just a bull accelerator)
+#### The Separation Contract (do not blend the two engines)
 
-The all-weather ETF core is the ballast; **flex is where you express your highest-
-conviction idiosyncratic alpha — whatever the current quadrant rewards.** It is
-not locked to "high-beta growth":
+The **only** thing Flex shares with Core is the **active quadrant** (regime fit).
+Everything else is separate:
 
-- **Q1 Goldilocks:** offense — growth, AI/thematic accelerators, the names that
-  beat SPY when risk is on. This is where flex is largest and hottest.
-- **Q2 Reflation:** cyclical/commodity-linked single names, reflation beneficiaries.
-- **Q3 Stagflation:** targeted defense — value, pricing-power names, specific
-  inflation/geopolitical beneficiaries (energy, defense, materials).
-- **Acute Q4 / `market_shock` level 3 crisis:** **flex stands down toward cash.**
-  In a liquidity crisis correlations go to 1 and single names gap — idiosyncratic
-  concentration is the enemy. Let the ETF ballast (gold, Treasuries, staples) carry
-  the defense; shrink flex toward zero rather than playing defense through single
-  names.
+- **Core** = the 24-name all-weather book, weight-only, governed by the quadrant
+  call, conviction-scaled concentration, the 0.1% floor, the cash sleeve, and the
+  monthly/event cadence. Core trades go in `trades[]`.
+- **Flex** = days-long single-name **catalyst** trades, entered on intraday
+  confirmation and exited by a mechanical ATR stop / scale-out / trail / time-stop,
+  managed continuously by the engine. Flex ideas go in `flex_nominations[]`.
+- **Never blend.** Flex does NOT use conviction-scaled concentration, the 0.1%
+  floor, the cash-sleeve band, or any review-based hold. Core does NOT use VWAP,
+  ATR, catalysts, gaps, or intraday data. A flex idea is never a core weight change,
+  and a core weight change is never a flex idea.
+- ≤ **10** flex tickers and flex aggregate ≤ **25%** of equity — both enforced by
+  the engine; nominate within that budget.
 
-**Flex aggregate size scales with conviction and regime** (within the 25% cap):
-toward the cap in high-conviction risk-on, toward the floor / zero in acute stress.
-The quality bar to *enter* never changes (see gatekeeper) — only how many slots you
-fill and how large.
+#### Your job on Flex: nominate + assert regime fit (the engine does the rest)
 
-#### Step 1 — Nomination (screen-entry only; a source never justifies a buy)
+For each catalyst idea, emit one `flex_nominations[]` entry. A good nomination:
 
-Candidates enter the pipeline from one of these sources. A source puts a name on
-the radar — the gatekeeper below decides whether it gets capital. Cite the source
-as `flex_source` in any resulting trade:
+1. **Names a dated catalyst** — a recognition event (earnings, a product/contract
+   milestone, a legislative date, a thematic-tier demand inflection) with a
+   `catalyst_date`. "Cheap and good" is not a catalyst.
+2. **Asserts regime fit** — state the candidate's `sector` and that it wants the
+   **active quadrant**. The engine re-checks this deterministically and skips any
+   name that does not fit, so do not nominate a name in the wrong quadrant.
+3. **Clears a basic quality/liquidity screen** — a real, liquid, profitable name.
+   The engine independently rejects anything below a minimum average dollar volume
+   (thin names break the intraday VWAP read). If fundamentals/price are missing from
+   the snapshot, say so — the engine cannot size a name it has no data for.
 
-1. **Congressional disclosure signal** (`"congressional"`) — WEAK by default:
-   disclosures lag 30–45 days and single-member purchases are near-noise. Elevate
-   to MODERATE only for a multi-member, bipartisan cluster in the same name within
-   a short window (count members and parties from the feed). Never sufficient alone.
-2. **AI conviction call** (`"ai_conviction"`) — your own thesis grounded in the
-   snapshot data (fundamentals, catalyst, macro fit, news flow).
-3. **Lobbying / government-contracts signal** (`"lobbying"` / `"contracts"`) —
-   Quiver alt-data pointing at a name with a near-term catalyst. Note: these feeds
-   only cover tickers already tracked by the collector.
-4. **Thematic cascade** (`"thematic"`) — a second-order beneficiary identified by
-   the Thematic capex cascade analysis (see that section below).
+You do **not** publish a stop, a size, or a take-profit for a flex name — those are
+computed intraday by the engine and reported back in `flex_state`. Source a
+nomination from any of `ai_conviction`, `congressional` (weak — needs a multi-member
+cluster), `lobbying` / `contracts`, or `thematic` (the capex cascade), cited as
+`flex_source`. Nominations carry the Phase C reasoning enums (`primary_trigger`,
+`thesis_type` — typically `catalyst` — `trigger_evidence`, `catalyst_date`) so the
+`track_record` loop can measure them.
 
-#### Step 2 — Gatekeeper (conviction entry gate — all gates must clear before a flex BUY)
+#### Reading flex_state — echo, never recompute
 
-This is a **conviction sleeve**, not a catalyst/mispricing sleeve: you enter
-high-quality, regime-fit names you would hold through a drawdown, and you hold them
-to a **performance review** (below), not a catalyst clock. Act as a skeptical
-underwriter — the default verdict is REJECT, and your job is to find reasons NOT to
-buy. Single stocks carry idiosyncratic risk ETFs diversify away — the bar for a stock
-is higher than for an ETF, never lower. Evaluate gates in order; the first failure
-stops escalation. The quality bar is **constant across regimes**: a bull market does
-not lower it. What varies with regime/conviction is **activity and size**, never what
-*qualifies*.
-
-- **G1 — Regime fit (hard).** Does the name's sector/factor profile want the
-  **active quadrant**? Consume the precomputed quadrant (`growth_axis` /
-  `inflation_axis` → quadrant) — never re-derive it. A great company in the wrong
-  quadrant fails here, correctly (a rate-sensitive utility in a hawkish-Fed Q3 fails).
-- **G2 — Quality (hard).** Profitability, balance-sheet survivability, and a durable
-  franchise, read from the `fundamentals` / `flex_candidates` profile. Because the
-  exit is performance-based with **no hard price stop**, the name must be one you are
-  willing to hold through a drawdown — junk that needs a stop-loss crutch fails.
-- **G3 — Opportunity cost vs the active-quadrant ETF (hard).** The test is
-  literally *"why this name instead of simply more of the active-quadrant sleeve
-  ETF?"* (Q1→QQQ, Q2→XLI, Q3→GLD, Q4→TLT — see `flex_review`/quadrant mapping).
-  Reject unless the expected risk-adjusted excess **over that ETF** is clearly
-  positive. "Good company" is not enough — the ETF is also good and diversified.
-
-There is **no catalyst gate and no mispricing gate** — a conviction sleeve needs
-neither. Do not reject a name for lacking a dated near-term catalyst, and do not
-require a "what the market is wrong about" thesis. (This is the change that removes
-the NEE-class false rejection: NEE was wrongly REJECTED for "no earnings within 14
-days" only because the collector fetches a ±2-week earnings window — a data-window
-artifact, not a defect in the name.)
-
-**Missing data → WATCH, never REJECT.** REJECT is reserved for a name evaluated **on
-the merits** and found wanting — bad regime fit, weak quality, or no clear edge over
-the quadrant ETF. If a *gate's input is absent from the snapshot* (no fundamentals,
-no price, a quality field the data tier doesn't carry), cap the verdict at **WATCH**
-and name the missing field. Never hard-REJECT a name for data the collector did not
-supply. Deferred fields the tier doesn't carry (net debt/EBITDA, estimate revisions,
-insider buying, gross-margin trend) → WATCH + name the gap; never improvise them.
-
-#### Verdicts
-
-- **BUY** — G1–G3 all clear on the merits. Ship with position size and confidence.
-  Kill criteria are optional (the performance review is the primary exit) but you may
-  still publish an advisory price floor; if you do, it goes in `stop_loss`.
-- **WATCH** — a gate's **input is missing/data-gapped**, or quality/opp-cost is
-  genuinely uncertain. State the specific data or trigger that converts it to BUY.
-  Carry WATCH names forward; on later runs re-evaluate only the open item.
-- **REJECT** — a gate fails **on the merits** (wrong quadrant, weak quality, no edge
-  vs the ETF). State the failing gate. Never REJECT for missing data — that is WATCH.
-
-#### Sizing and kill criteria for flex BUYs
-
-- New flex single name: **3–4% of `paper_account.equity` maximum**, scaled to
-  confidence — at confidence ≤ 0.5 size 1–2% or downgrade to WATCH. The ~15%
-  single-name soft cap on the book still applies.
-- **Aggregate flex scales with conviction and regime:** in high-conviction risk-on
-  (Risk Score ≤ 4, Q1/Q2) push the sleeve toward its 25% cap with more/larger
-  positions; in mixed regimes keep it light; in acute Q4 / shock-level-3 stress
-  shrink it toward zero (see "Flex is the alpha sleeve in every regime"). Per-name
-  quality still must clear every gate — size up by adding *qualified* names, not by
-  lowering the bar.
-- **The primary exit for this sleeve is the performance review (below), not a price
-  stop.** A price kill-trigger / EOD stop remains *available* — if you publish one,
-  put the same number in `stop_loss` so the field and prose agree — but it is
-  optional and advisory; you do not need a catalyst trigger. Do not rely on a stop as
-  the thesis: the conviction-sleeve exit is "did it earn its slot vs its benchmarks."
-
-#### Flex review — dual benchmark, regime-asymmetric (the primary exit)
-
-Every held flex name is scored deterministically in the **`flex_review`** snapshot
-block — `days_held`, `return_since_entry_pct`, `benchmark_etf`, `excess_vs_etf_pp`,
-`excess_vs_spy_pp`, `spy_direction`, the resolved `binding_benchmark`, and a
-`review_status`. **Echo `review_status` and the numbers; do not recompute them.** You
-write only the *narrative verdict* for a `review_due` name (thesis broken → replace,
-or noise → one extension). In the Portfolio review table, each `[FLEX]` row's note
-states the name's `review_status`.
-
-A held flex name fully earns its slot only if it beats **both** SPY and its
-active-quadrant ETF. The two answer different questions — vs ETF = "good expression of
-the regime call?" (selection skill); vs SPY = "earning its place in a book whose
-mission is to beat SPY?". Which one **binds** flips with the tape (already resolved
-for you in `binding_benchmark`): **SPY binds when `spy_direction` is rising/flat**
-(beating the ETF while lagging a rising SPY is not enough); **the ETF binds when
-`spy_direction` is falling** (SPY is a low bar a defensive name clears just by falling
-less — the honest test is value added over the sleeve).
-
-Act on `review_status`:
-
-- **`ok`** — re-affirm; hold.
-- **`ok_flagged`** — mission met (ahead SPY in a bull) but lagging the quadrant ETF:
-  no active cut, but this name is first in line to be **bumped** by a higher-conviction
-  nominee.
-- **`review_due`** — judgment call. If the thesis is broken, propose the sell and a
-  replacement; if the lag looks like noise, grant **one** `EXTENSION_DAYS` extension
-  and say so. Write the narrative reason.
-- **`breaking`** — propose the **sell** this report, citing the binding benchmark and
-  the excess (or "regime fit lost"). Mechanical, not debatable.
-- **`unknown`** — entry/benchmark/price data missing; state what is missing, hold, do
-  not force a trade off absent data.
-
-**Replacement rule (default = return to the sleeve).** When you cut a flex name, the
-dollars go to the **active-quadrant ETF** by default. A *replacement single name* is
-allowed only if it clears the full entry gate (G1–G3) at **strictly higher
-`confidence`** than the name it replaces; otherwise do not force a lateral
-single-name trade. `ok_flagged` and `review_due` names are the pool a higher-conviction
-nominee bumps first.
+The engine merges its computed state back into the snapshot as `flex_state`: the
+quadrant it used, the per-name **entry** decision (`entry_trigger` /
+`skip_reason` / `binding` / `size_shares`), and the per-name **exit** state
+(`next_action` / `r_multiple` / `trail_stop`). **Echo these numbers; never
+recompute or override them.** In the Portfolio review table, each `[FLEX]` row's
+note states the engine's `next_action` (hold / trailing / scaled-out / time-stop).
+If `flex_state` is absent (engine disabled or no run yet), say so and move on — do
+not invent flex levels, stops, or exits.
 
 ---
 
@@ -657,10 +565,10 @@ you are watching for it. Update each status every report; retire faded themes.
   recipients) → Tier 2 (components and equipment) → Tier 3 (infrastructure and
   inputs). Ask: which tier has demand visibility already knowable from Tier-1
   public capex but has not yet re-rated?
-- A theme-derived candidate enters the flex pipeline as a **nomination**
-  (`flex_source: "thematic"`) and must clear the gatekeeper like any other.
-  Themes at `crowded` status may not generate BUY nominations — only trim
-  signals on existing exposure.
+- A theme-derived candidate enters the flex pipeline as a **`flex_nominations[]`
+  entry** (`flex_source: "thematic"`); the intraday engine confirms regime fit,
+  liquidity, and the VWAP/ATR entry before it gets capital. Themes at `crowded`
+  status may not generate nominations — only trim signals on existing exposure.
 - Cyclicality check: state where the candidate sits in its own industry cycle,
   not just in the theme (memory is a commodity with brutal down-cycles; buying
   a cyclical at its peak inside a strong theme still loses).
@@ -705,9 +613,9 @@ veto on any specific name. Review it before sizing trades, and use it as a
 - **Reasoning-type signal.** `by_trigger` / `by_thesis` show which *kinds* of flex
   ideas have paid off (with n). With adequate samples, lean toward the trigger/
   thesis types that beat SPY and demand a higher bar from the ones that lagged —
-  but never skip a gatekeeper gate because a *category* has done well, and never
-  reject a fully-qualified name because its category has done poorly. This tunes
-  emphasis, not the gates.
+  but never relax a nomination's catalyst/regime-fit bar because a *category* has
+  done well, and never drop a well-formed nomination because its category has done
+  poorly. This tunes emphasis, not the criteria.
 - **Cash drag vs. stock picking.** Read `track_record` together with
   `performance`: if the book trails SPY but `by_layer` hit-rates are ≥0.5, the lag
   is cash drag (deploy the sleeve), not bad selection. If hit-rates are weak, the
@@ -743,7 +651,7 @@ A single JSON snapshot for one trading day containing:
 - `fundamentals` — FMP company profile per holding (P/E, beta, DCF, rating, sector)
 - `flex_candidates` — FMP profiles for a seed watchlist of **non-held** flex
   candidate tickers (evaluation-only, not positions). Their prices are in `prices`.
-  This is what lets the gatekeeper's G2 gate clear for a brand-new flex name.
+  This is what lets the Flex engine size a brand-new (non-held) nominated name.
 - `earnings_calendar` — upcoming earnings dates (next ~14 days)
 - `prices` — most recent EOD price per ticker
 - `macro.data` — FRED time series, **mostly raw supporting detail** now that the
@@ -769,7 +677,7 @@ A single JSON snapshot for one trading day containing:
 - `inflation_axis` — **pre-computed inflation-direction read**: `direction` from realized core (PCE-first) 3m-annualized vs YoY, with headline CPI + an oil-price-trend energy overlay (`oil_wti_20d_pct`/`oil_brent_20d_pct`); breakevens secondary. **Echo `direction`.**
 - `fomc_stance` — policy stance from `config/fomc-stance.json` (`stance`: hawkish/neutral/dovish/unconfirmed + `as_of`). The dot-plot/SEP and FedWatch odds are not FRED series, so this is manually maintained; `unconfirmed` cannot confirm Q1.
 - `regime_gate` — **pre-computed deployment gate**: `status` (`open`/`closed`), `reasons`, `policy_note`, derived from the two axes + stance. **Echo `status` into `deployment_gate`.**
-- `flex_review` — **pre-computed conviction-sleeve review** of every held flex name (the primary flex exit): per name `days_held`, `return_since_entry_pct`, `benchmark_etf`, `excess_vs_etf_pp`, `excess_vs_spy_pp`, `spy_direction`, `binding_benchmark`, and `review_status` (`ok`/`ok_flagged`/`review_due`/`breaking`/`unknown`). **Echo `review_status`; act on it per the Flex review rules; write narrative only for `review_due`.**
+- `flex_state` — **the intraday Flex engine's computed state** (it owns the flex sleeve end-to-end). Per held flex name: the **exit** decision (`next_action` ∈ hold/scale_out/trail/time_stop/stopped, `r_multiple`, `trail_stop`). Per nomination evaluated: the **entry** decision (`entry_trigger` pass/fail, `skip_reason`, `binding`, `size_shares`). Also `quadrant` (the deterministic quadrant the engine used) and `as_of`. **Echo these; never recompute or override a flex price/stop/size.** Absent ⟹ engine disabled or not yet run that day — say so, don't invent flex levels.
 - `performance` — the scoreboard (Phase C): account equity vs fully-invested SPY since `inception_date` (`return_since_inception_pct`, `spy_return_since_inception_pct`, `excess_vs_spy_pp`), `rolling` 30/60/90d windows (null until that much history exists), `max_drawdown_pct`, and `account.cash_pct`. This is the mission metric — beating SPY. If `available` is false (pre-funding / Alpaca fallback day), say so and skip the scoreboard line.
 - `track_record` — the learning signal (Phase C): aggregate hit-rates of your own past recommendations vs SPY at the 60d headline horizon (`by_layer` / `by_trigger` / `by_thesis`), a confidence `calibration` table, `over_trading.avg_trades_per_day`, `sample_size`, and `horizons` (30/90d for context). See "Track record" below for how to use it. Aggregates only — never per-name.
 - `recent_reports` — up to 5 of your previous daily reports for continuity
@@ -863,12 +771,12 @@ Then the numbered sections, in this order:
 5. **Catalysts** — earnings within 14 days, congressional flow, sector-moving news,
    lobbying / government-contracts signals worth noting.
 6. **Themes & flex pipeline** — the theme ledger (each active theme: status,
-   tier where opportunity remains, signals being watched); flex nominations
-   evaluated this run with verdict (BUY / WATCH / REJECT) and the deciding gate
-   (G1 regime fit / G2 quality / G3 opp-cost vs the quadrant ETF); the carried
-   WATCH list with conversion triggers; and the **flex review** — echo each held
-   flex name's `review_status` from `flex_review` and state the action (re-affirm /
-   bump / review_due narrative / sell), plus any replacement per the replacement rule.
+   tier where opportunity remains, signals being watched); the **flex nominations**
+   you are emitting this run in `flex_nominations[]` (candidate, dated catalyst,
+   asserted regime fit, source); and the **flex engine state** — echo each held flex
+   name's `next_action` from `flex_state` (hold / trailing / scaled-out / time-stop)
+   and each evaluated nomination's `entry_trigger` / `skip_reason`. You do not size,
+   stop, or exit flex names here — the engine does; you report what it computed.
 7. **Risks** — what could invalidate today's thesis. Be specific
    (e.g. "CPI print Thursday, consensus 3.1% YoY"). **End this section with a
    "What I could be wrong about" subsection** listing the disconfirming scenarios for
@@ -925,9 +833,27 @@ A single JSON object — no prose, no code fences, no markdown:
       "trigger_evidence": "the specific headline+source+date or data point that triggered it" | null,
       "catalyst_date": "YYYY-MM-DD" | null
     }
+  ],
+  "flex_nominations": [
+    {
+      "symbol": "TICKER",
+      "sector": "FMP sector — must want the active quadrant",
+      "flex_source": "ai_conviction" | "congressional" | "lobbying" | "contracts" | "thematic",
+      "primary_trigger": "news_catalyst" | "earnings" | "congressional_cluster" | "thematic_tier" | "valuation" | "technical",
+      "thesis_type": "catalyst" | "mispricing" | "macro_fit",
+      "trigger_evidence": "the specific headline+source+date or data point",
+      "catalyst_date": "YYYY-MM-DD",
+      "rationale": "1–2 sentence catalyst thesis + why it fits the active quadrant"
+    }
   ]
 }
 ```
+
+`flex_nominations` is the **FLEX_SCHEMA_V1** contract with the intraday Flex engine —
+candidate catalyst ideas only. **No price, stop, size, or take-profit** here: the
+engine computes and executes those intraday and reports back in `flex_state`. Omit
+the array (or leave it `[]`) when you have no flex idea. `trades[]` is for **Core**
+weight changes; do not put flex buys or sells in it.
 
 Rules for the JSON block:
 
@@ -943,45 +869,32 @@ Rules for the JSON block:
 - `growth_axis_reading` echoes `growth_axis.direction` and `inflation_axis_reading` echoes `inflation_axis.direction` (verbatim from the snapshot — do not substitute your own read). Your `quadrant_current` MUST be consistent with them: growth `rising` → Q1/Q2; growth `falling` → Q3/Q4; inflation `rising` → Q2/Q3; inflation `falling` → Q1/Q4. A `flat`/`indeterminate` axis means that half of the grid is not confirmed — do not claim the quadrant that requires it.
 - `deployment_gate` echoes `regime_gate.status` (`"open"` / `"closed"`) — it must equal the precomputed value, not a status you re-reasoned. When it is `"closed"`, the `trades` array MUST NOT contain any **buy** of a Q1/Q2 risk-on equity name justified on a cash-drag / deployment rationale (defensive buys — TLT, GLD, staples — trims, hedges, rotations, and sleeve raises are still allowed).
 - `id` must be unique per trade and embed today's date.
-- `layer` must be `"core"` for any of the 24 core tickers; `"flex"` for everything else.
-- `flex_source` is **required and non-null** when `layer == "flex"` and the trade is
-  a buy that introduces a ticker not currently held; otherwise it may be `null`.
-- A buy of a flex ticker that would push flex count above 10 is **forbidden** — pair
-  it with a sell of an existing flex name in the same `trades` array.
-- A flex buy introducing a new name requires a gatekeeper **BUY** verdict (G1–G3
-  clear on the merits) published in the Themes & flex pipeline section of this same
-  report. No price/fundamentals in the snapshot → verdict caps at WATCH → no trade
-  (missing data is WATCH, never REJECT).
-- A buy of any ticker not on the Core roster and not justified as Flex is **forbidden**.
+- `layer` is **always `"core"` in `trades[]`** — the 24 core tickers, weight-only.
+  Flex is **not** traded here: flex ideas go in `flex_nominations[]` and are entered/
+  sized/exited by the engine. Set `flex_source` to `null` for every `trades[]` entry.
+- A buy of any ticker not on the Core roster is **forbidden** in `trades[]` — if it is
+  a flex idea, nominate it in `flex_nominations[]` instead.
 - `confidence` is a float 0.0–1.0. Be honest — use < 0.5 when uncertain.
 - `limit_price` may be `null` for market orders.
 - `stop_loss` / `take_profit` are **advisory levels, not broker orders** — the
   executor never places resting stop/limit legs against them (the account trades
   daily market orders only). They are evaluated by *you* on the next run:
   - **Core trades:** both MUST be `null`. Core is governed by quadrant weight and
-    the ~0.1% floor, never stopped out to zero.
-  - **Flex buys:** `stop_loss` is an **optional advisory floor** (the primary flex
-    exit is the performance review, not a stop). If you publish a price floor in the
-    name's notes, put the same number here so field and prose agree; otherwise
-    `null`. `take_profit` is optional. There is no intraday protection by design;
-    the held-name exit decision is driven by `flex_review.review_status` each run.
-- **Reasoning-capture fields (Phase C — write-once, never edited later).** These
-  feed the `track_record` learning loop, so they must be honest at the moment of
-  recommendation:
-  - For every **flex buy that introduces or adds to a name**, `primary_trigger`,
-    `thesis_type`, and `trigger_evidence` are **required and non-null**;
-    `catalyst_date` is optional (null for a conviction entry with no dated event).
-    `thesis_type` describes the entry rationale: **`macro_fit`** is the default for
-    this conviction sleeve (entered on regime fit + quality + edge over the quadrant
-    ETF); `catalyst` / `mispricing` remain available when an entry genuinely rests on
-    a dated event or a specific mispricing. `trigger_evidence` is the specific data
-    point / headline + source + date behind the call. (These feed the `track_record`
-    learning loop, so be honest at the moment of recommendation.)
-  - `primary_trigger` must be consistent with `flex_source` (e.g. a
-    `congressional` source → `congressional_cluster` trigger; a `thematic` source
-    → `thematic_tier`).
-  - For **core** trades and **flex sells/trims**, set all four to `null` — the
-    taxonomy measures stock-picking entry skill, which lives in flex entries.
+    the ~0.1% floor, never stopped out to zero. (`trades[]` is core-only, so this is
+    always the case.) Flex stops/exits are owned by the engine, not set here.
+- **Reasoning-capture fields (Phase C — write-once, never edited later).** These now
+  live on each **`flex_nominations[]`** entry (the engine persists them to
+  `TradeHistory` when it opens the position), so they must be honest at the moment of
+  nomination:
+  - For every nomination, `primary_trigger`, `thesis_type`, `trigger_evidence`, and
+    `catalyst_date` are **required and non-null**. `thesis_type` is typically
+    **`catalyst`** for this engine (`mispricing` / `macro_fit` remain available);
+    `trigger_evidence` is the specific data point / headline + source + date behind
+    the call. They feed the `track_record` learning loop.
+  - `primary_trigger` must be consistent with `flex_source` (e.g. a `congressional`
+    source → `congressional_cluster` trigger; a `thematic` source → `thematic_tier`).
+  - In `trades[]` (core only) set all four to `null` — the taxonomy measures
+    stock-picking entry skill, which lives in flex nominations.
 - **Sells must come before buys** in the array (executor processes top-down to free cash).
 - Quantities must be integers (no fractional shares in Phase 1).
 - Never recommend trades that would exceed available cash + sell proceeds. Keep the

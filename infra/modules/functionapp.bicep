@@ -92,6 +92,11 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         //   Paper-only auto-execute at 09:35 ET. NOTE: this overrides the
         //   "Phase 1 clean 30+ days before Phase 2" gate — auto-trading is on.
         { name: 'AUTO_EXECUTE_ENABLED',                      value: 'true' }
+        //   Intraday catalyst Flex engine (flex_intraday, every 15 min, is_open-gated).
+        //   Ships OFF — places live (paper) broker orders. Flip to 'true' to enable
+        //   after dry-run validation (POST /api/flex {"dry_run":true}). FLEX_* knobs
+        //   default in src/flex/config.py; override here only if tuning.
+        { name: 'FLEX_ENABLED',                              value: 'false' }
         //   Analyzer Claude call on large snapshots can exceed the old 10-min
         //   Consumption cap; Flex allows more. Backstops host.json functionTimeout.
         { name: 'AzureFunctionsJobHost__functionTimeout',    value: '00:40:00' }

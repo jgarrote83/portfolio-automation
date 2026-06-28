@@ -9,6 +9,7 @@ from collector.handler import run as collector_run
 from analyzer.handler import analyze_snapshot
 from executor.handler import execute_approvals
 from seeder.handler import seed_positions
+from flex.handler import run_flex_intraday
 from shared.storage import read_blob_bytes
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,62 @@ def auto_executor(timer: func.TimerRequest) -> None:
         logger.info("auto_executor result for %s: %s", date_str, result.get("status"))
     except Exception:  # noqa: BLE001
         logger.exception("auto_executor failed for %s", date_str)
+
+
+@app.timer_trigger(
+    # Every 15 min, weekdays. The cron is TIMEZONE-INDEPENDENT by design: market
+    # hours are NOT encoded — the engine gates on Alpaca's clock (is_open) inside
+    # run_flex_intraday, which is the DST-safe choice. Do NOT add a TZ-local note.
+    schedule="0 */15 * * * 1-5",
+    arg_name="timer",
+    run_on_startup=False,
+    use_monitor=True,
+)
+def flex_intraday(timer: func.TimerRequest) -> None:
+    """Intraday catalyst Flex engine. Gated by FLEX_ENABLED app setting.
+
+    Reconciles the flex ledger to Alpaca, manages held flex positions, and
+    enters confirmed nominations inside the morning window. Closed-market ticks
+    self-skip after the clock check (effectively free).
+    """
+    if os.getenv("FLEX_ENABLED", "false").lower() != "true":
+        logger.info("FLEX_ENABLED is not 'true' — skipping flex_intraday")
+        return
+    try:
+        result = run_flex_intraday()
+        logger.info("flex_intraday result: %s", result.get("status"))
+    except Exception:  # noqa: BLE001
+        logger.exception("flex_intraday failed")
+
+
+@app.route(
+    route="flex",
+    methods=["POST"],
+    auth_level=func.AuthLevel.FUNCTION,
+)
+def flex(req: func.HttpRequest) -> func.HttpResponse:
+    """Manual/dry-run invocation of the flex engine. Body: {"date"?, "dry_run"?}.
+
+    `dry_run=true` computes and persists the would-do state but places no orders —
+    use it to validate the engine before flipping FLEX_ENABLED on.
+    """
+    try:
+        body = req.get_json()
+    except ValueError:
+        body = {}
+    body = body or {}
+    date_str = body.get("date")
+    dry_run = bool(body.get("dry_run", False))
+    try:
+        result = run_flex_intraday(date_str=date_str, dry_run=dry_run)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("flex run failed")
+        return func.HttpResponse(
+            json.dumps({"error": str(e)}), status_code=500, mimetype="application/json",
+        )
+    return func.HttpResponse(
+        json.dumps(result, default=str), status_code=200, mimetype="application/json",
+    )
 
 
 @app.route(

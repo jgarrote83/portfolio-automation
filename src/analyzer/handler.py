@@ -32,6 +32,22 @@ _SRC = Path(__file__).parent.parent
 _SYSTEM_PROMPT_FILE = _SRC / "config" / "project-instructions.md"
 _TRADES_MARKER = "===TRADES_JSON==="
 
+# Prompt↔code schema gate for the Flex catalyst engine. The engine consumes
+# `flex_nominations` from the analyzer's output; if a stale/reverted prompt no
+# longer emits them (or the sentinel), the two engines silently desync. Fail
+# loud at load rather than ship old-style flex trades.
+_FLEX_SCHEMA_SENTINELS = ("FLEX_SCHEMA_V1", "flex_nominations")
+
+
+def assert_flex_prompt_schema(prompt: str) -> None:
+    """Raise if the system prompt is missing the flex nomination schema markers."""
+    missing = [s for s in _FLEX_SCHEMA_SENTINELS if s not in prompt]
+    if missing:
+        raise RuntimeError(
+            f"project-instructions.md is missing flex schema markers {missing} — "
+            "prompt/code desync (a reverted prompt?). Refusing to run."
+        )
+
 # Soft caps to keep the user message inside Claude's context window comfortably.
 _MAX_NEWS_PER_SCOPE = 25
 _MAX_COMPANY_NEWS_PER_TICKER = 5
@@ -60,6 +76,7 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
         )
 
     system_prompt = _SYSTEM_PROMPT_FILE.read_text(encoding="utf-8")
+    assert_flex_prompt_schema(system_prompt)
     recent = list_recent_reports(limit=_MAX_RECENT_REPORTS)
     logger.info("Loaded %d recent reports for continuity", len(recent))
 

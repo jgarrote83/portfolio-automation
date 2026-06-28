@@ -215,6 +215,48 @@ def _read_json_blob(container: str, name: str) -> dict | list | None:
     return json.loads(raw)
 
 
+# --- generic JSON / JSONL blob helpers (used by the flex engine) -------------
+
+def read_json_blob(container: str, name: str) -> dict | list | None:
+    """Public best-effort JSON blob read (None if missing)."""
+    return _read_json_blob(container, name)
+
+
+def write_json_blob(container: str, name: str, obj: dict | list) -> None:
+    """Overwrite a JSON blob, creating the container if needed."""
+    client = _blob_client()
+    try:
+        client.get_container_client(container).create_container()
+    except Exception:
+        pass
+    blob = client.get_blob_client(container, name)
+    blob.upload_blob(json.dumps(obj, default=str, indent=2), overwrite=True)
+
+
+def append_jsonl_blob(container: str, name: str, record: dict) -> None:
+    """Append one JSON record as a line to a .jsonl blob (read-modify-write).
+
+    Fine for the flex per-tick decision audit (~26 lines/day). Best-effort:
+    never raises so a logging failure can't break the trading loop.
+    """
+    try:
+        client = _blob_client()
+        try:
+            client.get_container_client(container).create_container()
+        except Exception:
+            pass
+        blob = client.get_blob_client(container, name)
+        try:
+            existing = blob.download_blob().readall().decode("utf-8")
+        except Exception:
+            existing = ""
+        line = json.dumps(record, default=str)
+        data = (existing + line + "\n") if existing else (line + "\n")
+        blob.upload_blob(data.encode("utf-8"), overwrite=True)
+    except Exception as e:
+        logger.warning("append_jsonl_blob failed (%s/%s): %s", container, name, e)
+
+
 def read_trades(date_str: str) -> dict | list | None:
     return _read_json_blob("daily-trades", f"{date_str}.json")
 

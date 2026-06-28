@@ -1,10 +1,16 @@
+> ⚠️ **SUPERSEDED (2026-06-28) — NOT IMPLEMENTED.** The Flex sleeve was replaced by
+> the **intraday catalyst engine** (`docs/specs/Flex_Catalyst_Engine_v1.0.md`,
+> `src/flex/`), which owns flex entries/exits with live (paper) broker orders. The
+> daily-advisory ratcheting stop described below was never built and is retired
+> (FOLLOWUPS #10 closed as superseded). Kept for historical context only.
+
 **Flex Trailing Stop — Ratcheting Exit for the Flex Sleeve**
 
 Azure-Native Portfolio Automation System
 
 v1.0 (DRAFT) — June 2026 — One-directional, volatility-scaled trailing stop for flex positions
 
-*STATUS: Draft for review. Not yet implemented. Scopes a change to how flex `stop_loss` levels behave on held positions. No executor change — flex stops remain advisory, daily, EOD-granularity levels (see Architecture). Core-layer stops are unaffected (they stay null by doctrine).*
+*STATUS: SUPERSEDED — see header. (Original: Draft for review. Not yet implemented.) Scopes a change to how flex `stop_loss` levels behave on held positions. No executor change — flex stops remain advisory, daily, EOD-granularity levels (see Architecture). Core-layer stops are unaffected (they stay null by doctrine).*
 
 # 1. Purpose & Scope
 

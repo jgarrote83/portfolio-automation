@@ -220,9 +220,16 @@ capital-flow fingerprints (capex, backlog, shortage, subsidy) into a
 `news.capex` block — feeds the thematic cascade if 50 headlines prove too
 narrow an aperture.
 
-### 10. Implement Flex Trailing Stop v1 (HIGH — next task)
-**Spec: `docs/specs/Flex_Trailing_Stop_v1.0.md`** (v1.0, decision-locked, committed
-`e78e25a`). A volatility-scaled, one-directional ratcheting stop for the flex sleeve
+### 10. Implement Flex Trailing Stop v1 — ❌ SUPERSEDED 2026-06-28
+**Replaced by the intraday catalyst Flex engine** (`docs/specs/Flex_Catalyst_Engine_v1.0.md`,
+`src/flex/`). The Flex sleeve pivoted from a conviction-hold sleeve with daily advisory
+stops to a days-long *catalyst* trade with live (paper) broker orders (OTO entry + resting
+GTC stop + cancel/replace trail/scale-out/time-stop). This **reverses the stateless-executor
+principle for the flex path only** (a deliberate, account-holder-approved decision; Core
+stays advisory/stateless). The trailing-stop spec below was never built. See the Done entry.
+
+~~**Spec: `docs/specs/Flex_Trailing_Stop_v1.0.md`** (v1.0, decision-locked, committed
+`e78e25a`). A volatility-scaled, one-directional ratcheting stop for the flex sleeve~~
 + the catalyst-gated relative exit. Locked design:
 - **Volatility unit V** = P95 of |Δclose| over 60 trading days (outlier-robust — the
   earnings-gap day sits above P95, so no earnings-date exclusion needed).
@@ -262,6 +269,21 @@ today's work — flagged 2026-06-25 while updating storage docs for Phase C.
 ---
 
 ## Done
+- **2026-06-28** — Built the **intraday catalyst Flex engine** (`src/flex/`,
+  `docs/specs/Flex_Catalyst_Engine_v1.0.md`), replacing the conviction sleeve +
+  `flex_review` and **superseding #10**. New `flex_intraday` timer (every 15 min,
+  `is_open`-gated, `FLEX_ENABLED` ships OFF) + `/api/flex` dry-run route. Pure modules
+  (`indicators`/`regime`/`entry`/`exit_state`/`reconcile`) with 36 unit tests; the LLM
+  emits `flex_nominations[]` (FLEX_SCHEMA_V1, asserted at analyzer load + CI), the engine
+  computes/executes via live OTO entry + resting GTC stop (Alpaca has no native
+  scale-out/trailing-bracket → managed cancel/replace pair). Reconcile-FIRST with a
+  no-naked-long repair; idempotent epsilon-gated trailing; per-tick decision audit
+  (`flex-decisions/*.jsonl`). **Sizing config reconciled** to `RISK_BUDGET_PCT=0.40` /
+  `PER_NAME_CAP_PCT=12.0` (was 0.75/4.0, where the cap silently dominated the budget) —
+  the `binding` constraint is now surfaced. Flex trades still feed `TradeHistory` → Phase
+  C. ruff clean, 105 tests pass. **Open follow-ups:** live-paper verification after flipping
+  `FLEX_ENABLED=true` (dry-run first); delete the dead `_build_flex_review` builder; SIP feed
+  for true VWAP. Priority #2's "real flex buy emits §7 enums" now routes through the engine.
 - **2026-06-25** — Specced the **flex trailing stop + catalyst-gated relative exit**
   (`docs/specs/Flex_Trailing_Stop_v1.0.md`, `e78e25a`); decision-locked, not yet
   built — tracked as Open #10 for implementation. Design summary in #10.

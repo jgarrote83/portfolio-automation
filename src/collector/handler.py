@@ -8,6 +8,7 @@ from shared.storage import (
     ensure_tables,
     list_snapshot_dates,
     query_entities,
+    read_json_blob,
     read_perf_series,
     read_snapshot,
     upsert_entity,
@@ -828,24 +829,25 @@ def run() -> None:
         fomc_stance.get("stance"),
     )
 
-    # --- Flex review (conviction-sleeve dual-benchmark exit; non-fatal) ------
-    flex_review: dict = {"available": False, "names": []}
+    # --- Flex engine state (intraday catalyst engine; echoed by the analyzer) -
+    # The engine writes flex-state/{date}.json during the trading session. At
+    # collector time (09:00 ET) today's run hasn't happened yet, so echo the most
+    # recent prior state (up to a week back). Non-fatal. The conviction-sleeve
+    # flex_review was retired when Flex became a separate intraday engine.
+    flex_state: dict = {"available": False}
     try:
-        flex_review = _build_flex_review(
-            fmp=fmp,
-            paper_account=paper_account,
-            trade_rows=query_entities("TradeHistory"),
-            growth_axis=growth_axis,
-            inflation_axis=inflation_axis,
-            cfg=_load_flex_review_config(),
-        )
+        d0 = date.fromisoformat(today)
+        for back in range(0, 8):
+            blob = read_json_blob("flex-state", f"{(d0 - timedelta(days=back)).isoformat()}.json")
+            if isinstance(blob, dict):
+                flex_state = {"available": True, **blob}
+                break
         logger.info(
-            "Flex review: %d held flex name(s); statuses=%s",
-            len(flex_review.get("names", [])),
-            [n.get("review_status") for n in flex_review.get("names", [])],
+            "Flex state: available=%s as_of=%s held=%s",
+            flex_state.get("available"), flex_state.get("as_of"), flex_state.get("held"),
         )
     except Exception:  # noqa: BLE001
-        logger.exception("Flex review build failed (non-fatal)")
+        logger.exception("Flex state load failed (non-fatal)")
 
     # --- Phase C §4: performance scoreboard (account equity vs SPY) ---------
     # Non-fatal: a scoreboard failure must never block the daily snapshot.
@@ -914,7 +916,7 @@ def run() -> None:
         "inflation_axis": inflation_axis,
         "fomc_stance": fomc_stance,
         "regime_gate": regime_gate,
-        "flex_review": flex_review,
+        "flex_state": flex_state,
         "performance": performance,
         "track_record": track_record,
         "news": {

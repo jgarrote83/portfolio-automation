@@ -189,27 +189,9 @@ def test_core_trade_gets_no_entry_metadata(monkeypatch):
     assert "entry_price" not in captured[0]
 
 
-# --- prompt-contract regressions (NEE-class) ---------------------------------
-
-def _prompt_text():
-    p = os.path.join(os.path.dirname(__file__), "..", "src", "config",
-                     "project-instructions.md")
-    with open(p, encoding="utf-8") as f:
-        return f.read()
-
-
-def test_prompt_missing_data_is_watch_not_reject():
-    t = _prompt_text()
-    assert "Missing data → WATCH" in t
-
-
-def test_prompt_removed_catalyst_and_mispricing_gates():
-    t = _prompt_text()
-    assert "no catalyst gate and no mispricing gate" in t
-
-
-def test_prompt_has_conviction_entry_gates():
-    t = _prompt_text()
-    assert "G1 — Regime fit (hard)" in t
-    assert "G2 — Quality (hard)" in t
-    assert "G3 — Opportunity cost vs the active-quadrant ETF (hard)" in t
+# NOTE: the conviction-sleeve prompt-contract regressions were removed when the
+# Flex sleeve was replaced by the intraday catalyst engine (the G1–G3 gatekeeper
+# and flex_review exit were retired). The new prompt contract is covered by
+# tests/test_flex_prompt_schema.py (FLEX_SCHEMA_V1 + flex_nominations). The pure
+# _build_flex_review / _classify_flex_review builders remain as dead code pending a
+# later cleanup, so their unit tests above are retained.
