@@ -3,7 +3,25 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-06-25.** All work committed & pushed; GitHub is
+**▶ START HERE — last session 2026-06-29 (ops-only, no code change).** The `/today`
+page broke with `Error loading report: /api/dates → 500`. Root cause = the **3rd
+recurrence of Open #2**: the 2026-06-28 infra deploy re-applied `staticwebapp.bicep`
+(declares only 3 non-secret settings) and wiped the SWA's `STORAGE_CONNECTION_STRING`
++ `FUNC_MASTER_KEY`, so `web/api` `_blobs()` raised → 500. **Fixed live** in
+`rg-portfolio-automation-prod` by re-applying both via
+`az staticwebapp appsettings set` (see Open #2 runbook) and re-running **Deploy web
+(SWA)**. Separately investigated a func-pfauto log warning
+(`webjobs.storage: Unhealthy — Unable to create client for AzureWebJobsStorage`):
+**false alarm** — transient health-probe flap on a worker instance draining at 15:36
+UTC; host `Running`, all 8 functions registered, MI has all 4 storage roles + KV,
+storage network open, zero such traces in App Insights over the prior 3h. **This fix
+is ephemeral — the next infra deploy wipes it again.** Permanent fix still open:
+**implement Open #4** (switch `web/api` to `DefaultAzureCredential` via the present
+`STORAGE_ACCOUNT_NAME`, eliminating the secret) — this is the recommended next task.
+Caveat for whoever verifies: dev-box DNS resolves `*.azurestaticapps.net` to a
+captive `192.168.x` IP, so verify `/today` from a normal browser, not curl on the box.
+
+**▶ Prior session 2026-06-25.** All work committed & pushed; GitHub is
 the source of truth. **Phase C is complete (closes Open #7):** 7a (`performance`
 scoreboard) + 7c (`track_record` + §7 reasoning enums + "Track record" prompt
 section) shipped in `c41ea6c`, **deployed to func-pfauto**, and **live-verified** —
@@ -91,7 +109,9 @@ func-pfauto executor via `FUNC_MASTER_KEY`. These (plus `AAD_CLIENT_ID` /
 `infra/modules/staticwebapp.bicep`. Because `az deployment group create` replaces
 the SWA's app-setting set wholesale, any `infra/**` deploy wipes them and the
 `/today` page breaks (`/api/dates → 500`, table stuck on "Loading…").
-- Observed + restored live on 2026-06-09.
+- Observed + restored live on 2026-06-09, again 2026-06-15, and a **3rd time
+  2026-06-29** (the 2026-06-28 infra deploy was the trigger). Still not permanently
+  fixed — escalating recurrence; do Open #4 next.
 - **Fix:** move these to **Key Vault references** in `staticwebapp.bicep` (mirror
   how `functionapp.bicep` handles secrets), so deploys set rather than wipe them.
   Requires the secret values to live in `kv-pfauto-prod` first.
@@ -269,6 +289,16 @@ today's work — flagged 2026-06-25 while updating storage docs for Phase C.
 ---
 
 ## Done
+- **2026-06-29** (ops-only, no code) — Diagnosed + restored the `/today` page after
+  it broke with `/api/dates → 500`. **3rd recurrence of Open #2:** the 2026-06-28
+  infra deploy wiped the SWA's `STORAGE_CONNECTION_STRING` + `FUNC_MASTER_KEY`.
+  Re-applied both live (`az staticwebapp appsettings set`, in
+  `rg-portfolio-automation-prod`) + re-ran **Deploy web (SWA)**. Also ruled out a
+  func-pfauto `webjobs.storage: Unhealthy` log warning as a **transient
+  drain/recycle flap** (host Running, 8 functions registered, MI roles + storage
+  network all intact, no App Insights traces). No repo files changed — the fix lives
+  in Azure only and the **next infra deploy will wipe it again**. **Next task: Open
+  #4** (MI-based `web/api`, removes the secret for good).
 - **2026-06-28** — Built the **intraday catalyst Flex engine** (`src/flex/`,
   `docs/specs/Flex_Catalyst_Engine_v1.0.md`), replacing the conviction sleeve +
   `flex_review` and **superseding #10**. New `flex_intraday` timer (every 15 min,
