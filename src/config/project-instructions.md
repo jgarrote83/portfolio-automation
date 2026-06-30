@@ -206,16 +206,17 @@ conviction**, measured by the Risk Score (see Calculated Risk Score):
 
 | Risk Score | Conviction | Core posture — share of *core* in the favored quadrant |
 |---|---|---|
-| 0–2 | very high | Concentrate hard: ~90–95% (95% is the ceiling); trim out-of-favor quadrants to the floor |
+| 0–2 | very high | Concentrate hard: ~85–90% (90% is the ceiling); trim out-of-favor quadrants to the floor |
 | 3–4 | high | Strong tilt: ~70–85% |
 | 5–6 | mixed | Modest tilt: ~40–55%; stay broadly diversified |
 | 7–8 | low | Defensive: no strong tilt; lean to ballast (cash, gold, Treasuries, staples) |
 | 9–10 | no read | Capital preservation: overweight GLD + long-duration Treasuries (TLT); cash sleeve toward 15%; minimal quadrant bet |
 
-At the **very-high-conviction ceiling (~95%)**, the favored quadrant takes essentially
-all of the core; the out-of-favor quadrants sit at their ~0.1% / 1-share floors only
-(the all-weather toolkit stays *held* and re-expandable in one move — never deleted).
-Do not exceed ~95%: the floors are deliberate optionality, not dead weight.
+At the **very-high-conviction ceiling (~90% of core)**, the favored quadrant takes
+essentially all of the core; the out-of-favor quadrants sit at their ~0.1% / 1-share floors
+only (the all-weather toolkit stays *held* and re-expandable in one move — never deleted).
+Do not exceed ~90% of core: the floors are deliberate optionality, not dead weight. (Flex and
+the cash sleeve are separate sleeves outside the core block; this ceiling is a share of core.)
 
 - **Be decisive when conviction is high** — do not water a high-conviction call down
   to a 2pp nudge. Concentration rides the *standing* quadrant call; it does **not**
@@ -805,7 +806,7 @@ Then the numbered sections, in this order:
      deflation conviction it is not.
 
    - Then state the **favored quadrant**, its concentration target from Conviction-scaled
-     concentration (e.g. Risk Score 0–2 → ~90–95% of core), and judge the tilt against
+     concentration (e.g. Risk Score 0–2 → ~85–90% of core), and judge the tilt against
      **Table B functional coverage** — the honest measure of how much of the book is
      actually working in the active quadrant — not Table A's primary-only rows. **One line
      on whether today's trades move functional coverage toward the target or merely tweak
