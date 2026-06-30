@@ -734,6 +734,17 @@ Then the numbered sections, in this order:
    book is trailing SPY while cash is high, attribute it to cash drag rather than
    stock selection (this is the mission metric; surface it, do not bury it).
 2. **Macro & quadrant** — what the FRED data, FX, yields, and news flow imply.
+   **Open this section by reproducing the Quadrant Reference table verbatim.** It is a
+   fixed legend — identical in every report, it never changes — so the reader always has
+   the map of what each quadrant favors and what it hurts:
+
+   | Quadrant | Growth | Inflation | Best assets | Hurt assets |
+   |---|---|---|---|---|
+   | Q1 — Goldilocks | Rising | Falling | US/global equities (esp. growth/tech), credit, EM | Commodities, gold, cash |
+   | Q2 — Reflation | Rising | Rising | Commodities, energy, materials, industrials, EM, TIPS | Long bonds, defensive equity |
+   | Q3 — Stagflation | Falling | Rising | Gold, commodities, TIPS, energy, defensive sectors | Growth equity, long bonds |
+   | Q4 — Deflation | Falling | Falling | Long Treasuries, US dollar cash, defensive equity | Commodities, EM, cyclicals |
+
    Cite specific numbers and series names. **Re-derive all three axes (growth /
    inflation / policy) from scratch** per "How to call the quadrant", state the
    direction + datum + as-of date for each, and give the explicit corrected-call line
@@ -742,8 +753,16 @@ Then the numbered sections, in this order:
    mandatory Data Freshness table** (input | value | as-of | STALE? | source, flagging
    anything >5 days stale or missing) **and (b) the Macro deployment gate status**
    (`GATE OPEN` / `GATE CLOSED`, with the one-line reason). **End the section with the
-   Quadrant allocation table** — this is how the user verifies the book actually
-   concentrates rather than just re-labelling the regime:
+   Quadrant allocation — this is how the user verifies the book actually
+   concentrates rather than just re-labelling the regime. **Produce BOTH tables
+   below. Put the one-line *purpose note* (italic) directly above each table so the
+   reader knows what each one answers. Do NOT delete or merge the tables — they
+   answer two different questions and one cannot substitute for the other.**
+
+   **Table A — Accounting view (every dollar counted once; rows sum to ~100%).**
+   *Purpose: shows where the capital literally sits. Each name appears in exactly one
+   quadrant, so the percentages are a true share of equity. This is the honest
+   "where is the money" picture — it does NOT show how defended each quadrant is.*
 
    | Quadrant | Current % of equity | Recommended % (post-trade) |
    |---|---|---|
@@ -753,15 +772,49 @@ Then the numbered sections, in this order:
    | Q4 Deflation | … | … |
    | Cash sleeve (cash + SGOV) | … | … |
 
-   - Assign each held name to its **primary** quadrant only (per "Notes on the
-     multi-quadrant tickers") so the rows sum to ~100% without double-counting; put
-     cash + SGOV in the Cash sleeve row, **not** in Q4.
-   - Then state the **favored quadrant**, its concentration target from
-     Conviction-scaled concentration (e.g. Risk Score 0–2 → ~90–95% of core), and
-     **one line on whether today's trades actually move Current toward the target or
-     merely tweak it.** If the quadrant call or conviction changed since the last
-     report but Current ≈ Recommended, you are **under-trading** — revisit the weights
-     and concentrate decisively (this is the most common failure mode).
+   - Assign each held name to its **primary** quadrant only so the rows sum to
+     ~100% without double-counting; put cash + SGOV in the Cash sleeve row. This is
+     the accounting convention for **Table A only** — it is not a claim that SGOV
+     lacks a Q4 role (Table B captures that).
+   - "Primary" is **regime-relative** for genuinely dual-regime names: in a Q3/Q4
+     regime tag VDE/PDBC/DBA/TIP to **Q3** (the role they are currently playing), not
+     Q2; in a Q1/Q2 regime tag them to Q2.
+
+   **Table B — Functional coverage view (secondary roles counted; NOT additive to 100%).**
+   *Purpose: shows how defended the book actually is per quadrant — the question Table
+   A cannot answer. A name appears in EVERY quadrant it can work in (per the quadrant
+   ticker map + "Notes on the multi-quadrant tickers"), so one ticker may be counted in
+   two rows and the column does NOT sum to 100%. Use THIS table to judge "are we thin on
+   Q3/Q4?" and to size the favored-quadrant tilt.*
+
+   | Quadrant | Functional coverage % of equity | Names counted |
+   |---|---|---|
+   | Q1 Goldilocks | … | … |
+   | Q2 Reflation | … | … |
+   | Q3 Stagflation | … | … |
+   | Q4 Deflation | … | … |
+
+   - Count each held name in every quadrant it serves, e.g. GLD → Q3+Q4; SGOV → Q4
+     (primary) + Q3 (secondary); XLP/MCK → Q3+Q4; TIP/DBA/PDBC/VDE → Q2+Q3. **SGOV is
+     Q4-primary per the ticker map and MUST appear in the Q4 functional row** — this
+     supersedes any older instruction to keep SGOV out of Q4 (that rule governs Table A
+     accounting only).
+   - **SGOV intent annotation (required):** directly under Table B, state in one line how
+     much of the Q4 figure is *committed deflation ballast* (e.g. TLT) versus *dry powder /
+     optionality* (SGOV held as the cash sleeve). A large SGOV balance must not read as
+     deflation conviction it is not.
+
+   - Then state the **favored quadrant**, its concentration target from Conviction-scaled
+     concentration (e.g. Risk Score 0–2 → ~90–95% of core), and judge the tilt against
+     **Table B functional coverage** — the honest measure of how much of the book is
+     actually working in the active quadrant — not Table A's primary-only rows. **One line
+     on whether today's trades move functional coverage toward the target or merely tweak
+     it.** If the quadrant call or conviction changed since the last report but coverage is
+     unchanged, you are **under-trading** — revisit the weights and concentrate decisively
+     (this is the most common failure mode). Do NOT use the multi-quadrant labeling to
+     rationalize inaction: if functional Q3/Q4 coverage is below target, the fix is real
+     trades (trim the inactive quadrant toward the floor, rotate into the active one), not a
+     note that "the Q2 commodities are really doing Q3 work."
 3. **Geopolitical overlay** — the most material 1–3 items from the last ~30 days
    that affect supply chains, energy, defense, or trade.
 4. **Portfolio review** — table of current holdings with weight, day P/L, total P/L,
