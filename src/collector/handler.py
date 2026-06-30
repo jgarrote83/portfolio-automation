@@ -21,6 +21,7 @@ from shared.clients.finnhub import FinnhubClient
 from shared.clients.quiver import QuiverClient
 from shared.clients.alpaca import AlpacaClient
 from shared.quadrants import (
+    AMPLIFIER_INTL,
     CORE_ROSTER,
     EXEMPT_HOLDS,
     active_quadrant,
@@ -47,6 +48,18 @@ _RISK_LIMITS_FILE = _SRC / "config" / "risk-limits.json"
 _CORE_SINGLE_STOCKS = ("AMZN", "GOOGL", "INTC", "MCK")
 # Literal-cash buffer kept inside the cash sleeve (rest of the sleeve is SGOV).
 _CASH_BUFFER_PCT = 1.5
+
+_DIVERGENCE_CONFIG_FILE = _SRC / "config" / "divergence-config.json"
+_SPY_SMA_WINDOW = 200  # long-trend filter for the price-vs-regime divergence (spec §6)
+# Fallback divergence thresholds if config/divergence-config.json is missing/invalid
+# (mirror that file — it is the canonical source).
+_DIVERGENCE_DEFAULTS = {
+    "leading_vs_lagging_inflation": {"breakeven_delta_20d_bp": 15.0, "oil_20d_pct": 10.0},
+    "credit_complacency": {"hy_oas_pct_rank_max": 10.0, "hy_oas_complacency_level_pct": 3.5},
+    "price_vs_regime": {},
+    "dollar_vs_intl_tilt": {"intl_heavy_pct": 20.0, "intl_light_pct": 8.0},
+    "staleness_days": 7,
+}
 
 # Fallback risk limits if config/risk-limits.json is missing/invalid (keep in sync
 # with that file — it is the canonical source; this only guards a broken deploy).
@@ -891,6 +904,28 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Reference weights build failed (non-fatal)")
 
+    # --- Divergences (responsiveness brief Phase 2: DETECT tensions, don't resolve) ---
+    # Descriptive precompute pointing the analyzer's judgment at high-value zones; the
+    # LLM adjudicates them in Phase 4 (the prompt does not consume this yet). The SPY
+    # 200-day SMA (#3's long-trend filter) is the one new input — fetched here and reduced
+    # by the pure _sma_from_rows so _build_divergences itself stays no-network/testable.
+    # Non-fatal: a divergence-build failure must never block the snapshot.
+    divergences: list[dict] = []
+    try:
+        try:
+            spy_sma = _sma_from_rows(fmp.get_historical_price_light("SPY"), _SPY_SMA_WINDOW)
+        except Exception:  # noqa: BLE001
+            logger.warning("Divergences: SPY history fetch failed; price-vs-regime indeterminate")
+            spy_sma = {"available": False}
+        divergences = _build_divergences(
+            paper_account, growth_axis, inflation_axis, bond_signals, regional_rotation,
+            reference_weights, market_shock, spy_sma, today, _load_divergence_config(),
+        )
+        _active = [d["id"] for d in divergences if d.get("status") == "active"]
+        logger.info("Divergences: %d total, active=%s", len(divergences), _active)
+    except Exception:  # noqa: BLE001
+        logger.exception("Divergences build failed (non-fatal)")
+
     # --- Flex engine state (intraday catalyst engine; echoed by the analyzer) -
     # The engine writes flex-state/{date}.json during the trading session. At
     # collector time (09:00 ET) today's run hasn't happened yet, so echo the most
@@ -979,6 +1014,7 @@ def run() -> None:
         "fomc_stance": fomc_stance,
         "regime_gate": regime_gate,
         "reference_weights": reference_weights,
+        "divergences": divergences,
         "flex_state": flex_state,
         "performance": performance,
         "track_record": track_record,
@@ -2413,6 +2449,271 @@ def _build_reference_weights(
             "down; cash sleeve held to its band; flex is a separate sleeve."
         ),
     }
+
+
+def _load_divergence_config() -> dict:
+    """Thresholds for the divergence detector (config/divergence-config.json).
+
+    Missing/invalid → in-module defaults (mirror the file). Tolerant of ``_*`` notes.
+    """
+    try:
+        with open(_DIVERGENCE_CONFIG_FILE) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        logger.warning("divergence-config.json missing/invalid — using built-in defaults")
+        return dict(_DIVERGENCE_DEFAULTS)
+    merged = dict(_DIVERGENCE_DEFAULTS)
+    for k, v in data.items():
+        if not k.startswith("_"):
+            merged[k] = v
+    return merged
+
+
+def _sma_from_rows(rows: list[dict], window: int) -> dict:
+    """200-day-style simple moving average from FMP `get_historical_price_light` rows
+    (newest-first). Returns ``{available, sma, latest, latest_date, above}`` or
+    ``{available: False}`` if fewer than ``window`` closes. Pure — the network fetch
+    happens in the orchestration layer; this only reduces already-fetched rows so the
+    divergence detector stays deterministic and unit-testable.
+    """
+    if not rows or len(rows) < window:
+        return {"available": False}
+
+    def _close(r: dict) -> float | None:
+        v = r.get("price") if r.get("price") is not None else r.get("close")
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    closes = [_close(r) for r in rows[:window]]
+    if any(c is None for c in closes):
+        return {"available": False}
+    sma = sum(closes) / window
+    latest = closes[0]
+    return {
+        "available": True,
+        "sma": round(sma, 4),
+        "latest": round(latest, 4),
+        "latest_date": rows[0].get("date"),
+        "above": latest > sma,
+    }
+
+
+def _days_stale(as_of: str | None, today: str) -> int | None:
+    """Calendar-day age of an ``as_of`` date vs ``today`` (both ISO). None if unparseable."""
+    if not as_of:
+        return None
+    try:
+        return (date.fromisoformat(today) - date.fromisoformat(as_of[:10])).days
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_divergences(
+    paper_account: dict,
+    growth_axis: dict,
+    inflation_axis: dict,
+    bond_signals: dict,
+    regional_rotation: dict,
+    reference_weights: dict,
+    market_shock: dict,
+    spy_sma: dict,
+    today: str,
+    cfg: dict,
+) -> list[dict]:
+    """Deterministic detector of TENSIONS between signals that should agree but don't
+    (responsiveness brief Phase 2). It points the analyzer's judgment at the high-value
+    zones — it does **not** resolve, rank, or act on any tension (that is Tier 3 / the
+    LLM's job in Phase 4). Output is descriptive, never prescriptive.
+
+    Echo-not-re-derive: every input is read from values already computed in the snapshot
+    (the bond scorecard legs, the inflation/growth axes, the DXY trend, reference_weights,
+    holdings) plus a 200-day SMA reduced from already-fetched SPY rows. A divergence whose
+    input is stale or absent is marked ``status: "indeterminate"`` — never a false
+    ``active``, never silently dropped (missing data = WATCH, never REJECT).
+
+    Returns a list of ``{id, description, signals, direction_implied, status}``.
+    """
+    out: list[dict] = []
+    stale_days = int(cfg.get("staleness_days", 7))
+
+    # --- 1. leading vs lagging inflation -------------------------------------
+    out.append(_div_leading_vs_lagging_inflation(inflation_axis, bond_signals, cfg))
+
+    # --- 2. credit complacency vs calm ---------------------------------------
+    out.append(_div_credit_complacency(bond_signals, market_shock, cfg))
+
+    # --- 3. price action vs regime call --------------------------------------
+    out.append(_div_price_vs_regime(spy_sma, reference_weights, regional_rotation, today, stale_days))
+
+    # --- 4. dollar vs international tilt --------------------------------------
+    out.append(_div_dollar_vs_intl(paper_account, regional_rotation, today, stale_days, cfg))
+
+    return out
+
+
+def _div_leading_vs_lagging_inflation(inflation_axis: dict, bond_signals: dict, cfg: dict) -> dict:
+    """Leading inflation (5y breakeven 20d delta + WTI 20d move) vs realized direction."""
+    c = cfg["leading_vs_lagging_inflation"]
+    be = ((bond_signals or {}).get("breakevens") or {}).get("be_5y") or {}
+    be_delta = be.get("delta_20d_bp")
+    oil_20d = (inflation_axis or {}).get("oil_wti_20d_pct")
+    realized = (inflation_axis or {}).get("direction")
+
+    sig = [
+        {"name": "be_5y.delta_20d_bp", "value": be_delta, "as_of": None},
+        {"name": "inflation_axis.oil_wti_20d_pct", "value": oil_20d, "as_of": None},
+        {"name": "inflation_axis.direction (realized)", "value": realized, "as_of": None},
+    ]
+    base = {"id": "leading_vs_lagging_inflation",
+            "description": "Leading inflation (breakevens + oil) vs realized core direction.",
+            "signals": sig}
+
+    if be_delta is None and oil_20d is None or realized is None:
+        return {**base, "direction_implied": "unresolved", "status": "indeterminate"}
+
+    # Leading direction: down if breakevens fall enough OR oil falls enough; up if either rises.
+    be_thr = float(c["breakeven_delta_20d_bp"])
+    oil_thr = float(c["oil_20d_pct"])
+    leading_down = (be_delta is not None and be_delta <= -be_thr) or (oil_20d is not None and oil_20d <= -oil_thr)
+    leading_up = (be_delta is not None and be_delta >= be_thr) or (oil_20d is not None and oil_20d >= oil_thr)
+    leading = "falling" if leading_down and not leading_up else ("rising" if leading_up and not leading_down else "flat")
+
+    # Tension when the leading direction disagrees with realized (and leading is not flat).
+    if leading != "flat" and leading != realized:
+        return {**base,
+                "description": f"Leading inflation points {leading} while realized core is {realized}.",
+                "direction_implied": leading, "status": "active"}
+    return {**base, "direction_implied": "aligned", "status": "indeterminate"}
+
+
+def _div_credit_complacency(bond_signals: dict, market_shock: dict, cfg: dict) -> dict:
+    """HY OAS at an absolute complacency LEVEL while nothing else flags stress.
+
+    Gates on the LEVEL band (HY OAS < hy_oas_complacency_level_pct), not the 90-day
+    percentile rank: complacency is a level-vs-history concept, but a 90d percentile is
+    purely relative and sits mid-range by construction in a persistently tight-spread
+    regime — i.e. blind in exactly the calm-low-spread state this detector must catch.
+    The 90d percentile is retained as a reported *secondary* signal, not the trigger.
+    """
+    c = cfg["credit_complacency"]
+    credit = (bond_signals or {}).get("credit") or {}
+    hy = credit.get("hy_oas") or {}
+    level = hy.get("latest")
+    pct_rank = hy.get("pct_rank_90d")  # secondary/context only
+    stress_flag = (credit.get("credit_stress") or {}).get("flag")
+    shock = (market_shock or {}).get("shock_level")
+
+    sig = [
+        {"name": "hy_oas.latest", "value": level, "as_of": None},
+        {"name": "hy_oas.pct_rank_90d", "value": pct_rank, "as_of": None},
+        {"name": "credit_stress.flag", "value": stress_flag, "as_of": None},
+        {"name": "market_shock.shock_level", "value": shock, "as_of": None},
+    ]
+    base = {"id": "credit_complacency",
+            "description": "HY credit spread at a complacency level with no corroborating stress.",
+            "signals": sig}
+
+    if level is None:
+        return {**base, "direction_implied": "unresolved", "status": "indeterminate"}
+
+    calm = (not stress_flag) and (shock is None or shock <= 1)
+    complacent = level < float(c["hy_oas_complacency_level_pct"])
+    if complacent and calm:
+        return {**base,
+                "description": (f"HY OAS {level}% is in the complacency band "
+                                f"(<{c['hy_oas_complacency_level_pct']}%) with no stress flag and "
+                                f"shock<=1 — little spread cushion, repricing-fragile."),
+                "direction_implied": "fragility", "status": "active"}
+    return {**base, "direction_implied": "none", "status": "indeterminate"}
+
+
+def _div_price_vs_regime(spy_sma: dict, reference_weights: dict, regional_rotation: dict,
+                         today: str, stale_days: int) -> dict:
+    """SPY trend vs its 200-day SMA disagreeing with the deterministic active_quadrant."""
+    quad = (reference_weights or {}).get("active_quadrant")
+    spy_date = ((regional_rotation or {}).get("tickers") or {}).get("SPY", {}).get("latest_date")
+    age = _days_stale(spy_date, today)
+
+    sig = [
+        {"name": "spy_vs_200d.above", "value": spy_sma.get("above"), "as_of": spy_sma.get("latest_date")},
+        {"name": "spy_close", "value": spy_sma.get("latest"), "as_of": spy_sma.get("latest_date")},
+        {"name": "spy_200d_sma", "value": spy_sma.get("sma"), "as_of": spy_sma.get("latest_date")},
+        {"name": "reference_weights.active_quadrant", "value": quad, "as_of": None},
+    ]
+    base = {"id": "price_vs_regime",
+            "description": "SPY price trend (vs 200-day) vs the deterministic regime call.",
+            "signals": sig}
+
+    # Indeterminate if the SMA could not be computed, the price is stale, or the quadrant
+    # is unknown/borderline (no single quadrant to disagree with).
+    if not spy_sma.get("available") or quad not in ("Q1", "Q2", "Q3", "Q4"):
+        return {**base, "direction_implied": "unresolved", "status": "indeterminate"}
+    if age is not None and age > stale_days:
+        return {**base, "direction_implied": "unresolved", "status": "indeterminate"}
+
+    above = spy_sma.get("above")
+    defensive = quad in ("Q3", "Q4")
+    risk_on = quad in ("Q1", "Q2")
+    if above and defensive:
+        return {**base,
+                "description": f"SPY above its 200-day while the regime call is defensive ({quad}).",
+                "direction_implied": "price_risk_on_vs_defensive_call", "status": "active"}
+    if (not above) and risk_on:
+        return {**base,
+                "description": f"SPY below its 200-day while the regime call is risk-on ({quad}).",
+                "direction_implied": "price_risk_off_vs_riskon_call", "status": "active"}
+    return {**base, "direction_implied": "aligned", "status": "indeterminate"}
+
+
+def _div_dollar_vs_intl(paper_account: dict, regional_rotation: dict, today: str,
+                        stale_days: int, cfg: dict) -> dict:
+    """The DXY switch disagreeing with the book's aggregate international weight."""
+    c = cfg["dollar_vs_intl_tilt"]
+    dxy_tag = (regional_rotation or {}).get("dxy_tailwind_for_intl")
+    dxy_chg = (regional_rotation or {}).get("dxy_60d_pct_change")
+    dxy_date = (regional_rotation or {}).get("dxy_latest_date")
+    age = _days_stale(dxy_date, today)
+
+    # Aggregate intl weight from holdings × the amplifier-intl roster.
+    equity = float((paper_account or {}).get("equity") or 0) or 0.0
+    intl_pct = None
+    if equity > 0 and (paper_account or {}).get("available"):
+        intl_set = set(AMPLIFIER_INTL)
+        intl_pct = round(sum(
+            float(p.get("market_value") or 0) for p in paper_account.get("positions", [])
+            if (p.get("ticker") or "").upper() in intl_set
+        ) / equity * 100.0, 2)
+
+    sig = [
+        {"name": "dxy_tailwind_for_intl", "value": dxy_tag, "as_of": dxy_date},
+        {"name": "dxy_60d_pct_change", "value": dxy_chg, "as_of": dxy_date},
+        {"name": "aggregate_intl_weight_pct", "value": intl_pct, "as_of": today},
+    ]
+    base = {"id": "dollar_vs_intl_tilt",
+            "description": "The dollar trend (DXY switch) vs the book's international weight.",
+            "signals": sig}
+
+    if dxy_tag is None or intl_pct is None:
+        return {**base, "direction_implied": "unresolved", "status": "indeterminate"}
+    if age is not None and age > stale_days:
+        return {**base, "direction_implied": "unresolved", "status": "indeterminate"}
+
+    heavy = float(c["intl_heavy_pct"])
+    light = float(c["intl_light_pct"])
+    # DXY headwind/neutral favors US growth; tailwind favors intl.
+    if dxy_tag in ("headwind", "neutral") and intl_pct >= heavy:
+        return {**base,
+                "description": (f"Dollar {dxy_tag} (favors US growth) but international weight is "
+                                f"heavy ({intl_pct}%)."),
+                "direction_implied": "toward_us_growth", "status": "active"}
+    if dxy_tag == "tailwind" and intl_pct <= light:
+        return {**base,
+                "description": (f"Dollar tailwind (favors international) but international weight is "
+                                f"light ({intl_pct}%)."),
+                "direction_implied": "toward_international", "status": "active"}
+    return {**base, "direction_implied": "aligned", "status": "indeterminate"}
 
 
 def _classify_flex_review(

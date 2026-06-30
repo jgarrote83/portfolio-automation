@@ -1,0 +1,28 @@
+{
+  "_comment": "Thresholds for the deterministic divergence detector (collector `_build_divergences`, responsiveness brief Phase 2). A divergence is a TENSION between two signals that should agree but don't — this layer only DETECTS and describes; it never resolves, ranks, or acts (that is the LLM's job in Phase 4). No magic numbers in code. All inputs are echoed from values already in the snapshot.",
+
+  "leading_vs_lagging_inflation": {
+    "breakeven_delta_20d_bp": 15.0,
+    "oil_20d_pct": 10.0,
+    "_note": "Leading-inflation move counts as a signal when the 5y breakeven 20d delta is >= this many bp in magnitude, OR WTI's 20d move is >= this pct in magnitude. Fires when the leading direction disagrees with the realized inflation-axis direction (e.g. breakevens + oil falling while realized core is flat/sticky)."
+  },
+
+  "credit_complacency": {
+    "hy_oas_complacency_level_pct": 3.5,
+    "hy_oas_pct_rank_max": 10.0,
+    "_note": "Fires when HY OAS sits in the complacency LEVEL band (latest < hy_oas_complacency_level_pct, matching the bond scorecard's own <3.5% 'complacency zone') AND nothing else is flagging stress (credit_stress.flag false AND shock_level <= 1) — a latent-fragility tension (little spread cushion, violent-repricing risk). NOTE: the trigger is the LEVEL, not the 90d percentile: complacency is level-vs-history, but a 90d percentile is purely relative and sits mid-range by construction when spreads are persistently tight (blind in exactly the calm-low-spread regime this must catch). hy_oas_pct_rank_max is retained as a documented/context threshold; pct_rank_90d is reported as a secondary signal only."
+  },
+
+  "price_vs_regime": {
+    "_note": "Fires when SPY's trend vs its 200-day SMA disagrees with the deterministic active_quadrant: price ABOVE the 200d while the quadrant is defensive (Q3/Q4), or BELOW the 200d while the quadrant is risk-on (Q1). No numeric threshold — it is a sign disagreement. Surfaces both the price stance and the regime; does NOT resolve which is right."
+  },
+
+  "dollar_vs_intl_tilt": {
+    "intl_heavy_pct": 20.0,
+    "intl_light_pct": 8.0,
+    "_note": "Fires when the dollar switch (regional_rotation.dxy_tailwind_for_intl) disagrees with the book's aggregate international weight (sum of the amplifier-intl names / equity): DXY headwind/neutral (favors US growth) while intl weight >= intl_heavy_pct, OR DXY tailwind (favors intl) while intl weight <= intl_light_pct. direction_implied = toward the dollar signal."
+  },
+
+  "staleness_days": 7,
+  "_staleness_note": "An input older than this many calendar days (by its as_of date) makes any divergence that depends on it `status: indeterminate` — never a false `active`, never silently suppressed (missing data = WATCH, never REJECT)."
+}

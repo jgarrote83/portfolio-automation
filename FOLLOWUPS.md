@@ -3,20 +3,34 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-06-30 (feat/reference-weights, NOT pushed; STOP-for-review after Phase 1).**
+**▶ START HERE — last session 2026-06-30. Responsiveness brief: Phase 1 MERGED (PR #1),
+Phase 2 on `feat/divergences` (PR, STOP-for-review).**
 Building the **Responsiveness brief** — the missing strategy-spec §10 "precomputed target
 weights the LLM executes toward" layer — to kill the *under-trading-rationalized-as-discipline*
 failure (2026-06-30 report held SPY 17.25% + QQQ 13.91% in a falling-growth Q3/Q4 regime,
 favored bucket at ~9% vs target, proposed zero trades, called it "discipline"). North-star
-**`docs/specs/growth_strategy_spec_v1.md`** now committed to the repo. Approach = a deterministic
+**`docs/specs/growth_strategy_spec_v1.md`** committed to the repo. Approach = deterministic
 **reference, not a mandate**: the LLM reasons against it and may deviate only via a falsifiable,
 magnitude-bounded, asymmetric, logged override (de-risk cheap / re-risk dear). Three-tier model
 (T1 hard floor / T2 reference+logged override / T3 pure judgment). Brief = 5 phases.
+- **Phase 2 ✅ (`feat/divergences`, PR open — STOP for review, NOT merged):** `collector._build_divergences`
+  → new **`divergences`** snapshot list. Deterministic detector of TENSIONS between signals that
+  should agree but don't — **describes only, never resolves/ranks/acts** (Phase 4 / the LLM adjudicates).
+  Four: `leading_vs_lagging_inflation` (breakevens + oil vs realized core), `credit_complacency`
+  (HY OAS ≤10th-pct-rank + no stress → `fragility`), `price_vs_regime` (SPY vs 200d SMA vs
+  `active_quadrant`), `dollar_vs_intl_tilt` (DXY switch vs aggregate amplifier-intl weight).
+  Stale/absent input → `status:"indeterminate"`, never a false `active`. Two new precomputed inputs:
+  SPY 200-day SMA (pure `_sma_from_rows` over fetched rows) + aggregate intl weight. Thresholds in
+  `config/divergence-config.json`. 23 tests; **full suite 146 green, ruff clean.** Verified vs today's
+  real snapshot: `leading_vs_lagging_inflation` fires ACTIVE ("falling" — breakevens −28bp + oil −21%
+  vs flat realized core); the other three correctly `indeterminate` (credit pct-rank 49 not ≤10th;
+  price-vs-regime needs a concrete quadrant, today borderline; dollar neutral + intl 10.6% aligned).
+  **Behavior-neutral until Phase 4.** Design in `memory/divergences-phase2-design.md`.
 - **Commit `8e22912` (ceiling drift closed):** active-quadrant ceiling **canonicalized to 90% of
   CORE** (account-holder decision 2026-06-30, was an 80% spec default / 90–95% prompt drift) across
   new `config/risk-limits.json` (single source of truth) + spec §3/§8 + the prompt conviction
   ladder. **Ceiling decision = CLOSED/locked (not pending).**
-- **Phase 1 ✅ (THE KEYSTONE — committed on the branch):** `collector._build_reference_weights`
+- **Phase 1 ✅ MERGED (PR #1, commit `8e22912`+`9da6f8d` on master):** `collector._build_reference_weights`
   + `_conviction_proxy` (deterministic 0–10 stand-in for the LLM's Risk Score, since that isn't
   available at collect time) + `shared/quadrants.py` block model (Amplifier/Damper + §3 per-quadrant
   concentrate lists, `EXEMPT_HOLDS` AMZN/GOOGL, `favored_bucket`/`intersection_names`, DXY US/intl
@@ -33,7 +47,7 @@ magnitude-bounded, asymmetric, logged override (de-risk cheap / re-risk dear). T
   parked: per-name intersection weighting (gold multiplier) — equal-weight is correct for now
   (GLD anchors via being in the intersection at ~6x any divergent name, not by out-weighting
   XLP/MCK).
-- **REMAINING (brief Phases 2–5, NOT built — resume here):** Phase 2 `divergences[]` precompute;
+- **REMAINING (brief Phases 3–5, NOT built — resume here):**
   Phase 3 `transition_watch` (leading-vs-realized inflation, pre-stages a partial tilt); Phase 4 the
   **override protocol** (prompt wiring so the LLM executes toward `reference_weights` / logs deviations
   + override-record schema asserted like FLEX_SCHEMA_V1 + trade-validation + storage); Phase 5
