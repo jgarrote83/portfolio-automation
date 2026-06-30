@@ -20,7 +20,16 @@ from shared.clients.fred import FREDClient
 from shared.clients.finnhub import FinnhubClient
 from shared.clients.quiver import QuiverClient
 from shared.clients.alpaca import AlpacaClient
-from shared.quadrants import active_quadrant, benchmark_etf_for
+from shared.quadrants import (
+    CORE_ROSTER,
+    EXEMPT_HOLDS,
+    active_quadrant,
+    benchmark_etf_for,
+    concentrate_names,
+    favored_bucket,
+    intersection_names,
+    is_amplifier,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +39,36 @@ _PORTFOLIO_FALLBACK = _SRC / "config" / "portfolio.json"
 _FLEX_CANDIDATES_FILE = _SRC / "config" / "flex-candidates.json"
 _FOMC_STANCE_FILE = _SRC / "config" / "fomc-stance.json"
 _FLEX_REVIEW_FILE = _SRC / "config" / "flex-review.json"
+_RISK_LIMITS_FILE = _SRC / "config" / "risk-limits.json"
+
+# Single stocks in the fixed core roster (idiosyncratic risk) — the single-name soft
+# cap applies to these, not to diversified ETF sleeves (which a high-conviction quadrant
+# is meant to concentrate past the cap). Everything else in CORE_ROSTER is an ETF.
+_CORE_SINGLE_STOCKS = ("AMZN", "GOOGL", "INTC", "MCK")
+# Literal-cash buffer kept inside the cash sleeve (rest of the sleeve is SGOV).
+_CASH_BUFFER_PCT = 1.5
+
+# Fallback risk limits if config/risk-limits.json is missing/invalid (keep in sync
+# with that file — it is the canonical source; this only guards a broken deploy).
+_RISK_LIMITS_DEFAULTS = {
+    "active_quadrant_ceiling_pct_of_core": 90.0,
+    "sleeve_floor_pct_of_core": 0.1,
+    "single_name_cap_pct": {"flex": 4.0, "any_name_soft": 15.0},
+    "cash_sleeve_band_pct": {"floor": 5.0, "ceiling": 15.0, "shock3_ceiling": 25.0},
+    "flex_sleeve_cap_pct": {"soft": 15.0, "hard": 25.0},
+    "exempt_holds": list(EXEMPT_HOLDS),
+    "conviction_ladder_pct_of_core": [
+        {"risk_score_max": 2, "conviction": "very_high", "active_quadrant_target": 90.0},
+        {"risk_score_max": 4, "conviction": "high", "active_quadrant_target": 78.0},
+        {"risk_score_max": 6, "conviction": "mixed", "active_quadrant_target": 50.0},
+        {"risk_score_max": 8, "conviction": "low", "active_quadrant_target": 30.0},
+        {"risk_score_max": 10, "conviction": "no_read", "active_quadrant_target": 15.0},
+    ],
+    "borderline_blend": {
+        "intersection_target_pct_of_core": 60.0,
+        "divergent_staged_pct_of_core": 20.0,
+    },
+}
 
 # Conviction-sleeve flex-review defaults (overridable via config/flex-review.json).
 _FLEX_REVIEW_DEFAULTS = {
@@ -829,6 +868,29 @@ def run() -> None:
         fomc_stance.get("stance"),
     )
 
+    # --- Reference weights (strategy-spec §10: precomputed target weights the ----
+    # analyzer executes toward, NOT a mandate). The missing layer that anchored the
+    # call→target→trades leap where the book rationalized inaction. Deterministic +
+    # echoed; non-fatal (a build failure must never block the snapshot).
+    reference_weights: dict = {"available": False}
+    try:
+        reference_weights = _build_reference_weights(
+            paper_account, growth_axis, inflation_axis, regime_gate,
+            regional_rotation, bond_signals, labor_signals, market_shock,
+            _load_risk_limits(),
+        )
+        logger.info(
+            "Reference weights: quad=%s conviction=%s(%s) active_target=%s%%core tilt=%s binding=%s",
+            reference_weights.get("active_quadrant"),
+            reference_weights.get("conviction_proxy"),
+            reference_weights.get("conviction_label"),
+            reference_weights.get("active_quadrant_target_pct_of_core"),
+            reference_weights.get("dollar_tilt"),
+            reference_weights.get("binding"),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Reference weights build failed (non-fatal)")
+
     # --- Flex engine state (intraday catalyst engine; echoed by the analyzer) -
     # The engine writes flex-state/{date}.json during the trading session. At
     # collector time (09:00 ET) today's run hasn't happened yet, so echo the most
@@ -916,6 +978,7 @@ def run() -> None:
         "inflation_axis": inflation_axis,
         "fomc_stance": fomc_stance,
         "regime_gate": regime_gate,
+        "reference_weights": reference_weights,
         "flex_state": flex_state,
         "performance": performance,
         "track_record": track_record,
@@ -2034,6 +2097,320 @@ def _build_regime_gate(growth_axis: dict, inflation_axis: dict, fomc_stance: dic
         "rule": (
             "OPEN only when growth rising AND inflation not rising AND policy not "
             "hawkish; else CLOSED. Cash-sleeve band is subordinate to this gate."
+        ),
+    }
+
+
+def _load_risk_limits() -> dict:
+    """Canonical risk limits from config/risk-limits.json (spec §3/§8).
+
+    Single source of truth for the reference-weight math: concentration ceiling
+    (90% of core), 0.1% sleeve floor, single-name caps, cash band, flex caps, the
+    exempt holds, the conviction ladder, and the borderline-blend params. Missing or
+    malformed → the in-module defaults (which mirror the file). Tolerant of the
+    ``_comment`` / ``_*_note`` annotation keys.
+    """
+    try:
+        with open(_RISK_LIMITS_FILE) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        logger.warning("risk-limits.json missing/invalid — using built-in defaults")
+        return dict(_RISK_LIMITS_DEFAULTS)
+    # Shallow-merge over defaults so a partial file still yields every key.
+    merged = dict(_RISK_LIMITS_DEFAULTS)
+    for k, v in data.items():
+        if not k.startswith("_"):
+            merged[k] = v
+    return merged
+
+
+def _conviction_proxy(
+    growth_axis: dict,
+    inflation_axis: dict,
+    regime_gate: dict,
+    bond_signals: dict,
+    labor_signals: dict,
+    market_shock: dict,
+) -> dict:
+    """Deterministic stand-in for the analyzer's Risk Score (0–10, higher = LESS
+    conviction), computed from signals the collector already has.
+
+    The conviction ladder (risk-limits.json) maps this to an active-quadrant target
+    share of core. The analyzer still produces its own Risk Score; if it differs
+    materially it may deviate from the reference via a logged override (brief Phase 4).
+    This keeps the reference fully deterministic and echoed (spec §5/§10) with no
+    chicken-and-egg on the LLM's number.
+
+    Scoring (additive penalties on a clean base of 1, clamped 0–10):
+      +2 gate CLOSED (regime not deployable) ; +1 growth indeterminate/flat ;
+      +1 growth confidence low ; +1 inflation indeterminate/flat ; +1 policy
+      unconfirmed ; +1 bond scorecard defensive (≤ -3) ; +1 labor scorecard
+      defensive (≤ -3) ; +2 shock level 3 / +1 shock level 2 ; +1 a primary axis
+      missing entirely. A clean risk-on regime (gate open, both axes pinned, policy
+      confirmed, no defensive/scorecard/shock flags) lands at 1 (very high conviction);
+      a contradicted/stale regime lands 6–9 (low / no read).
+    """
+    score = 1.0
+    drivers: list[str] = []
+
+    g = (growth_axis or {}).get("direction")
+    gc = (growth_axis or {}).get("confidence")
+    i = (inflation_axis or {}).get("direction")
+    stance = (regime_gate or {}).get("derived_from", {}).get("policy_stance")
+    gate = (regime_gate or {}).get("status")
+
+    if gate == "closed":
+        score += 2
+        drivers.append("gate closed (+2)")
+    if g not in ("rising", "falling"):
+        score += 1
+        drivers.append(f"growth {g or 'missing'} (+1)")
+    if g is None:
+        score += 1
+        drivers.append("growth axis missing (+1)")
+    if gc == "low":
+        score += 1
+        drivers.append("growth confidence low (+1)")
+    if i not in ("rising", "falling"):
+        score += 1
+        drivers.append(f"inflation {i or 'missing'} (+1)")
+    if stance == "unconfirmed":
+        score += 1
+        drivers.append("policy unconfirmed (+1)")
+
+    bond_c = ((bond_signals or {}).get("scorecard") or {}).get("composite")
+    if isinstance(bond_c, (int, float)) and bond_c <= -3:
+        score += 1
+        drivers.append(f"bonds defensive ({bond_c}) (+1)")
+    labor_c = ((labor_signals or {}).get("scorecard") or {}).get("composite")
+    if isinstance(labor_c, (int, float)) and labor_c <= -3:
+        score += 1
+        drivers.append(f"labor defensive ({labor_c}) (+1)")
+
+    shock = (market_shock or {}).get("shock_level")
+    if shock == 3:
+        score += 2
+        drivers.append("shock level 3 (+2)")
+    elif shock == 2:
+        score += 1
+        drivers.append("shock level 2 (+1)")
+
+    score = max(0.0, min(10.0, score))
+    return {"score": round(score, 1), "drivers": drivers}
+
+
+def _ladder_target_pct(ladder: list[dict], proxy_score: float) -> tuple[float, str]:
+    """Map a 0–10 conviction proxy to (active-quadrant target % of core, label) via
+    the config ladder. Picks the first rung whose ``risk_score_max`` ≥ the score."""
+    for rung in ladder:
+        if proxy_score <= rung.get("risk_score_max", 10):
+            return float(rung.get("active_quadrant_target", 50.0)), rung.get("conviction", "")
+    last = ladder[-1] if ladder else {"active_quadrant_target": 50.0, "conviction": ""}
+    return float(last.get("active_quadrant_target", 50.0)), last.get("conviction", "")
+
+
+def _build_reference_weights(
+    paper_account: dict,
+    growth_axis: dict,
+    inflation_axis: dict,
+    regime_gate: dict,
+    regional_rotation: dict,
+    bond_signals: dict,
+    labor_signals: dict,
+    market_shock: dict,
+    cfg: dict,
+) -> dict:
+    """Deterministic per-ticker REFERENCE allocation the analyzer executes toward.
+
+    This is the missing strategy-spec §10 layer ("precomputed target weights"). It is
+    a *reference, not a mandate*: the analyzer reasons against it and may deviate only
+    via a falsifiable, magnitude-bounded, logged override (brief Phase 4). Computing it
+    deterministically removes the unanchored call→target→trades leap where the book
+    rationalized silent inaction.
+
+    Pipeline (spec §2/§3/§4/§8):
+      1. Conviction proxy → active-quadrant target % of CORE via the ladder.
+      2. Active quadrant from the two axes; borderline (flat/unknown axis) → the
+         intersection blend (concentrate the cross-regime names, stage the divergent).
+      3. Distribute the active-quadrant target across its §3 concentrate names; split
+         the amplifier US-vs-intl by the DXY switch (§4). Non-active core names go to
+         the 0.1% floor.
+      4. Apply Tier-1 constraints: cash sleeve carved out (5–15%, shock-3 → 25%); core
+         scaled into the remaining room under the 90%-of-core ceiling; AMZN/GOOGL never
+         below current weight; single-name soft cap. Renormalize to ~100%.
+
+    Targets are % of EQUITY. Echo-not-re-derive. Non-fatal in the caller. Returns
+    ``available: False`` if the paper account is unavailable.
+    """
+    if not (paper_account or {}).get("available"):
+        return {"available": False, "reason": "paper_account unavailable"}
+    equity = float(paper_account.get("equity") or 0) or 0.0
+    if equity <= 0:
+        return {"available": False, "reason": "no equity"}
+
+    positions = paper_account.get("positions") or []
+    cur_w = {
+        (p.get("ticker") or "").upper(): float(p.get("market_value") or 0) / equity * 100.0
+        for p in positions if p.get("ticker")
+    }
+
+    floor = float(cfg["sleeve_floor_pct_of_core"])
+    ceiling_core = float(cfg["active_quadrant_ceiling_pct_of_core"])
+    cash_band = cfg["cash_sleeve_band_pct"]
+    soft_cap = float(cfg["single_name_cap_pct"]["any_name_soft"])
+    exempt = set(cfg.get("exempt_holds", EXEMPT_HOLDS))
+
+    # --- 1. conviction proxy → active-quadrant target (% of core) ---------------
+    proxy = _conviction_proxy(
+        growth_axis, inflation_axis, regime_gate, bond_signals, labor_signals, market_shock
+    )
+    active_target_core, conviction_label = _ladder_target_pct(
+        cfg["conviction_ladder_pct_of_core"], proxy["score"]
+    )
+    active_target_core = min(active_target_core, ceiling_core)  # never exceed ceiling
+
+    # --- 2. active quadrant / borderline bucket ---------------------------------
+    g = (growth_axis or {}).get("direction")
+    i = (inflation_axis or {}).get("direction")
+    quad = active_quadrant(g, i)
+    bucket = favored_bucket(g, i)
+    borderline = quad == ""
+
+    # --- 3. DXY switch (§4): amplifier US vs international -----------------------
+    dxy_tag = (regional_rotation or {}).get("dxy_tailwind_for_intl")  # tailwind/neutral/headwind
+    intl_lean = dxy_tag == "tailwind"   # falling dollar favors international
+
+    # Names to concentrate into + their raw shares of the active-quadrant target.
+    if borderline:
+        # Intersection blend: cross-regime names take the lion's share; the divergent
+        # (single-bucket) names are staged at partial size. Never a freeze.
+        inter = intersection_names(bucket)
+        union = []
+        for q in bucket:
+            for t in concentrate_names(q):
+                if t not in union:
+                    union.append(t)
+        divergent = [t for t in union if t not in inter]
+        blend = cfg["borderline_blend"]
+        inter_share = float(blend["intersection_target_pct_of_core"])
+        div_share = float(blend["divergent_staged_pct_of_core"])
+        raw_core: dict[str, float] = {}
+        if inter:
+            per = inter_share / len(inter)
+            for t in inter:
+                raw_core[t] = raw_core.get(t, 0.0) + per
+        if divergent:
+            per = div_share / len(divergent)
+            for t in divergent:
+                raw_core[t] = raw_core.get(t, 0.0) + per
+        concentrate = list(raw_core.keys())
+    else:
+        concentrate = list(concentrate_names(quad))
+        raw_core = {}
+        if concentrate:
+            # Split the active-quadrant target. If the quadrant has an amplifier
+            # (Q1/Q2), bias the US-vs-intl halves by the dollar switch; otherwise
+            # equal-weight the concentrate names.
+            amp = [t for t in concentrate if is_amplifier(t)]
+            non_amp = [t for t in concentrate if not is_amplifier(t)]
+            if amp and (quad in ("Q1", "Q2")):
+                us = [t for t in amp if t in ("SPY", "QQQ", "XSD", "AMZN", "GOOGL", "INTC")]
+                intl = [t for t in amp if t not in us]
+                # 65/35 lean toward the favored leg; 50/50 if a leg is empty.
+                us_share, intl_share = (0.35, 0.65) if intl_lean else (0.65, 0.35)
+                if not intl:
+                    us_share, intl_share = 1.0, 0.0
+                if not us:
+                    us_share, intl_share = 0.0, 1.0
+                amp_target = active_target_core * (len(amp) / len(concentrate))
+                for t in us:
+                    raw_core[t] = raw_core.get(t, 0.0) + amp_target * us_share / max(1, len(us))
+                for t in intl:
+                    raw_core[t] = raw_core.get(t, 0.0) + amp_target * intl_share / max(1, len(intl))
+                rest = active_target_core - amp_target
+                for t in non_amp:
+                    raw_core[t] = raw_core.get(t, 0.0) + rest / max(1, len(non_amp))
+            else:
+                per = active_target_core / len(concentrate)
+                for t in concentrate:
+                    raw_core[t] = raw_core.get(t, 0.0) + per
+
+    # --- 4. assemble core targets: floor everything, then the concentrate names --
+    core_target: dict[str, float] = {t: floor for t in CORE_ROSTER}
+    for t, w in raw_core.items():
+        if t in core_target:
+            core_target[t] = max(floor, w)
+
+    # Soft single-name cap applies only to SINGLE STOCKS (idiosyncratic risk), NOT to
+    # diversified ETF sleeves — a high-conviction quadrant is *meant* to push one ETF
+    # past 15% (capping it here would defeat the concentration this feature enables).
+    # Single stocks in the core roster: AMZN, GOOGL, INTC, MCK.
+    for t in _CORE_SINGLE_STOCKS:
+        if t in core_target:
+            core_target[t] = min(core_target[t], soft_cap)
+
+    # AMZN/GOOGL never forced below current weight (% of equity ≈ % here pre-carve).
+    for t in exempt:
+        if t in core_target and t in cur_w:
+            core_target[t] = max(core_target[t], cur_w[t])
+
+    # --- 5. carve the cash sleeve, then scale core into the remaining room -------
+    shock = (market_shock or {}).get("shock_level")
+    cash_ceiling = float(cash_band["shock3_ceiling"]) if shock == 3 else float(cash_band["ceiling"])
+    cash_floor = float(cash_band["floor"])
+    cur_cash_pct = float(paper_account.get("cash") or 0) / equity * 100.0
+    cur_sgov_pct = cur_w.get("SGOV", 0.0)
+    cur_sleeve = cur_cash_pct + cur_sgov_pct
+    # Reference cash sleeve: stay in band; if currently above the ceiling hold at the
+    # ceiling (deploy the surplus into core), if below the floor lift to the floor.
+    cash_sleeve_target = max(cash_floor, min(cash_ceiling, cur_sleeve))
+
+    # Scale the core into the room left after the cash sleeve. SGOV is part of the cash
+    # sleeve, not the core concentration — exclude its floor slot from the core scale
+    # and set it from the sleeve target so the book sums to ~100%.
+    core_ex_sgov = {t: w for t, w in core_target.items() if t != "SGOV"}
+    core_room = max(0.0, 100.0 - cash_sleeve_target)
+    scale = core_room / (sum(core_ex_sgov.values()) or 1.0)
+    weights = {t: round(w * scale, 3) for t, w in core_ex_sgov.items()}
+    # Cash sleeve = SGOV (yield-bearing) holding all but a ~1.5% literal-cash buffer.
+    sgov_w = max(0.0, cash_sleeve_target - _CASH_BUFFER_PCT)
+    weights["SGOV"] = round(sgov_w, 3)
+    weights["__cash__"] = round(cash_sleeve_target - sgov_w, 3)
+
+    # --- which constraints bound (surface, like flex `binding`) -----------------
+    binding: list[str] = []
+    if active_target_core >= ceiling_core:
+        binding.append("active_quadrant_ceiling")
+    if cur_sleeve > cash_ceiling:
+        binding.append("cash_above_band")
+    elif cur_sleeve < cash_floor:
+        binding.append("cash_below_band")
+    if any(t in exempt and core_target[t] <= cur_w.get(t, 0.0) for t in exempt):
+        binding.append("exempt_hold_floor")
+
+    return {
+        "available": True,
+        "as_of": (paper_account.get("as_of") or growth_axis.get("as_of")),
+        "active_quadrant": quad or None,
+        "favored_bucket": bucket,
+        "borderline": borderline,
+        "conviction_proxy": proxy["score"],
+        "conviction_label": conviction_label,
+        "conviction_drivers": proxy["drivers"],
+        "active_quadrant_target_pct_of_core": round(active_target_core, 1),
+        "ceiling_pct_of_core": ceiling_core,
+        "dollar_tilt": "international" if intl_lean else "us_growth",
+        "dxy_tag": dxy_tag,
+        "cash_sleeve_target_pct": round(cash_sleeve_target, 2),
+        "literal_cash_target_pct": weights.pop("__cash__", 0.0),
+        "target_weights_pct": {t: w for t, w in sorted(weights.items()) if w >= 0.05},
+        "binding": binding,
+        "rule": (
+            "Reference allocation the analyzer executes toward — NOT a mandate. Deviate "
+            "only via a falsifiable, magnitude-bounded, logged override (de-risk cheap / "
+            "re-risk dear). Deterministic + echoed; never re-derive. Active quadrant "
+            "capped at the ceiling; every core sleeve floored; AMZN/GOOGL never forced "
+            "down; cash sleeve held to its band; flex is a separate sleeve."
         ),
     }
 
