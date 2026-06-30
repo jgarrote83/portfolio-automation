@@ -1,0 +1,46 @@
+{
+  "_comment": "Canonical risk limits for the Growth book — the single source of truth for the deterministic reference-weight math (collector `_build_reference_weights`), the prompt's hard guardrails, and the trade-validation layer. Mirrors growth_strategy_spec_v1.md §3/§8. Keep spec, prompt, and this file in agreement. All percentages are of EQUITY unless the key says `_of_core`.",
+
+  "active_quadrant_ceiling_pct_of_core": 90.0,
+  "_active_quadrant_ceiling_note": "Confirmed by account holder 2026-06-30: 90% of CORE (not the spec's 80% default). The living-hedge rule — the active quadrant takes at most this share of the core block; the remaining ~10% stays spread across the other quadrants at/near the sleeve floor so a wrong call always leaves a residual hedge (spec §0.2, §3, §8). Flex and cash are SEPARATE sleeves outside the core block (see ceiling base decision).",
+
+  "sleeve_floor_pct_of_core": 0.1,
+  "_sleeve_floor_note": "0.1% / >=1-share floor on every core sleeve — the primary risk control (spec §0.2). Never zero. The 1-share minimum is the binding floor for higher-priced names (Phase 1 is integer-shares-only).",
+
+  "single_name_cap_pct": {
+    "flex": 4.0,
+    "any_name_soft": 15.0
+  },
+  "_single_name_cap_note": "Flex single-name cap 3-4% (spec §8); ~15% soft cap on any one name. Core ETF sleeves are governed by the quadrant targets + ceiling, not a single-name cap.",
+
+  "cash_sleeve_band_pct": {
+    "floor": 5.0,
+    "ceiling": 15.0,
+    "shock3_ceiling": 25.0
+  },
+  "_cash_sleeve_note": "Cash sleeve = literal cash + SGOV, held to 5-15% of equity; shock_level 3 may lift the ceiling toward 25% temporarily (spec §7, prompt Cash sleeve). This is a SEPARATE sleeve outside the core block.",
+
+  "flex_sleeve_cap_pct": {
+    "soft": 15.0,
+    "hard": 25.0
+  },
+  "_flex_sleeve_note": "Flex aggregate <= ~15% until it clears its hurdle in paper, hard cap <= 25% (spec §7). Enforced by the flex engine; a SEPARATE sleeve outside the core block.",
+
+  "exempt_holds": ["AMZN", "GOOGL"],
+  "_exempt_holds_note": "Permanent conviction holds — never trimmed below current weight / never forced down by the reference-weight math (balance-sheet quality + recurring cash flow give them a partial defensive role across the cycle).",
+
+  "conviction_ladder_pct_of_core": [
+    {"risk_score_max": 2, "conviction": "very_high", "active_quadrant_target": 90.0},
+    {"risk_score_max": 4, "conviction": "high",      "active_quadrant_target": 78.0},
+    {"risk_score_max": 6, "conviction": "mixed",     "active_quadrant_target": 50.0},
+    {"risk_score_max": 8, "conviction": "low",       "active_quadrant_target": 30.0},
+    {"risk_score_max": 10, "conviction": "no_read",  "active_quadrant_target": 15.0}
+  ],
+  "_conviction_ladder_note": "Risk Score -> active-quadrant target as a share of CORE (the midpoint/representative of each prompt band, made into a number so the LLM executes toward it rather than interpreting a prose range). Top rung is capped at the 90% ceiling. Monotonic: lower risk score (higher conviction) concentrates harder. At 9-10 (no read) the book is capital-preservation: minimal quadrant bet, lean to ballast.",
+
+  "borderline_blend": {
+    "intersection_target_pct_of_core": 60.0,
+    "divergent_staged_pct_of_core": 20.0
+  },
+  "_borderline_blend_note": "When an axis is flat/indeterminate or active_quadrant is unknown (or a transition_watch is active), concentrate into the INTERSECTION of the candidate quadrants (assets that work in both) at the intersection target, and hold the DIVERGENT bets at staged/partial size. Borderline must produce a specific posture, never a freeze (spec §3 living-hedge + brief Phase 1)."
+}

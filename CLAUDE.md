@@ -55,8 +55,9 @@ portfolio-automation/
 ├── config/
 │   ├── project-instructions.md    # Claude system prompt for analysis
 │   ├── macro-series.json          # FRED series IDs
-│   ├── news-keywords.json         # News filtering keywords
-│   └── etf-watchlist.json         # IDVO, IDMO, AIA
+│   ├── risk-limits.json           # canonical risk limits (90%-of-core ceiling, floors, caps, bands) — source of truth for reference_weights
+│   ├── fomc-stance.json           # manually-maintained FOMC policy stance
+│   └── flex-candidates.json       # seed non-held flex watchlist
 ├── docs/
 │   ├── specs/                # Architecture spec + companion docs
 │   └── runbooks/             # Operational runbooks
@@ -105,7 +106,9 @@ If Alpaca is unreachable the collector falls back to `src/config/portfolio.json`
 - **TradeHistory**: PK=year-month, RK=trade_id — full lifecycle from recommendation to 30/60/90d outcome. Phase C adds (write-once at recommendation, flex trades) the §7 reasoning enums `primary_trigger`/`thesis_type`/`trigger_evidence`/`catalyst_date`, and (stamped later by the collector at maturity) `price_at_rec`/`spy_at_rec`/`ret_Nd_pct`/`spy_ret_Nd_pct`/`excess_Nd_pp`/`call_correct_Nd`/`outcome_status`. Keys are **lowercase** across analyzer + executor + collector writes — Azure Tables is case-sensitive and upserts MERGE onto one entity (Phase C §9 casing fix).
 
 ## Snapshot analytics blocks (collector pre-computes; analyzer consumes)
-Beyond raw API data, the collector injects pre-computed analysis blocks into each `daily-snapshots/{date}.json` so the analyzer reads conclusions, not raw series: `regional_rotation`, `bond_signals`, `labor_signals`, `market_shock`, and (Phase C) `performance` (account equity vs fully-invested SPY since inception + rolling 30/60/90d + `cash_pct`) and `track_record` (hit-rate by layer/trigger/thesis at the 60d headline + confidence calibration, aggregated from stamped TradeHistory rows). Phase C 7a also maintains a compact `performance/equity-series.json` blob (collector-owned cache: backfilled once from snapshots, then append-only). Planned (Open #10, specced not built): a `flex-stops/state.json` cache + `flex_stops` snapshot block for the volatility-scaled trailing stop.
+Beyond raw API data, the collector injects pre-computed analysis blocks into each `daily-snapshots/{date}.json` so the analyzer reads conclusions, not raw series: `regional_rotation`, `bond_signals`, `labor_signals`, `market_shock`, `growth_axis`/`inflation_axis`/`regime_gate` (the deterministic quadrant axes + deployment gate, echoed not re-derived), and (Phase C) `performance` (account equity vs fully-invested SPY since inception + rolling 30/60/90d + `cash_pct`) and `track_record` (hit-rate by layer/trigger/thesis at the 60d headline + confidence calibration, aggregated from stamped TradeHistory rows). Phase C 7a also maintains a compact `performance/equity-series.json` blob (collector-owned cache: backfilled once from snapshots, then append-only).
+
+**`reference_weights`** (strategy-spec §10 — "precomputed target weights the LLM executes toward") is the deterministic per-ticker REFERENCE allocation the analyzer reasons *against* — the layer that anchors the call→target→trades leap where the book previously rationalized silent inaction. Built by `collector._build_reference_weights` from the active quadrant × a deterministic **conviction proxy** (0–10, stands in for the analyzer's Risk Score, which isn't available at collect time) × the **DXY dollar switch** (US-vs-intl amplifier tilt), constrained by `config/risk-limits.json` (90%-of-core ceiling, 0.1% sleeve floor, single-name caps, cash band 5–15%/shock-3 25%, AMZN/GOOGL exempt holds). Emits `target_weights_pct` (per-ticker % of equity), the conviction proxy + drivers, `active_quadrant`/`favored_bucket`/`borderline`, `dollar_tilt`, and `binding` constraints. It is a **reference, not a mandate** — the analyzer may deviate only via a falsifiable, magnitude-bounded, logged override (planned brief Phase 4). The `shared/quadrants.py` block model (Amplifier/Damper + §3 per-quadrant concentrate lists) is the single source of truth shared by collector and prompt. *(Supersedes the never-built `flex_stops` trailing-stop plan and the interim `concentration_gap` precursor.)*
 
 ## International holdings requiring special treatment
 IDVO (international dividend + covered call overlay), IDMO (international momentum), AIA (Asia 50). Need: ETF look-through from FMP, international macro from FRED (EUR/USD, USD/JPY, USD/CNY, ECB rate, China PMI, Japan 10Y).
@@ -133,6 +136,7 @@ IDVO (international dividend + covered call overlay), IDMO (international moment
 
 ## Spec documents (in docs/specs/)
 Full details in these companion documents — read them for implementation specifics:
+- **`growth_strategy_spec_v1.md` — the north-star strategy spec (regime-concentration machine; the source of truth all automation is downstream of). Read this first.**
 - Architecture Spec v1.0 — system design, security, deployment
 - Data Sources Reference v1.2 — all API endpoints, schemas, budget
 - Storage Architecture v1.0 — blob containers, table schemas, retention

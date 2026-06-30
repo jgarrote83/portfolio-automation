@@ -45,3 +45,6 @@ desktop.ini
 deploy.zip
 src/.python_packages/
 _snap.json
+
+# Claude Code private working memory (not part of the repo)
+memory/

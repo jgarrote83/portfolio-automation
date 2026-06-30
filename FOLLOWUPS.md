@@ -3,7 +3,47 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-06-29 (ops-only, no code change).** The `/today`
+**▶ START HERE — last session 2026-06-30 (feat/reference-weights, NOT pushed; STOP-for-review after Phase 1).**
+Building the **Responsiveness brief** — the missing strategy-spec §10 "precomputed target
+weights the LLM executes toward" layer — to kill the *under-trading-rationalized-as-discipline*
+failure (2026-06-30 report held SPY 17.25% + QQQ 13.91% in a falling-growth Q3/Q4 regime,
+favored bucket at ~9% vs target, proposed zero trades, called it "discipline"). North-star
+**`docs/specs/growth_strategy_spec_v1.md`** now committed to the repo. Approach = a deterministic
+**reference, not a mandate**: the LLM reasons against it and may deviate only via a falsifiable,
+magnitude-bounded, asymmetric, logged override (de-risk cheap / re-risk dear). Three-tier model
+(T1 hard floor / T2 reference+logged override / T3 pure judgment). Brief = 5 phases.
+- **Commit `8e22912` (ceiling drift closed):** active-quadrant ceiling **canonicalized to 90% of
+  CORE** (account-holder decision 2026-06-30, was an 80% spec default / 90–95% prompt drift) across
+  new `config/risk-limits.json` (single source of truth) + spec §3/§8 + the prompt conviction
+  ladder. **Ceiling decision = CLOSED/locked (not pending).**
+- **Phase 1 ✅ (THE KEYSTONE — committed on the branch):** `collector._build_reference_weights`
+  + `_conviction_proxy` (deterministic 0–10 stand-in for the LLM's Risk Score, since that isn't
+  available at collect time) + `shared/quadrants.py` block model (Amplifier/Damper + §3 per-quadrant
+  concentrate lists, `EXEMPT_HOLDS` AMZN/GOOGL, `favored_bucket`/`intersection_names`, DXY US/intl
+  split) → new **`reference_weights`** snapshot block. Tier-1 constraints (90%-of-core ceiling, 0.1%
+  floor, single-name cap on stocks only, cash band 5–15%/shock-3 25%, exempt holds never forced
+  down), borderline intersection blend (never a freeze). 18 unit tests; **full suite 123 green, ruff
+  clean.** Verified vs today's real snapshot: it trims SPY/QQQ 17%/14% → floor, concentrates
+  GLD/XLP/MCK, conviction proxy 7.0 "low", cash sleeve held at band, sums to ~100%.
+- **Backlog (Phase 1 deliberate deferral, not an oversight):** the borderline blend is a
+  fixed 60/20 (intersection/divergent) split that does NOT flex with conviction. It errs safe
+  (slightly more concentrated into the 3 best cross-regime defensives in a defensive regime).
+  Optionally **widen the divergent-ballast share at low conviction** — revisit only after a few
+  real reports / once the override + track-record loop shows whether it needs tuning. Also
+  parked: per-name intersection weighting (gold multiplier) — equal-weight is correct for now
+  (GLD anchors via being in the intersection at ~6x any divergent name, not by out-weighting
+  XLP/MCK).
+- **REMAINING (brief Phases 2–5, NOT built — resume here):** Phase 2 `divergences[]` precompute;
+  Phase 3 `transition_watch` (leading-vs-realized inflation, pre-stages a partial tilt); Phase 4 the
+  **override protocol** (prompt wiring so the LLM executes toward `reference_weights` / logs deviations
+  + override-record schema asserted like FLEX_SCHEMA_V1 + trade-validation + storage); Phase 5
+  override-outcome stamping into the track record. **The prompt does NOT yet consume `reference_weights`
+  — Phase 4 is what makes the LLM act on it.** Design + decisions in `memory/reference-weights-phase1-design.md`.
+- **Interim `concentration_gap` work** (earlier same day) is **stashed** (`git stash` "concentration_gap WIP")
+  and **superseded** by `reference_weights` — its reusable bits (EXEMPT_HOLDS, favored_bucket) were
+  folded in; drop the stash once Phase 4 lands.
+
+**▶ Prior session 2026-06-29 (ops-only, no code change).** The `/today`
 page broke with `Error loading report: /api/dates → 500`. Root cause = the **3rd
 recurrence of Open #2**: the 2026-06-28 infra deploy re-applied `staticwebapp.bicep`
 (declares only 3 non-secret settings) and wiped the SWA's `STORAGE_CONNECTION_STRING`
