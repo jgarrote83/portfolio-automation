@@ -3,8 +3,29 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-07-01. Responsiveness brief: Phases 1 & 2 MERGED
-(PR #1, #2), Phase 3 on `feat/transition-watch` (PR, STOP-for-review).**
+**▶ START HERE — last session 2026-07-01. Responsiveness brief: Phases 1–3 MERGED
+(PR #1/#2/#3), Phase 4 on `feat/override-protocol` (PR — STOP-for-review, DO NOT MERGE
+until the checkpoint report is reviewed).**
+- **Phase 4 ✅ (`feat/override-protocol`, PR open — the PAYOFF phase, FIRST that changes report
+  behavior; NOT merged):** the analyzer prompt now **consumes `reference_weights`/`divergences`/
+  `transition_watch`** and executes toward the reference. §2 gains a Reference column + a
+  Current-vs-Reference gap; **Recommended = Reference ± logged overrides**; **inaction is now
+  accountable** (a "hold" of a sleeve >`gap_band_pp` off reference requires an override record,
+  and if it leaves defense < reference it must clear the higher re-risk bar). New **`overrides[]`**
+  JSON contract (OVERRIDE_SCHEMA_V1), gated on prompt load by `assert_override_prompt_schema`
+  (mirrors the flex gate). Pure `shared/overrides.py::validate_overrides` enforces Tier-2:
+  structural gates reject (missing falsifier/date, empty/dirty evidence, over-band magnitude,
+  bad direction); the **de-risk/re-risk asymmetry** (spec §6) accepts de-risk on 1 clean item,
+  **downsizes** (halves) an under-evidenced re-risk, **rejects** a no-evidence re-risk. Decisions
+  persist write-once to the new **`OverrideHistory`** table (Phase-5 outcome hooks null). Config
+  `risk-limits.json`→`override_protocol` (max_magnitude_pp 15 / re_risk_min_evidence 2 /
+  gap_band_pp 5). 21 new tests; **full suite 182 green, ruff clean.** Auto-execute stays
+  OFF-gated, human approval unchanged, executor untouched, deterministic layer echoed not
+  re-derived. **CHECKPOINT PENDING:** cannot run the model locally (no Foundry creds on the box),
+  so the checkpoint = deploy the branch to func-pfauto + trigger the analyzer on today's snapshot
+  (real Foundry call) + fetch the report to show the real §2 — verifying the 2026-06-30 pathology
+  (correct call, zero trades, "appropriately positioned") is FIXED. Design in
+  `memory/override-protocol-phase4-design.md`.
 Building the **Responsiveness brief** — the missing strategy-spec §10 "precomputed target
 weights the LLM executes toward" layer — to kill the *under-trading-rationalized-as-discipline*
 failure (2026-06-30 report held SPY 17.25% + QQQ 13.91% in a falling-growth Q3/Q4 regime,
@@ -13,7 +34,7 @@ favored bucket at ~9% vs target, proposed zero trades, called it "discipline"). 
 **reference, not a mandate**: the LLM reasons against it and may deviate only via a falsifiable,
 magnitude-bounded, asymmetric, logged override (de-risk cheap / re-risk dear). Three-tier model
 (T1 hard floor / T2 reference+logged override / T3 pure judgment). Brief = 5 phases.
-- **Phase 3 ✅ (`feat/transition-watch`, PR open — STOP for review, NOT merged):**
+- **Phase 3 ✅ MERGED (PR #3, commit `acda3e4` on master):**
   `collector._build_transition_watch` → new **`transition_watch`** snapshot block, and
   `_build_reference_weights` now **consumes** it. Realized inflation is laggy → this lets the
   LEADING signal pre-stage a bounded partial lean toward the projected quadrant WITHOUT moving
@@ -65,12 +86,13 @@ magnitude-bounded, asymmetric, logged override (de-risk cheap / re-risk dear). T
   parked: per-name intersection weighting (gold multiplier) — equal-weight is correct for now
   (GLD anchors via being in the intersection at ~6x any divergent name, not by out-weighting
   XLP/MCK).
-- **REMAINING (brief Phases 4–5, NOT built — resume here):** Phase 4 the
-  **override protocol** (prompt wiring so the LLM executes toward `reference_weights` / logs deviations
-  + override-record schema asserted like FLEX_SCHEMA_V1 + trade-validation + storage); Phase 5
-  override-outcome stamping into the track record. **The prompt does NOT yet consume `reference_weights`
-  / `divergences` / `transition_watch` — Phase 4 is what makes the LLM act on them (first
-  behavior-changing phase).** Design + decisions in `memory/*-design.md`.
+- **REMAINING (brief Phase 5 only — after Phase 4 merges):** Phase 5 = override-outcome
+  stamping into the track record — when an `OverrideHistory` row's `falsifier_date` matures,
+  stamp whether the override was right/wrong (mirror the Phase-C trade outcome-stamping in the
+  collector) and surface aggregate override calibration back into the snapshot as an input, so
+  the LLM calibrates against its own override record. `OverrideHistory` already carries the
+  write-once records + null hooks (`outcome_status`/`resolved_correct`) for this. Design +
+  decisions in `memory/*-design.md`.
 - **Interim `concentration_gap` work** (earlier same day) is **stashed** (`git stash` "concentration_gap WIP")
   and **superseded** by `reference_weights` — its reusable bits (EXEMPT_HOLDS, favored_bucket) were
   folded in; drop the stash once Phase 4 lands.
