@@ -44,6 +44,13 @@
   },
   "_borderline_blend_note": "When an axis is flat/indeterminate or active_quadrant is unknown (or a transition_watch is active), concentrate into the INTERSECTION of the candidate quadrants (assets that work in both) at the intersection target, and hold the DIVERGENT bets at staged/partial size. Borderline must produce a specific posture, never a freeze (spec §3 living-hedge + brief Phase 1).",
 
+  "override_protocol": {
+    "max_magnitude_pp": 15.0,
+    "re_risk_min_evidence": 2,
+    "gap_band_pp": 5.0
+  },
+  "_override_protocol_note": "Phase 4 (Tier-2). The analyzer executes toward reference_weights and may deviate only via a structured, falsifiable override record. max_magnitude_pp = the hard Tier-2 band: no single override may move a sleeve more than this off the reference. gap_band_pp = how far a sleeve's Current may sit off Reference before the analyzer MUST either trade toward it or file an override — a 'hold' beyond this band is itself an override toward inaction and must carry a record. ASYMMETRY (spec §6): a de-risk override (toward more defense) passes with >=1 clean evidence item at full size; a re-risk override (toward more risk / less defense) needs >= re_risk_min_evidence items, else it is DOWNSIZED (magnitude halved), and with no evidence it is rejected. Structural gates (falsifier + falsifier_date + clean_data_only + within band + valid direction) apply to both. An override never loosens the deployment gate.",
+
   "transition_watch": {
     "staged_fraction_de_risk": 0.30,
     "staged_fraction_re_risk": 0.15,

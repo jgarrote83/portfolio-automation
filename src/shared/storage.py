@@ -14,6 +14,7 @@ _TABLES = [
     "ETFLookthroughHistory",
     "SentimentHistory",
     "TradeHistory",
+    "OverrideHistory",
 ]
 
 

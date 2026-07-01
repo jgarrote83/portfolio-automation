@@ -24,19 +24,36 @@ from shared.storage import (
     write_trades,
 )
 from shared.clients.foundry import FoundryClient
+from shared.overrides import OVERRIDE_DEFAULTS, validate_overrides
 from shared.quadrants import active_quadrant, benchmark_etf_for
 
 logger = logging.getLogger(__name__)
 
 _SRC = Path(__file__).parent.parent
 _SYSTEM_PROMPT_FILE = _SRC / "config" / "project-instructions.md"
+_RISK_LIMITS_FILE = _SRC / "config" / "risk-limits.json"
 _TRADES_MARKER = "===TRADES_JSON==="
+
+
+def _load_override_cfg() -> dict:
+    """The override_protocol config from risk-limits.json (fallback to module defaults)."""
+    try:
+        data = json.loads(_RISK_LIMITS_FILE.read_text(encoding="utf-8"))
+        block = data.get("override_protocol")
+        return {**OVERRIDE_DEFAULTS, **block} if isinstance(block, dict) else dict(OVERRIDE_DEFAULTS)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return dict(OVERRIDE_DEFAULTS)
 
 # Prompt↔code schema gate for the Flex catalyst engine. The engine consumes
 # `flex_nominations` from the analyzer's output; if a stale/reverted prompt no
 # longer emits them (or the sentinel), the two engines silently desync. Fail
 # loud at load rather than ship old-style flex trades.
 _FLEX_SCHEMA_SENTINELS = ("FLEX_SCHEMA_V1", "flex_nominations")
+
+# Prompt↔code gate for the Phase-4 override protocol: the live prompt must instruct the
+# model to consume `reference_weights` and emit the override-record schema, or the analyzer
+# is executing against a stale prompt that ignores the reference (the 2026-06-30 pathology).
+_OVERRIDE_SCHEMA_SENTINELS = ("OVERRIDE_SCHEMA_V1", "reference_weights", "overrides")
 
 
 def assert_flex_prompt_schema(prompt: str) -> None:
@@ -46,6 +63,16 @@ def assert_flex_prompt_schema(prompt: str) -> None:
         raise RuntimeError(
             f"project-instructions.md is missing flex schema markers {missing} — "
             "prompt/code desync (a reverted prompt?). Refusing to run."
+        )
+
+
+def assert_override_prompt_schema(prompt: str) -> None:
+    """Raise if the system prompt is missing the Phase-4 override-protocol markers."""
+    missing = [s for s in _OVERRIDE_SCHEMA_SENTINELS if s not in prompt]
+    if missing:
+        raise RuntimeError(
+            f"project-instructions.md is missing override-protocol markers {missing} — "
+            "prompt/code desync (the prompt would ignore reference_weights). Refusing to run."
         )
 
 # Soft caps to keep the user message inside Claude's context window comfortably.
@@ -77,6 +104,7 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
 
     system_prompt = _SYSTEM_PROMPT_FILE.read_text(encoding="utf-8")
     assert_flex_prompt_schema(system_prompt)
+    assert_override_prompt_schema(system_prompt)
     recent = list_recent_reports(limit=_MAX_RECENT_REPORTS)
     logger.info("Loaded %d recent reports for continuity", len(recent))
 
@@ -89,9 +117,34 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
     )
 
     report_md, trades_obj = _split_response(raw, date_str)
+
+    # Phase 4 — validate the override records the model emitted (Tier-2 enforcement):
+    # structural gates + the de-risk/re-risk asymmetry. Rejected overrides do not
+    # authorize a deviation; downsized ones have their magnitude halved. The result is
+    # stamped back into trades_obj so the persisted record shows what was accepted, and
+    # into OverrideHistory for the Phase-5 outcome loop. Non-fatal: a validation error
+    # must not lose the report/trades.
+    try:
+        cfg = _load_override_cfg()
+        result = validate_overrides(trades_obj.get("overrides", []), cfg)
+        trades_obj["override_validation"] = {
+            "accepted": len(result["accepted"]),
+            "downsized": len(result["downsized"]),
+            "rejected": len(result["rejected"]),
+            "decisions": result["decisions"],
+        }
+        logger.info(
+            "Override validation: %d accepted, %d downsized, %d rejected",
+            len(result["accepted"]), len(result["downsized"]), len(result["rejected"]),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error("Override validation failed (non-fatal): %s", e)
+        result = {"decisions": []}
+
     write_report(date_str, report_md)
     write_trades(date_str, trades_obj)
     _write_trade_history(date_str, trades_obj, snapshot)
+    _write_override_history(date_str, result.get("decisions", []), snapshot)
 
     logger.info(
         "=== Analyzer completed for %s — %d trades recommended ===",
@@ -278,6 +331,46 @@ def _write_trade_history(date_str: str, trades_obj: dict, snapshot: dict | None 
             upsert_entity("TradeHistory", entity)
         except Exception as e:  # noqa: BLE001
             logger.error("TradeHistory upsert failed for %s: %s", trade_id, e)
+
+
+def _write_override_history(date_str: str, decisions: list[dict], snapshot: dict | None = None) -> None:
+    """Persist each override decision to OverrideHistory (Phase 4d — WRITE ONLY).
+
+    One row per override record the model emitted, tagged with the validator's outcome
+    (accepted / downsized / rejected) and the (possibly halved) magnitude actually applied.
+    Phase 5 will later stamp the realized outcome at `falsifier_date`; this phase only writes
+    the record + the hook fields (left null). Mirrors the TradeHistory key convention
+    (PK=year-month, RowKey=stable per-override id). Non-fatal per row.
+    """
+    year_month = date_str[:7]
+    for idx, dec in enumerate(decisions or []):
+        ov = dec.get("override") or {}
+        row_key = f"OV-{date_str.replace('-', '')}-{idx:03d}"
+        try:
+            evidence = ov.get("evidence") or []
+            entity = {
+                "PartitionKey":        year_month,
+                "RowKey":              row_key,
+                "recommended_at":      date_str,
+                "outcome":             dec.get("outcome", ""),          # accepted|downsized|rejected
+                "validator_reasons":   "; ".join(dec.get("reasons", []))[:32000],
+                "premise_challenged":  ov.get("premise_challenged", ""),
+                "direction":           ov.get("direction", ""),
+                "magnitude_pp":        ov.get("magnitude_pp"),
+                "downsized":           bool(ov.get("_downsized", False)),
+                "evidence":            (" | ".join(str(e) for e in evidence))[:32000],
+                "evidence_count":      len(evidence),
+                "falsifier":           (ov.get("falsifier") or "")[:32000],
+                "falsifier_date":      ov.get("falsifier_date"),
+                "clean_data_only":     bool(ov.get("clean_data_only", False)),
+                "layer":               "override",
+                # Phase-5 outcome hooks (stamped later; left null here).
+                "outcome_status":      "",
+                "resolved_correct":    None,
+            }
+            upsert_entity("OverrideHistory", entity)
+        except Exception as e:  # noqa: BLE001
+            logger.error("OverrideHistory upsert failed for %s: %s", row_key, e)
 
 
 def _date_from_blob_name(blob_name: str) -> str | None:
