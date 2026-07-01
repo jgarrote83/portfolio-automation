@@ -77,6 +77,11 @@ _RISK_LIMITS_DEFAULTS = {
         {"risk_score_max": 8, "conviction": "low", "active_quadrant_target": 30.0},
         {"risk_score_max": 10, "conviction": "no_read", "active_quadrant_target": 15.0},
     ],
+    "no_read_ballast": {
+        "conviction_score_min": 7.0,
+        "ballast_names": ["GLD", "TLT"],
+        "ballast_target_pct_of_core": 55.0,
+    },
     "borderline_blend": {
         "intersection_target_pct_of_core": 60.0,
         "divergent_staged_pct_of_core": 20.0,
@@ -2530,6 +2535,23 @@ def _build_reference_weights(
                 for t in concentrate:
                     raw_core[t] = raw_core.get(t, 0.0) + per
 
+    # --- 3a. no-read ballast (fix for the degenerate low-conviction reference) ----
+    # In a low-conviction / no-read regime the spec (Calculated Risk Score 7–10) says:
+    # overweight GLD + long-duration Treasuries, push cash toward its ceiling, minimal
+    # quadrant bet. Without this the active-quadrant target is tiny and the AMZN/GOOGL
+    # exemption balloons on renormalize (observed 2026-07-01: GOOGL 38% / AMZN 22%).
+    # Route the bulk of the core to the ballast names instead, so the book reads as
+    # capital-preservation, not mega-cap-tech-heavy.
+    nrb = cfg.get("no_read_ballast") or _RISK_LIMITS_DEFAULTS["no_read_ballast"]
+    no_read = proxy["score"] >= float(nrb.get("conviction_score_min", 7.0))
+    if no_read:
+        ballast = [t for t in nrb.get("ballast_names", ["GLD", "TLT"]) if t in CORE_ROSTER]
+        if ballast:
+            ballast_share = float(nrb.get("ballast_target_pct_of_core", 55.0))
+            per = ballast_share / len(ballast)
+            for t in ballast:
+                raw_core[t] = raw_core.get(t, 0.0) + per
+
     # --- 3b. transition_watch lean (Phase 3): bounded partial pre-stage toward the -
     # projected quadrant WITHOUT moving the binding quad/gate/axis. Convex blend of the
     # base allocation with a projected-quadrant allocation of the same budget:
@@ -2564,11 +2586,6 @@ def _build_reference_weights(
         if t in core_target:
             core_target[t] = min(core_target[t], soft_cap)
 
-    # AMZN/GOOGL never forced below current weight (% of equity ≈ % here pre-carve).
-    for t in exempt:
-        if t in core_target and t in cur_w:
-            core_target[t] = max(core_target[t], cur_w[t])
-
     # --- 5. carve the cash sleeve, then scale core into the remaining room -------
     shock = (market_shock or {}).get("shock_level")
     cash_ceiling = float(cash_band["shock3_ceiling"]) if shock == 3 else float(cash_band["ceiling"])
@@ -2579,14 +2596,25 @@ def _build_reference_weights(
     # Reference cash sleeve: stay in band; if currently above the ceiling hold at the
     # ceiling (deploy the surplus into core), if below the floor lift to the floor.
     cash_sleeve_target = max(cash_floor, min(cash_ceiling, cur_sleeve))
-
-    # Scale the core into the room left after the cash sleeve. SGOV is part of the cash
-    # sleeve, not the core concentration — exclude its floor slot from the core scale
-    # and set it from the sleeve target so the book sums to ~100%.
-    core_ex_sgov = {t: w for t, w in core_target.items() if t != "SGOV"}
     core_room = max(0.0, 100.0 - cash_sleeve_target)
-    scale = core_room / (sum(core_ex_sgov.values()) or 1.0)
-    weights = {t: round(w * scale, 3) for t, w in core_ex_sgov.items()}
+
+    # AMZN/GOOGL are permanent holds: pin them at their CURRENT weight and carve that out
+    # of the core room as a FIXED slice — do NOT let the renormalize scale them up. (Before
+    # this fix the exemption was applied pre-scale, so a small no-read core budget made the
+    # scale multiplier huge and ballooned the exempt names to ~60% of the book — the
+    # 2026-07-01 GOOGL-38%/AMZN-22% degeneracy.) Exempt names never go below current, never
+    # above it purely from scaling.
+    exempt_held = {t: cur_w[t] for t in exempt if t in core_target and t in cur_w and cur_w[t] > 0}
+    exempt_total = sum(exempt_held.values())
+    # SGOV is the cash sleeve, not core concentration; exempt names are fixed. Scale only
+    # the remaining (non-exempt, non-SGOV) core into what's left after cash + exempt.
+    scalable = {t: w for t, w in core_target.items()
+                if t != "SGOV" and t not in exempt_held}
+    scalable_room = max(0.0, core_room - exempt_total)
+    scale = scalable_room / (sum(scalable.values()) or 1.0)
+    weights = {t: round(w * scale, 3) for t, w in scalable.items()}
+    for t, w in exempt_held.items():
+        weights[t] = round(w, 3)  # pinned at current
     # Cash sleeve = SGOV (yield-bearing) holding all but a ~1.5% literal-cash buffer.
     sgov_w = max(0.0, cash_sleeve_target - _CASH_BUFFER_PCT)
     weights["SGOV"] = round(sgov_w, 3)
@@ -2602,10 +2630,13 @@ def _build_reference_weights(
         binding.append("cash_below_band")
     if any(t in exempt and core_target[t] <= cur_w.get(t, 0.0) for t in exempt):
         binding.append("exempt_hold_floor")
+    if no_read:
+        binding.append("no_read_ballast")
 
     return {
         "available": True,
         "as_of": (paper_account.get("as_of") or growth_axis.get("as_of")),
+        "no_read": no_read,
         "active_quadrant": quad or None,
         "favored_bucket": bucket,
         "borderline": borderline,
