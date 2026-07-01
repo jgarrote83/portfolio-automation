@@ -75,11 +75,38 @@ def assert_override_prompt_schema(prompt: str) -> None:
             "prompt/code desync (the prompt would ignore reference_weights). Refusing to run."
         )
 
-# Soft caps to keep the user message inside Claude's context window comfortably.
-_MAX_NEWS_PER_SCOPE = 25
-_MAX_COMPANY_NEWS_PER_TICKER = 5
-_MAX_CONGRESSIONAL = 50
+# Soft caps to keep the user message inside Claude's context window. The full snapshot
+# is ~935 KB / ~318K tokens — WELL over the 200K model limit — so trimming is not
+# cosmetic: an untrimmed prompt overflows the context and the analyzer never completes.
+# The deterministic analytics blocks (growth_axis/inflation_axis/bond_signals/labor_signals/
+# regional_rotation/reference_weights/divergences) are the conclusions the analyzer reads;
+# the raw macro series / alt-data are supporting detail and are aggressively clipped here.
+_MAX_NEWS_PER_SCOPE = 15
+_MAX_COMPANY_NEWS_PER_TICKER = 3
+_MAX_CONGRESSIONAL = 25
 _MAX_RECENT_REPORTS = 5
+_MAX_GOV_CONTRACTS = 20
+_MAX_LOBBYING = 12
+_MAX_EARNINGS = 25
+_MAX_STOCK_NEWS = 15
+# Fundamentals: keep only the fields the analyzer reasons over (valuation / quality /
+# sector), dropping the verbose FMP profile boilerplate (description, address, ceo, cik,
+# cusip, isin, phone, image, website, zip, …) that is ~2/3 of each entry and never used.
+_FUNDAMENTALS_FIELDS_KEPT = {
+    "symbol", "companyName", "sector", "industry", "price", "beta", "marketCap",
+    "pe", "peRatio", "eps", "dcf", "rating", "lastDividend", "range",
+    "changePercentage", "averageVolume", "isEtf", "isFund", "earningsDate",
+}
+_MACRO_OBS_KEPT = 3          # latest N observations per kept raw macro series
+_RECENT_REPORT_CHARS = 4000  # head excerpt of each prior report (summary + call), not the whole thing
+# Raw macro series the analyzer actually cites (Freshness table + context). The axes are
+# pre-computed, so the deep history behind them is dropped — only these, latest few obs.
+_MACRO_SERIES_KEPT = {
+    "GDPNOW", "GDPNOW_VINTAGES", "CPILFESL", "PCEPILFE", "CPIAUCSL", "PCEPI", "PPIACO",
+    "DFF", "DGS10", "DGS2", "DFII10", "T5YIE", "T5YIFR", "T10YIE",
+    "DCOILWTICO", "DCOILBRENTEU", "DTWEXBGS", "UNRATE", "ICSA", "PAYEMS",
+    "ECBDFR", "DEXJPUS", "DEXUSEU", "DEXCHUS",
+}
 
 
 def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
@@ -168,14 +195,19 @@ def _build_user_message(snapshot: dict, recent: list[tuple[str, str]]) -> str:
     parts.append(f"# Daily snapshot for {snapshot.get('date', 'unknown')}\n")
     parts.append("## Snapshot data (JSON)\n")
     parts.append("```json")
-    parts.append(json.dumps(trimmed, default=str, indent=2))
+    # Compact separators (no indent) — indentation adds ~15-20% tokens on a ~900KB JSON
+    # for zero analytical value.
+    parts.append(json.dumps(trimmed, default=str, separators=(",", ":")))
     parts.append("```\n")
 
     if recent:
-        parts.append("## Recent reports (most recent first)\n")
+        parts.append("## Recent reports (most recent first — head excerpt for continuity)\n")
         for d, md in recent:
             parts.append(f"### Report — {d}\n")
-            parts.append(md.strip())
+            excerpt = md.strip()
+            if len(excerpt) > _RECENT_REPORT_CHARS:
+                excerpt = excerpt[:_RECENT_REPORT_CHARS] + "\n…[report truncated for context]…"
+            parts.append(excerpt)
             parts.append("\n---\n")
 
     parts.append(
@@ -187,8 +219,30 @@ def _build_user_message(snapshot: dict, recent: list[tuple[str, str]]) -> str:
 
 
 def _trim_snapshot(snapshot: dict) -> dict:
-    """Return a shallow copy with oversized news arrays clipped."""
+    """Return a shallow copy trimmed to fit the model context window.
+
+    The untrimmed snapshot is ~318K tokens (over the 200K limit). The deterministic
+    analytics blocks — the conclusions the analyzer reads — are kept in full; the raw
+    supporting detail (macro series history, alt-data, news) is clipped hard:
+    - `macro.data`: keep only the cited series (`_MACRO_SERIES_KEPT`), latest few obs each;
+      drop everything else and the deep history (the axes already encode it).
+    - news / stock_news / congressional / gov_contracts / lobbying / earnings: clip counts.
+    """
     s = dict(snapshot)
+
+    # --- macro: keep cited series only, latest few observations ------------------
+    macro = dict(s.get("macro") or {})
+    data = macro.get("data")
+    if isinstance(data, dict):
+        clipped: dict = {}
+        for k, v in data.items():
+            if k not in _MACRO_SERIES_KEPT:
+                continue
+            clipped[k] = v[:_MACRO_OBS_KEPT] if isinstance(v, list) else v
+        macro["data"] = clipped
+        s["macro"] = macro
+
+    # --- news: clip each scope --------------------------------------------------
     news = dict(s.get("news") or {})
     if "market" in news:
         news["market"] = news["market"][:_MAX_NEWS_PER_SCOPE]
@@ -200,10 +254,25 @@ def _trim_snapshot(snapshot: dict) -> dict:
             for t, items in news["company"].items()
         }
     s["news"] = news
-    if "congressional_trades" in s and isinstance(s["congressional_trades"], list):
-        s["congressional_trades"] = s["congressional_trades"][:_MAX_CONGRESSIONAL]
-    if "stock_news" in s and isinstance(s["stock_news"], list):
-        s["stock_news"] = s["stock_news"][:_MAX_NEWS_PER_SCOPE]
+
+    # --- fundamentals: slim each entry to the fields the analyzer uses -----------
+    fund = s.get("fundamentals")
+    if isinstance(fund, list):
+        s["fundamentals"] = [
+            {k: v for k, v in (row or {}).items() if k in _FUNDAMENTALS_FIELDS_KEPT}
+            for row in fund
+        ]
+
+    # --- alt-data + calendars: clip counts --------------------------------------
+    for key, cap in (
+        ("congressional_trades", _MAX_CONGRESSIONAL),
+        ("stock_news", _MAX_STOCK_NEWS),
+        ("gov_contracts", _MAX_GOV_CONTRACTS),
+        ("lobbying", _MAX_LOBBYING),
+        ("earnings_calendar", _MAX_EARNINGS),
+    ):
+        if isinstance(s.get(key), list):
+            s[key] = s[key][:cap]
     return s
 
 

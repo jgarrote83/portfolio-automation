@@ -26,7 +26,11 @@ import requests
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "claude-sonnet-4-6"
-_DEFAULT_MAX_TOKENS = 16000
+# 24K output headroom: the Phase-4 report (Reference column, per-sleeve Current-vs-Reference
+# gaps, override records) is verbose and was hitting the old 16K cap (stop_reason:max_tokens),
+# risking truncation before the ===TRADES_JSON=== block. 24K is well within the model's 128K
+# output max; output tokens are billed only as generated.
+_DEFAULT_MAX_TOKENS = 24000
 _DEFAULT_TEMPERATURE = 0.2
 _TIMEOUT_SECONDS = 600  # Claude with large snapshots can take >3 min; Flex allows 40 min
 _ANTHROPIC_VERSION = "2023-06-01"
