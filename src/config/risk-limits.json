@@ -42,5 +42,12 @@
     "intersection_target_pct_of_core": 60.0,
     "divergent_staged_pct_of_core": 20.0
   },
-  "_borderline_blend_note": "When an axis is flat/indeterminate or active_quadrant is unknown (or a transition_watch is active), concentrate into the INTERSECTION of the candidate quadrants (assets that work in both) at the intersection target, and hold the DIVERGENT bets at staged/partial size. Borderline must produce a specific posture, never a freeze (spec §3 living-hedge + brief Phase 1)."
+  "_borderline_blend_note": "When an axis is flat/indeterminate or active_quadrant is unknown (or a transition_watch is active), concentrate into the INTERSECTION of the candidate quadrants (assets that work in both) at the intersection target, and hold the DIVERGENT bets at staged/partial size. Borderline must produce a specific posture, never a freeze (spec §3 living-hedge + brief Phase 1).",
+
+  "transition_watch": {
+    "staged_fraction_de_risk": 0.30,
+    "staged_fraction_re_risk": 0.15,
+    "re_risk_min_confirmations": 2
+  },
+  "_transition_watch_note": "Realized inflation is laggy, so the Q3->Q4 (etc.) turn is called late. When the Phase-2 `leading_vs_lagging_inflation` divergence is active, transition_watch pre-stages a PARTIAL, BOUNDED lean in reference_weights toward the projected quadrant WITHOUT flipping the binding active_quadrant / regime_gate / realized inflation axis (spec §6). Convex blend fraction f: reference = (1-f)*base + f*projected. ASYMMETRY (§6 safety): a de-risk transition (projecting a MORE defensive quadrant) stages readily at staged_fraction_de_risk; a re-risk transition (projecting a MORE offensive quadrant) needs a higher bar — at least re_risk_min_confirmations leading signals confirming (breakeven AND oil, not just one) — and a smaller staged_fraction_re_risk; below the bar it does not activate. Reuses the Phase-2 divergence — never re-derives the leading/realized tension."
 }

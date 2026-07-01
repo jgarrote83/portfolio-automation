@@ -81,6 +81,11 @@ _RISK_LIMITS_DEFAULTS = {
         "intersection_target_pct_of_core": 60.0,
         "divergent_staged_pct_of_core": 20.0,
     },
+    "transition_watch": {
+        "staged_fraction_de_risk": 0.30,
+        "staged_fraction_re_risk": 0.15,
+        "re_risk_min_confirmations": 2,
+    },
 }
 
 # Conviction-sleeve flex-review defaults (overridable via config/flex-review.json).
@@ -881,35 +886,18 @@ def run() -> None:
         fomc_stance.get("stance"),
     )
 
-    # --- Reference weights (strategy-spec §10: precomputed target weights the ----
-    # analyzer executes toward, NOT a mandate). The missing layer that anchored the
-    # call→target→trades leap where the book rationalized inaction. Deterministic +
-    # echoed; non-fatal (a build failure must never block the snapshot).
-    reference_weights: dict = {"available": False}
-    try:
-        reference_weights = _build_reference_weights(
-            paper_account, growth_axis, inflation_axis, regime_gate,
-            regional_rotation, bond_signals, labor_signals, market_shock,
-            _load_risk_limits(),
-        )
-        logger.info(
-            "Reference weights: quad=%s conviction=%s(%s) active_target=%s%%core tilt=%s binding=%s",
-            reference_weights.get("active_quadrant"),
-            reference_weights.get("conviction_proxy"),
-            reference_weights.get("conviction_label"),
-            reference_weights.get("active_quadrant_target_pct_of_core"),
-            reference_weights.get("dollar_tilt"),
-            reference_weights.get("binding"),
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("Reference weights build failed (non-fatal)")
+    # Build order (dependency chain): divergences → transition_watch → reference_weights.
+    # divergences (Phase 2) only needs the BINDING active_quadrant, which is exactly
+    # active_quadrant(g, i) and which transition_watch deliberately does NOT move — so we
+    # pass that directly and avoid a build cycle (reference_weights consumes transition_watch
+    # consumes divergences). All three non-fatal: a build failure must never block the snapshot.
+    _binding_quad = {"active_quadrant": active_quadrant(
+        growth_axis.get("direction"), inflation_axis.get("direction")) or None}
 
-    # --- Divergences (responsiveness brief Phase 2: DETECT tensions, don't resolve) ---
-    # Descriptive precompute pointing the analyzer's judgment at high-value zones; the
-    # LLM adjudicates them in Phase 4 (the prompt does not consume this yet). The SPY
-    # 200-day SMA (#3's long-trend filter) is the one new input — fetched here and reduced
-    # by the pure _sma_from_rows so _build_divergences itself stays no-network/testable.
-    # Non-fatal: a divergence-build failure must never block the snapshot.
+    # --- Divergences (Phase 2: DETECT tensions, don't resolve) ---------------
+    # Descriptive precompute pointing the analyzer's judgment at high-value zones; the LLM
+    # adjudicates them (Phase 4). The SPY 200-day SMA (#3's filter) is fetched here and
+    # reduced by the pure _sma_from_rows so _build_divergences stays no-network/testable.
     divergences: list[dict] = []
     try:
         try:
@@ -919,12 +907,52 @@ def run() -> None:
             spy_sma = {"available": False}
         divergences = _build_divergences(
             paper_account, growth_axis, inflation_axis, bond_signals, regional_rotation,
-            reference_weights, market_shock, spy_sma, today, _load_divergence_config(),
+            _binding_quad, market_shock, spy_sma, today, _load_divergence_config(),
         )
         _active = [d["id"] for d in divergences if d.get("status") == "active"]
         logger.info("Divergences: %d total, active=%s", len(divergences), _active)
     except Exception:  # noqa: BLE001
         logger.exception("Divergences build failed (non-fatal)")
+
+    # --- Transition watch (Phase 3: bounded pre-staging on leading inflation) ---
+    # Reuses the Phase-2 leading_vs_lagging_inflation divergence; emits a partial lean for
+    # reference_weights toward the projected quadrant WITHOUT moving the binding quad/gate/axis.
+    transition_watch: dict = {"active": False, "status": "indeterminate"}
+    try:
+        transition_watch = _build_transition_watch(
+            divergences, growth_axis, inflation_axis, _load_risk_limits(),
+        )
+        logger.info(
+            "Transition watch: active=%s projected=%s direction=%s frac=%s status=%s",
+            transition_watch.get("active"), transition_watch.get("projected_quadrant"),
+            transition_watch.get("direction"), transition_watch.get("staged_fraction"),
+            transition_watch.get("status"),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Transition watch build failed (non-fatal)")
+
+    # --- Reference weights (strategy-spec §10: precomputed target weights the ----
+    # analyzer executes toward, NOT a mandate). Consumes transition_watch (Phase 3) as a
+    # bounded lean. Deterministic + echoed; non-fatal.
+    reference_weights: dict = {"available": False}
+    try:
+        reference_weights = _build_reference_weights(
+            paper_account, growth_axis, inflation_axis, regime_gate,
+            regional_rotation, bond_signals, labor_signals, market_shock,
+            _load_risk_limits(), transition_watch,
+        )
+        logger.info(
+            "Reference weights: quad=%s conviction=%s(%s) active_target=%s%%core tilt=%s lean=%s binding=%s",
+            reference_weights.get("active_quadrant"),
+            reference_weights.get("conviction_proxy"),
+            reference_weights.get("conviction_label"),
+            reference_weights.get("active_quadrant_target_pct_of_core"),
+            reference_weights.get("dollar_tilt"),
+            (reference_weights.get("transition_lean") or {}).get("applied"),
+            reference_weights.get("binding"),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Reference weights build failed (non-fatal)")
 
     # --- Flex engine state (intraday catalyst engine; echoed by the analyzer) -
     # The engine writes flex-state/{date}.json during the trading session. At
@@ -1014,6 +1042,7 @@ def run() -> None:
         "fomc_stance": fomc_stance,
         "regime_gate": regime_gate,
         "reference_weights": reference_weights,
+        "transition_watch": transition_watch,
         "divergences": divergences,
         "flex_state": flex_state,
         "performance": performance,
@@ -2245,6 +2274,135 @@ def _ladder_target_pct(ladder: list[dict], proxy_score: float) -> tuple[float, s
     return float(last.get("active_quadrant_target", 50.0)), last.get("conviction", "")
 
 
+# Quadrant defensiveness rank (Q1 most offensive → Q4 most defensive). A transition to a
+# HIGHER-ranked quadrant is de-risk; to a LOWER-ranked one is re-risk (spec §6 asymmetry).
+_QUADRANT_DEFENSIVENESS = {"Q1": 0, "Q2": 1, "Q3": 2, "Q4": 3}
+
+
+def _project_quadrant(realized_quad: str, leading_inflation_dir: str, growth_dir: str) -> str:
+    """The quadrant the LEADING inflation signal projects, holding the growth axis fixed.
+
+    Inflation is the only axis the leading signal (breakevens + oil) speaks to, so we move
+    only along the inflation dimension of the grid, never the growth one:
+      growth rising:  inflation falling → Q1, inflation rising → Q2
+      growth falling: inflation falling → Q4, inflation rising → Q3
+    Returns "" if the growth axis is not pinned (can't place on the grid).
+    """
+    g = (growth_dir or "").lower()
+    d = (leading_inflation_dir or "").lower()
+    if g == "rising":
+        return "Q1" if d == "falling" else ("Q2" if d == "rising" else "")
+    if g == "falling":
+        return "Q4" if d == "falling" else ("Q3" if d == "rising" else "")
+    return ""
+
+
+def _build_transition_watch(
+    divergences: list[dict],
+    growth_axis: dict,
+    inflation_axis: dict,
+    cfg: dict,
+) -> dict:
+    """Deterministic PRE-STAGING signal: when leading inflation disagrees with realized,
+    project the quadrant it points to and emit a bounded lean for reference_weights —
+    WITHOUT moving the binding active_quadrant / regime_gate / realized inflation axis
+    (strategy-spec §6). Realized inflation is laggy, so this catches the turn early.
+
+    REUSE not re-detect (§5/DRY): the trigger is the Phase-2 `leading_vs_lagging_inflation`
+    divergence — consumed here, never re-derived. If that divergence is not `active` (or is
+    `indeterminate` because the leading data is stale/absent), no transition is staged.
+
+    ASYMMETRY (§6 safety): a de-risk transition (projecting a MORE defensive quadrant)
+    stages at the full de-risk fraction; a re-risk transition (MORE offensive) requires a
+    higher confirmation bar (>= re_risk_min_confirmations leading signals agreeing — both
+    breakevens AND oil, not one) and a smaller fraction; below the bar it does not activate.
+    """
+    tw_cfg = cfg.get("transition_watch") or _RISK_LIMITS_DEFAULTS["transition_watch"]
+    div = next((d for d in (divergences or []) if d.get("id") == "leading_vs_lagging_inflation"), None)
+
+    base = {"active": False, "projected_quadrant": None, "direction": None,
+            "staged_fraction": 0.0, "basis": []}
+
+    # Trigger must be an ACTIVE Phase-2 divergence with a concrete leading direction.
+    if div is None:
+        return {**base, "status": "indeterminate"}
+    if div.get("status") != "active":
+        # indeterminate divergence (stale/absent leading data) OR aligned (no tension).
+        return {**base, "status": div.get("status", "indeterminate")}
+
+    leading_dir = div.get("direction_implied")  # "rising" | "falling" (the leading axis)
+    g = (growth_axis or {}).get("direction")
+    realized_i = (inflation_axis or {}).get("direction")
+
+    # The leading signal speaks only to inflation — the growth axis must be pinned to
+    # place the projection on the grid. (Growth flat/unknown → can't project.)
+    projected = _project_quadrant("", leading_dir, g)
+    if not projected:
+        return {**base, "status": "indeterminate"}
+
+    # Realized baseline defensiveness rank. When realized inflation is decided we compare
+    # against that quadrant; when it is FLAT/borderline (the primary transition case — the
+    # leading signal is resolving which side of the border) we compare against the MIDPOINT
+    # of the favored bucket, so the leading direction still yields a de/re-risk call.
+    realized_quad = active_quadrant(g, realized_i)
+    if realized_quad:
+        r_real = float(_QUADRANT_DEFENSIVENESS.get(realized_quad, 0))
+    else:
+        bucket = favored_bucket(g, realized_i)
+        ranks = [_QUADRANT_DEFENSIVENESS[q] for q in bucket if q in _QUADRANT_DEFENSIVENESS]
+        if not ranks:
+            return {**base, "status": "indeterminate"}
+        r_real = sum(ranks) / len(ranks)
+
+    r_proj = float(_QUADRANT_DEFENSIVENESS.get(projected, 0))
+    if r_proj == r_real:
+        # No directional move relative to the realized baseline.
+        return {**base, "projected_quadrant": projected, "status": "indeterminate"}
+    direction = "de_risk" if r_proj > r_real else "re_risk"
+
+    # Echo the leading signals that drove it (from the divergence, not re-derived).
+    basis = [f"{s['name']}={s['value']}" for s in div.get("signals", [])
+             if s.get("name") in ("be_5y.delta_20d_bp", "inflation_axis.oil_wti_20d_pct")
+             and s.get("value") is not None]
+
+    if direction == "re_risk":
+        # Higher bar: require >= N leading confirmations (both breakevens AND oil agreeing).
+        thr = float((div_cfg_thr := _load_divergence_config().get("leading_vs_lagging_inflation", {}))
+                    .get("breakeven_delta_20d_bp", 15.0))
+        oil_thr = float(div_cfg_thr.get("oil_20d_pct", 10.0))
+        be = next((s["value"] for s in div.get("signals", []) if s.get("name") == "be_5y.delta_20d_bp"), None)
+        oil = next((s["value"] for s in div.get("signals", []) if s.get("name") == "inflation_axis.oil_wti_20d_pct"), None)
+        want_up = leading_dir == "rising"
+        confs = 0
+        if be is not None and ((be >= thr) if want_up else (be <= -thr)):
+            confs += 1
+        if oil is not None and ((oil >= oil_thr) if want_up else (oil <= -oil_thr)):
+            confs += 1
+        if confs < int(tw_cfg.get("re_risk_min_confirmations", 2)):
+            return {**base, "projected_quadrant": projected, "direction": "re_risk",
+                    "basis": basis, "status": "indeterminate",
+                    "note": f"re-risk below confirmation bar ({confs} < "
+                            f"{tw_cfg.get('re_risk_min_confirmations', 2)}) — not staged"}
+        frac = float(tw_cfg.get("staged_fraction_re_risk", 0.15))
+    else:
+        frac = float(tw_cfg.get("staged_fraction_de_risk", 0.30))
+
+    return {
+        "active": True,
+        "projected_quadrant": projected,
+        "realized_quadrant": realized_quad,
+        "direction": direction,
+        "staged_fraction": frac,
+        "basis": basis,
+        "status": "active",
+        "rule": (
+            "Bounded partial lean toward projected_quadrant staged into reference_weights "
+            "as a convex blend; binding active_quadrant / regime_gate / realized inflation "
+            "axis are UNCHANGED. Reuses the Phase-2 leading_vs_lagging_inflation divergence."
+        ),
+    }
+
+
 def _build_reference_weights(
     paper_account: dict,
     growth_axis: dict,
@@ -2255,6 +2413,7 @@ def _build_reference_weights(
     labor_signals: dict,
     market_shock: dict,
     cfg: dict,
+    transition_watch: dict | None = None,
 ) -> dict:
     """Deterministic per-ticker REFERENCE allocation the analyzer executes toward.
 
@@ -2371,6 +2530,26 @@ def _build_reference_weights(
                 for t in concentrate:
                     raw_core[t] = raw_core.get(t, 0.0) + per
 
+    # --- 3b. transition_watch lean (Phase 3): bounded partial pre-stage toward the -
+    # projected quadrant WITHOUT moving the binding quad/gate/axis. Convex blend of the
+    # base allocation with a projected-quadrant allocation of the same budget:
+    #   raw_core = (1 - f) * base + f * projected   (f = staged_fraction, <= 0.30)
+    # Never a full flip; preserves the total budget. Deterministic; reuses the Phase-2
+    # divergence via _build_transition_watch (passed in), no re-derivation here.
+    tw = transition_watch or {}
+    tw_applied = False
+    if tw.get("active") and tw.get("projected_quadrant"):
+        f = float(tw.get("staged_fraction") or 0.0)
+        proj_names = list(concentrate_names(tw["projected_quadrant"]))
+        base_total = sum(raw_core.values())
+        if f > 0 and proj_names and base_total > 0:
+            blended = {t: w * (1.0 - f) for t, w in raw_core.items()}
+            per_proj = (base_total * f) / len(proj_names)
+            for t in proj_names:
+                blended[t] = blended.get(t, 0.0) + per_proj
+            raw_core = blended
+            tw_applied = True
+
     # --- 4. assemble core targets: floor everything, then the concentrate names --
     core_target: dict[str, float] = {t: floor for t in CORE_ROSTER}
     for t, w in raw_core.items():
@@ -2437,6 +2616,11 @@ def _build_reference_weights(
         "ceiling_pct_of_core": ceiling_core,
         "dollar_tilt": "international" if intl_lean else "us_growth",
         "dxy_tag": dxy_tag,
+        "transition_lean": (
+            {"applied": True, "projected_quadrant": tw.get("projected_quadrant"),
+             "direction": tw.get("direction"), "staged_fraction": tw.get("staged_fraction")}
+            if tw_applied else {"applied": False}
+        ),
         "cash_sleeve_target_pct": round(cash_sleeve_target, 2),
         "literal_cash_target_pct": weights.pop("__cash__", 0.0),
         "target_weights_pct": {t: w for t, w in sorted(weights.items()) if w >= 0.05},
