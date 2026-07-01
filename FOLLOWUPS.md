@@ -3,8 +3,8 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-06-30. Responsiveness brief: Phase 1 MERGED (PR #1),
-Phase 2 on `feat/divergences` (PR, STOP-for-review).**
+**▶ START HERE — last session 2026-07-01. Responsiveness brief: Phases 1 & 2 MERGED
+(PR #1, #2), Phase 3 on `feat/transition-watch` (PR, STOP-for-review).**
 Building the **Responsiveness brief** — the missing strategy-spec §10 "precomputed target
 weights the LLM executes toward" layer — to kill the *under-trading-rationalized-as-discipline*
 failure (2026-06-30 report held SPY 17.25% + QQQ 13.91% in a falling-growth Q3/Q4 regime,
@@ -13,7 +13,25 @@ favored bucket at ~9% vs target, proposed zero trades, called it "discipline"). 
 **reference, not a mandate**: the LLM reasons against it and may deviate only via a falsifiable,
 magnitude-bounded, asymmetric, logged override (de-risk cheap / re-risk dear). Three-tier model
 (T1 hard floor / T2 reference+logged override / T3 pure judgment). Brief = 5 phases.
-- **Phase 2 ✅ (`feat/divergences`, PR open — STOP for review, NOT merged):** `collector._build_divergences`
+- **Phase 3 ✅ (`feat/transition-watch`, PR open — STOP for review, NOT merged):**
+  `collector._build_transition_watch` → new **`transition_watch`** snapshot block, and
+  `_build_reference_weights` now **consumes** it. Realized inflation is laggy → this lets the
+  LEADING signal pre-stage a bounded partial lean toward the projected quadrant WITHOUT moving
+  the binding active_quadrant/regime_gate/realized axis (spec §6). **Reuses** the Phase-2
+  `leading_vs_lagging_inflation` divergence (never re-derives). Asymmetry: de-risk stages at the
+  full fraction (0.30); re-risk needs ≥2 leading confirmations + smaller fraction (0.15) else
+  inactive. Convex blend `(1−f)·base + f·projected` (f≤0.30, never a full flip); surfaced in
+  `reference_weights.transition_lean`. Missing leading data → indeterminate. Config in
+  `risk-limits.json` → `transition_watch`. Handles the **borderline realized** case (flat
+  inflation → the leading signal resolves which side of the Q3/Q4 border). Build-order in the
+  collector reworked to divergences→transition_watch→reference_weights (divergences takes a
+  minimal binding-quad dict to avoid a cycle). 14 tests; **full suite 161 green, ruff clean.**
+  Verified vs today's snapshot: `transition_watch` ACTIVE, projected **Q4**, **de_risk**,
+  fraction 0.30, basis breakevens −28bp + oil −21%; the lean lifts **TLT 2.95%→7.38%** in the
+  reference while binding fields (active_quadrant None, bucket [Q3,Q4], borderline, conviction
+  7.0) are **unchanged**. **Report-inert until Phase 4.** Design in
+  `memory/transition-watch-phase3-design.md`.
+- **Phase 2 ✅ MERGED (PR #2, commit `55775da` on master):** `collector._build_divergences`
   → new **`divergences`** snapshot list. Deterministic detector of TENSIONS between signals that
   should agree but don't — **describes only, never resolves/ranks/acts** (Phase 4 / the LLM adjudicates).
   Four: `leading_vs_lagging_inflation` (breakevens + oil vs realized core), `credit_complacency`
@@ -47,12 +65,12 @@ magnitude-bounded, asymmetric, logged override (de-risk cheap / re-risk dear). T
   parked: per-name intersection weighting (gold multiplier) — equal-weight is correct for now
   (GLD anchors via being in the intersection at ~6x any divergent name, not by out-weighting
   XLP/MCK).
-- **REMAINING (brief Phases 3–5, NOT built — resume here):**
-  Phase 3 `transition_watch` (leading-vs-realized inflation, pre-stages a partial tilt); Phase 4 the
+- **REMAINING (brief Phases 4–5, NOT built — resume here):** Phase 4 the
   **override protocol** (prompt wiring so the LLM executes toward `reference_weights` / logs deviations
   + override-record schema asserted like FLEX_SCHEMA_V1 + trade-validation + storage); Phase 5
   override-outcome stamping into the track record. **The prompt does NOT yet consume `reference_weights`
-  — Phase 4 is what makes the LLM act on it.** Design + decisions in `memory/reference-weights-phase1-design.md`.
+  / `divergences` / `transition_watch` — Phase 4 is what makes the LLM act on them (first
+  behavior-changing phase).** Design + decisions in `memory/*-design.md`.
 - **Interim `concentration_gap` work** (earlier same day) is **stashed** (`git stash` "concentration_gap WIP")
   and **superseded** by `reference_weights` — its reusable bits (EXEMPT_HOLDS, favored_bucket) were
   folded in; drop the stash once Phase 4 lands.
