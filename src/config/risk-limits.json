@@ -38,6 +38,13 @@
   ],
   "_conviction_ladder_note": "Risk Score -> active-quadrant target as a share of CORE (the midpoint/representative of each prompt band, made into a number so the LLM executes toward it rather than interpreting a prose range). Top rung is capped at the 90% ceiling. Monotonic: lower risk score (higher conviction) concentrates harder. At 9-10 (no read) the book is capital-preservation: minimal quadrant bet, lean to ballast.",
 
+  "no_read_ballast": {
+    "conviction_score_min": 7.0,
+    "ballast_names": ["GLD", "TLT"],
+    "ballast_target_pct_of_core": 55.0
+  },
+  "_no_read_ballast_note": "In a low-conviction / no-read regime (conviction proxy >= conviction_score_min, i.e. the 'low' and 'no_read' ladder rungs), the spec §Calculated-Risk-Score says: overweight GLD + long-duration Treasuries (TLT), push the cash sleeve toward its ceiling, minimal quadrant bet. So the reference routes ballast_target_pct_of_core to the ballast_names (split equally) instead of leaving the tiny active-quadrant target to be swamped by the AMZN/GOOGL exemption on renormalize. This fixes the degenerate no-read reference (was GOOGL 38% / AMZN 22%). Cash is separately pushed toward its ceiling by conviction elsewhere.",
+
   "borderline_blend": {
     "intersection_target_pct_of_core": 60.0,
     "divergent_staged_pct_of_core": 20.0

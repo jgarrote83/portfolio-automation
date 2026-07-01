@@ -3,10 +3,40 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-07-01. Responsiveness brief: Phases 1–3 MERGED
-(PR #1/#2/#3), Phase 4 on `feat/override-protocol` (PR — STOP-for-review, DO NOT MERGE
-until the checkpoint report is reviewed).**
-- **Phase 4 ✅ (`feat/override-protocol`, PR open — the PAYOFF phase, FIRST that changes report
+**▶ START HERE — last session 2026-07-01. Responsiveness brief: Phases 1–4 ALL MERGED
+(PR #1/#2/#3/#4) + analyzer context-overflow hotfix (PR #5). Phase 4 is LIVE (first
+behavior-changing phase). The live checkpoint exposed 2 reference/override TUNING issues
+(next task) — the protocol MECHANISM itself is verified working.**
+- **Analyzer outage + hotfix (PR #5, merged+deployed):** after Phase 4 deployed, the analyzer
+  produced NO report and `/today` went blank. Root cause = the assembled prompt was **318K input
+  tokens vs the claude-sonnet-4-6 deployment's 50K tokens/min quota** → every call throttled →
+  silent fail (App Insights telemetry was ALSO down, hiding it). Fixed: (1) **raised the
+  deployment token quota 50K→80K ITPM** (Foundry, in-place capacity bump, no approval); (2)
+  **trimmed the analyzer prompt 318K→~72K tokens** (`_trim_snapshot`/`_build_user_message`: macro
+  allow-list + latest-3-obs, fundamentals field-slim, alt-data caps, recent-report excerpts,
+  compact JSON) — no deterministic block lost; (3) **max_tokens 16K→24K** (verbose Phase-4 report
+  was hitting the output cap). Verified via live Foundry probe (72K in, full report w/ marker).
+  Notes for future: model context window is **1M** (not 200K); the real limit is the per-minute
+  **token quota**; Sonnet 5 quota is LOWER (40K); keep Thinking DISABLED (burns quota); model is
+  in **East US 2**. Details in `memory/analyzer-context-overflow-fix.md`.
+- **Finding 1 ✅ FIXED (no-read reference degeneracy) — PR #6:** in a no-read/low-conviction
+  regime (`conviction_proxy >= 7`) `_build_reference_weights` now routes `no_read_ballast`
+  (GLD+TLT, 55% of core split) so the reference reads capital-preservation, AND the AMZN/GOOGL
+  exemption is applied as a FIXED carve-out (pinned at current, excluded from the renormalize
+  scale) so it can no longer balloon. Verified on today's real snapshot: **GLD 32% / TLT 32% /
+  SGOV 23.5% / AMZN 3.2% / GOOGL 5.4% / SPY,QQQ→floor** (was GOOGL 38%/AMZN 22%). Config
+  `risk-limits.json → no_read_ballast`. 4 new tests, 186 green.
+- **⚠️ NEXT TASK — Finding 2 (override band vs large legit de-risk rotation), still open:** even
+  with the sane reference, today's gaps (buy GLD/TLT ~−30pp, trim SPY/QQQ +17/+14pp) exceed the
+  15pp Tier-2 override band, and **a rejected override still doesn't force an action** (silent-hold
+  gap — the exact failure Phase 4 targets). These gaps are gate-PERMITTED de-risk moves (trim
+  growth / buy ballast) the model should EXECUTE toward the reference (staged over sessions), not
+  file a hold-override for. Design options (in `memory/phase4-checkpoint-findings.md`): (a) prompt
+  executes toward the reference for gate-permitted de-risk instead of override-to-hold; (b) a
+  rejected override forces at least a partial trade toward reference; (c) per-sleeve (not basket)
+  override records; (d) a staged/partial override that passes the band. Fix Finding 2 before
+  brief Phase 5.
+- **Phase 4 ✅ MERGED (PR #4, `a47d2e7` on master) — the PAYOFF phase, FIRST that changes report
   behavior; NOT merged):** the analyzer prompt now **consumes `reference_weights`/`divergences`/
   `transition_watch`** and executes toward the reference. §2 gains a Reference column + a
   Current-vs-Reference gap; **Recommended = Reference ± logged overrides**; **inaction is now
@@ -86,7 +116,7 @@ magnitude-bounded, asymmetric, logged override (de-risk cheap / re-risk dear). T
   parked: per-name intersection weighting (gold multiplier) — equal-weight is correct for now
   (GLD anchors via being in the intersection at ~6x any divergent name, not by out-weighting
   XLP/MCK).
-- **REMAINING (brief Phase 5 only — after Phase 4 merges):** Phase 5 = override-outcome
+- **REMAINING (after the 2 checkpoint findings above are addressed): brief Phase 5** = override-outcome
   stamping into the track record — when an `OverrideHistory` row's `falsifier_date` matures,
   stamp whether the override was right/wrong (mirror the Phase-C trade outcome-stamping in the
   collector) and surface aggregate override calibration back into the snapshot as an input, so

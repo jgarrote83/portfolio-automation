@@ -225,3 +225,52 @@ def test_off_roster_name_not_given_core_target():
     paper = _paper({"SPY": 20, "MU": 5, "SGOV": 10})
     rw = _build(paper, g, i, _gate("open", "dovish"))
     assert "MU" not in rw["target_weights_pct"]
+
+
+# --- no-read ballast (fix for the 2026-07-01 degenerate reference) ------------
+
+def _no_read_rw(paper):
+    """A no-read regime: gate closed + flat axes + unconfirmed policy + shock 3 ->
+    conviction proxy >= 7 (the 'no_read' rung)."""
+    g, i = _axes("flat", "flat")
+    return _build(paper, g, i, _gate("closed", "unconfirmed"), shock={"shock_level": 3})
+
+
+def test_no_read_routes_to_ballast_not_megacaps():
+    """THE regression: in a no-read regime the reference is GLD/TLT/cash-heavy — NOT
+    ballooned into the exempt mega-caps (was GOOGL 38% / AMZN 22% on 2026-07-01)."""
+    paper = _paper({"SPY": 17.3, "QQQ": 13.9, "AMZN": 3.2, "GOOGL": 5.4,
+                    "GLD": 1.9, "TLT": 1.9, "SGOV": 23.8}, cash_pct=2.0)
+    rw = _no_read_rw(paper)
+    assert rw["no_read"] is True
+    tw = rw["target_weights_pct"]
+    # ballast dominates
+    assert tw["GLD"] > 20 and tw["TLT"] > 20
+    # exempt mega-caps are NOT ballooned — held ~current, nowhere near 38%/22%
+    assert tw["GOOGL"] < 8 and tw["AMZN"] < 6
+    # growth beta trimmed to floor
+    assert tw["SPY"] < 1 and tw["QQQ"] < 1
+
+
+def test_no_read_exempt_pinned_at_current_not_scaled_up():
+    paper = _paper({"AMZN": 3.2, "GOOGL": 5.4, "GLD": 1.9, "TLT": 1.9, "SGOV": 23.8}, cash_pct=2.0)
+    rw = _no_read_rw(paper)
+    tw = rw["target_weights_pct"]
+    # pinned at current weight (within rounding), never inflated by the renormalize
+    assert abs(tw["GOOGL"] - 5.4) < 0.6
+    assert abs(tw["AMZN"] - 3.2) < 0.6
+
+
+def test_no_read_sums_to_about_100():
+    paper = _paper({"SPY": 17.3, "QQQ": 13.9, "AMZN": 3.2, "GOOGL": 5.4,
+                    "GLD": 1.9, "TLT": 1.9, "SGOV": 23.8}, cash_pct=2.0)
+    rw = _no_read_rw(paper)
+    assert abs(_total(rw) - 100.0) < 0.6
+
+
+def test_high_conviction_regime_is_not_no_read():
+    """A clean risk-on regime must NOT trigger the ballast routing."""
+    g, i = _axes("rising", "falling")
+    rw = _build(_paper({"SPY": 20, "SGOV": 10}), g, i, _gate("open", "dovish"))
+    assert rw["no_read"] is False
+    assert "no_read_ballast" not in rw["binding"]
