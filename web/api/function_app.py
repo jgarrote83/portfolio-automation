@@ -353,6 +353,75 @@ _WINDOW_DAYS = {
 }
 
 
+def _quadrant_series(points: list[dict], quadrant_map: dict) -> list[dict]:
+    """Equal-weight buy-and-hold index (window start = 100) per quadrant basket.
+
+    Pure over the cache points (each carrying `closes`: {ticker: close}). A
+    member's base is its first close inside the window; a day's quadrant index
+    is the mean of member normalized closes available that day. A member with
+    no base yet contributes nothing (late-appearing tickers can't distort the
+    index retroactively); a quadrant with no members priced that day is None.
+    """
+    bases: dict[str, float] = {}
+    out: list[dict] = []
+    for p in points:
+        closes = p.get("closes") or {}
+        for t, c in closes.items():
+            if c and t not in bases:
+                bases[t] = float(c)
+        row: dict = {}
+        for q, members in (quadrant_map or {}).items():
+            vals = [
+                float(closes[t]) / bases[t] * 100.0
+                for t in members
+                if closes.get(t) and bases.get(t)
+            ]
+            row[q] = round(sum(vals) / len(vals), 3) if vals else None
+        out.append(row)
+    return out
+
+
+def _holdings_from(positions: list, balances: dict, prices: dict) -> list[dict]:
+    """Current holdings valuation rows (shared by the cache + legacy paths)."""
+    holdings = []
+    total_mv = (balances or {}).get("netMv") or sum(
+        (p.get("market_value") or 0) for p in positions
+    )
+    for p in positions:
+        cost = p.get("cost_basis")
+        mv   = p.get("market_value")
+        tg   = p.get("total_gain")
+        tg_pct = (tg / cost * 100) if (cost and tg is not None) else None
+        holdings.append({
+            "ticker": p.get("ticker"),
+            "quantity": p.get("quantity"),
+            "cost_basis": cost,
+            "market_value": mv,
+            "last_price": ((prices or {}).get(p.get("ticker")) or {}).get("c"),
+            "total_gain": tg,
+            "total_gain_pct": round(tg_pct, 2) if tg_pct is not None else None,
+            "weight_pct": round((mv / total_mv * 100), 2) if (mv and total_mv) else None,
+            "dividends_gain": None,  # TODO: requires FMP dividend history
+        })
+    holdings.sort(key=lambda h: -(h.get("market_value") or 0))
+    return holdings
+
+
+def _latest_snapshot():
+    """(date, snapshot) for the most recent daily snapshot; (None, None) if none."""
+    container = _blobs().get_container_client("daily-snapshots")
+    names = []
+    for b in container.list_blobs():
+        stem = b.name.rsplit(".", 1)[0]
+        if _DATE_RE.match(stem):
+            names.append(stem)
+    for d in sorted(names, reverse=True):
+        snap = _download_json("daily-snapshots", f"{d}.json")
+        if snap:
+            return d, snap
+    return None, None
+
+
 @app.route(route="performance", methods=["GET"])
 def performance(req: func.HttpRequest) -> func.HttpResponse:
     """Return time series for portfolio total value and SPY close, plus current
@@ -374,6 +443,53 @@ def performance(req: func.HttpRequest) -> func.HttpResponse:
     cutoff_str = cutoff.isoformat()
 
     try:
+        # ── Fast path: the collector-owned compact cache (one small blob read
+        # instead of one ~1.2 MB snapshot download per day in the window). Also
+        # the only path that serves the quadrant-basket series + regime bands.
+        cache = _download_json("performance", "equity-series.json")
+        if isinstance(cache, list) and cache:
+            qcfg = _download_json("performance", "quadrant-config.json") or {}
+            pts = [p for p in cache if (p.get("date") or "") >= cutoff_str]
+            series = [{
+                "date": p.get("date"),
+                "portfolio_value": p.get("equity"),
+                "spy_close": p.get("spy_close"),
+                "favored_bucket": p.get("favored_bucket") or [],
+            } for p in pts]
+            if series:
+                p0 = series[0]["portfolio_value"]
+                s0 = series[0]["spy_close"]
+                for pt in series:
+                    pt["portfolio_norm"] = (
+                        round((pt["portfolio_value"] / p0) * 100, 3)
+                        if p0 and pt["portfolio_value"] else None
+                    )
+                    pt["spy_norm"] = (
+                        round((pt["spy_close"] / s0) * 100, 3)
+                        if s0 and pt["spy_close"] else None
+                    )
+            qmap = qcfg.get("quadrants") or {}
+            if qmap:
+                for pt, row in zip(series, _quadrant_series(pts, qmap)):
+                    pt["quadrants"] = row
+
+            latest_date, snap = _latest_snapshot()
+            pf = (snap or {}).get("portfolio") or {}
+            balances = pf.get("balances") or {}
+            holdings = _holdings_from(
+                pf.get("positions") or [], balances, (snap or {}).get("prices") or {}
+            )
+            return _json({
+                "window": window,
+                "cutoff": cutoff_str,
+                "as_of": latest_date,
+                "series": series,
+                "holdings": holdings,
+                "balances": balances,
+                "quadrant_config": qcfg or None,
+            })
+
+        # ── Legacy fallback (cache not yet populated): full snapshot scan.
         container = _blobs().get_container_client("daily-snapshots")
         # List all snapshot blob names (cheap; metadata only).
         all_names = []
@@ -427,26 +543,7 @@ def performance(req: func.HttpRequest) -> func.HttpResponse:
                 pt["portfolio_norm"] = round((pt["portfolio_value"] / p0) * 100, 3) if p0 else None
                 pt["spy_norm"]       = round((pt["spy_close"] / s0) * 100, 3) if s0 else None
 
-        # Build current holdings table (from latest snapshot).
-        holdings = []
-        total_mv = latest_balances.get("netMv") or sum((p.get("market_value") or 0) for p in latest_positions)
-        for p in latest_positions:
-            cost = p.get("cost_basis")
-            mv   = p.get("market_value")
-            tg   = p.get("total_gain")
-            tg_pct = (tg / cost * 100) if (cost and tg is not None) else None
-            holdings.append({
-                "ticker": p.get("ticker"),
-                "quantity": p.get("quantity"),
-                "cost_basis": cost,
-                "market_value": mv,
-                "last_price": (latest_prices.get(p.get("ticker")) or {}).get("c"),
-                "total_gain": tg,
-                "total_gain_pct": round(tg_pct, 2) if tg_pct is not None else None,
-                "weight_pct": round((mv / total_mv * 100), 2) if (mv and total_mv) else None,
-                "dividends_gain": None,  # TODO: requires E*TRADE transactions or FMP dividend history
-            })
-        holdings.sort(key=lambda h: -(h.get("market_value") or 0))
+        holdings = _holdings_from(latest_positions, latest_balances, latest_prices)
 
         return _json({
             "window": window,

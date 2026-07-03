@@ -12,6 +12,7 @@ from shared.storage import (
     read_perf_series,
     read_snapshot,
     upsert_entity,
+    write_perf_quadrant_config,
     write_perf_series,
     write_snapshot,
 )
@@ -24,6 +25,8 @@ from shared.quadrants import (
     AMPLIFIER_INTL,
     CORE_ROSTER,
     EXEMPT_HOLDS,
+    QUADRANT_BENCHMARK_ETF,
+    QUADRANT_CONCENTRATE,
     active_quadrant,
     benchmark_etf_for,
     concentrate_names,
@@ -347,6 +350,9 @@ def _load_equity_spy_series(
     equity: float | None,
     spy_close: float | None,
     cash: float | None,
+    prices: dict | None = None,
+    growth_axis: dict | None = None,
+    inflation_axis: dict | None = None,
 ) -> list[dict]:
     """Compact, self-healing (date, equity, spy_close, cash_pct) series.
 
@@ -357,30 +363,57 @@ def _load_equity_spy_series(
     collector downloads each ~1 MB snapshot at most once ever; any missing prior
     day is backfilled from its snapshot, and today's point is taken from the
     in-memory values (today's snapshot blob isn't written yet). Phase C §4.
+
+    Each point also carries `closes` (CORE_ROSTER EOD closes) + `favored_bucket`
+    (the day's quadrant read) for the web quadrant-vs-SPY chart. Points written
+    before those fields existed are re-hydrated from their snapshot once (same
+    at-most-once-more property as the original backfill).
     """
     series = read_perf_series()
-    have = {p.get("date") for p in series}
+    by_date = {p.get("date"): p for p in series}
     changed = False
 
     for d in list_snapshot_dates():
-        if d >= today or d in have:
+        if d >= today:
+            continue
+        existing = by_date.get(d)
+        if existing is not None and "closes" in existing:
             continue
         try:
             snap = read_snapshot(d)
         except Exception:  # noqa: BLE001
+            continue
+        closes = _roster_closes(snap.get("prices"))
+        fav = favored_bucket(
+            ((snap.get("growth_axis") or {}).get("direction")),
+            ((snap.get("inflation_axis") or {}).get("direction")),
+        )
+        if existing is not None:
+            # v1 point predating the quadrant fields — patch in place.
+            existing["closes"] = closes
+            existing["favored_bucket"] = fav
+            changed = True
             continue
         eq = (snap.get("paper_account") or {}).get("equity")
         sp = ((snap.get("prices") or {}).get("SPY") or {}).get("c")
         if eq is None or sp is None:
             continue
         csh = (snap.get("paper_account") or {}).get("cash")
-        series.append(_perf_point(d, eq, sp, csh))
-        have.add(d)
+        point = _perf_point(d, eq, sp, csh, closes=closes, favored=fav)
+        series.append(point)
+        by_date[d] = point
         changed = True
 
     if equity is not None and spy_close is not None:
-        point = _perf_point(today, equity, spy_close, cash)
-        existing = next((p for p in series if p.get("date") == today), None)
+        point = _perf_point(
+            today, equity, spy_close, cash,
+            closes=_roster_closes(prices),
+            favored=favored_bucket(
+                (growth_axis or {}).get("direction"),
+                (inflation_axis or {}).get("direction"),
+            ),
+        )
+        existing = by_date.get(today)
         if existing != point:
             series = [p for p in series if p.get("date") != today]
             series.append(point)
@@ -395,14 +428,33 @@ def _load_equity_spy_series(
     return series
 
 
-def _perf_point(d: str, equity, spy_close, cash) -> dict:
+def _roster_closes(prices: dict | None) -> dict:
+    """EOD closes for the fixed core roster (the quadrant-basket members)."""
+    out = {}
+    for t in CORE_ROSTER:
+        c = ((prices or {}).get(t) or {}).get("c")
+        if c is not None:
+            out[t] = round(float(c), 4)
+    return out
+
+
+def _perf_point(
+    d: str, equity, spy_close, cash,
+    closes: dict | None = None,
+    favored: list | None = None,
+) -> dict:
     eq = round(float(equity), 2)
-    return {
+    point = {
         "date": d,
         "equity": eq,
         "spy_close": round(float(spy_close), 4),
         "cash_pct": round(float(cash) / eq * 100, 2) if (cash is not None and eq) else None,
     }
+    if closes is not None:
+        point["closes"] = closes
+    if favored is not None:
+        point["favored_bucket"] = favored
+    return point
 
 
 def _build_performance(series: list[dict]) -> dict:
@@ -986,8 +1038,18 @@ def run() -> None:
         today_equity = paper_account.get("equity") if paper_account.get("available") else None
         today_cash = paper_account.get("cash") if paper_account.get("available") else None
         today_spy = (prices.get("SPY") or {}).get("c")
-        series = _load_equity_spy_series(today, today_equity, today_spy, today_cash)
+        series = _load_equity_spy_series(
+            today, today_equity, today_spy, today_cash,
+            prices=prices, growth_axis=growth_axis, inflation_axis=inflation_axis,
+        )
         performance = _build_performance(series)
+        # Publish the quadrant basket membership for the web chart (the SWA API
+        # can't import shared/quadrants.py — this blob keeps it in lock-step).
+        write_perf_quadrant_config({
+            "quadrants": {q: list(names) for q, names in QUADRANT_CONCENTRATE.items()},
+            "benchmark_etf": dict(QUADRANT_BENCHMARK_ETF),
+            "as_of": today,
+        })
         logger.info(
             "Performance: days_live=%s ret=%s%% spy=%s%% excess=%spp cash=%s%%",
             performance.get("days_live"),
