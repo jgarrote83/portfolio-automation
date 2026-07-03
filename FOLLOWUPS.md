@@ -249,6 +249,9 @@ before the next unattended auto-exec run if possible; #30/#31 any session. Theme
 deterministic promises currently exceed deterministic enforcement — reference
 construction is airtight, the LLM-output→broker path is trusting.
 
+#32 (improvement ledger + /improvements tab) added — spec with #13, ship with/after
+it; monthly-only by decision (2026-07-03); daily analyzer untouched.
+
 **Environment notes (read before editing):** repo is mirrored to a fresh clone at
 `C:\dev\portfolio-automation` to escape OneDrive — if you're working from the
 OneDrive path still, the **OneDrive silent-revert hazard** applies (it clobbered
@@ -519,6 +522,9 @@ Standard, East US 2) but **PAYG default quota is 0** — needs the quota-increas
 Fable 5 quota in parallel, flip the setting when granted.** Review prompt must be built
 compact (aggregates/trends, not the raw snapshot) to fit 40K ITPM. Caveat recorded: a
 stronger proposer makes the falsifier/approval guardrails MORE important, not less.
+The monthly review's output now includes the #32 Improvement Ledger entries (≤5,
+evidence-triggered) — spec the two together; the ledger is the review's visible
+product, the amendment channel remains its only enforcement path.
 **Cadence note (2026-07-03, spec §8 event-driven exceptions):** `transition_watch`
 activation and a newly-active `market_vs_macro_quadrant` divergence (#18) should be
 explicit event-driven rebalance-exception triggers, so an early staged lean is never
@@ -837,6 +843,50 @@ say `TZ=America/New_York` so nobody "restores" the wrong setting. (ii) `stalenes
 no-magic-numbers rule. (iii) `gap_band_pp` is defined in config but consumed by no code
 until Finding 2's `reconcile` lands — verify that consumption landed with Finding 2 and
 close this bullet.
+
+### 32. Improvement Ledger — monthly self-improvement proposals + `/improvements` tab (MEDIUM-HIGH — spec WITH #13, ship with/after it)
+**Decided with the account holder 2026-07-03.** The system learns through three loops —
+daily outcome stamping (Phase C/5), regime-call accountability (#12), and the monthly
+amendment channel (#13) — but none of it is *observable as a pipeline*: there is no
+place where the system's own evidence-backed hypotheses about improving its forecasting
+are recorded, adjudicated, and traced to shipped changes. A free-form daily "ideas feed"
+was explicitly **REJECTED** (unfalsifiable noise, mild self-prompting risk, competes
+with the amendment channel). Adopted design: a structured ledger produced **only** by
+the monthly #13 review — Loop 3 made visible.
+- **Cadence & generation:** entries are emitted exclusively by the #13 monthly review
+  run (frontier model per the `747c0c3` two-tier decision). Cap ≤5 new entries per
+  review. Every entry must be **evidence-triggered from the accumulated record** — an
+  override falsified, a divergence that resolved against the classifier, a quadrant
+  call graded late/wrong by #12, a #23 lag measurement, a data-integrity incident. No
+  trigger, no entry. **The daily analyzer emits NOTHING to this ledger.**
+- **Schema (IMPROVEMENT_SCHEMA_V1, sibling of the OVERRIDE_SCHEMA record discipline):**
+  per entry: `observation` (dated, from the system's own record), `hypothesis` (what
+  change improves forecasting), `proposed_instrument` (concrete signal/config/rule),
+  `expected_effect` (measurable: lag days, hit rate, false-flip cost),
+  `falsifier_or_test` (how the #23 harness or a forward window would kill it),
+  `status: proposed | reviewed | promoted | adopted | rejected`, plus links (FOLLOWUPS
+  item / commit when promoted or adopted).
+- **Governance (the critical constraint, record verbatim):** ledger entries NEVER
+  change behavior directly. Promotion path: entry → #13 amendment proposal → account
+  holder approval → FOLLOWUPS item → implementation session → status `adopted` with
+  commit link. The ledger is a proposal surface for the EXISTING amendment channel,
+  not a second channel. Rejected entries stay visible with the rejection reason — the
+  negative record is part of the learning.
+- **Storage & UI:** `improvements/ledger.json` (or per-review files) in blob alongside
+  reports; new `/improvements` tab on the SWA next to `/today` and `/performance`:
+  pipeline view (proposed → promoted → adopted), a "graduated" section linking adopted
+  entries to their FOLLOWUPS item + commit, rejected entries greyed with reasons. New
+  read endpoint in `web/api` (Open #2 secrets-wipe hazard applies to any SWA work;
+  pairing with #4 preferred). UI is read-only v1 — adjudication happens in the #13
+  review + git, not in the browser.
+- **Prereqs:** #13 spec'd first (this item is spec'd WITH it — same session);
+  meaningful only once Phase 5 + #12 have accrued data; #23 is the preferred test
+  instrument for entries touching classifier signals. **Explicit non-goals:** daily
+  emission; auto-adoption; any write path from the LLM to config.
+- **Acceptance:** schema doc + validator tests; the first #13 review produces a ledger
+  with ≥1 evidence-triggered entry or an explicit "no qualifying evidence this cycle"
+  record; `/improvements` renders the pipeline; one entry demonstrably traced
+  observation → promotion → FOLLOWUPS → commit within two review cycles.
 
 ---
 
