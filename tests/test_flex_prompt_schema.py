@@ -38,7 +38,7 @@ def test_assertion_raises_when_markers_missing():
 
 def test_live_prompt_has_override_schema_markers():
     text = _PROMPT.read_text(encoding="utf-8")
-    assert "OVERRIDE_SCHEMA_V1" in text
+    assert "OVERRIDE_SCHEMA_V1_1" in text   # Finding 2: per-sleeve residual-cap schema
     assert "reference_weights" in text
     assert "overrides" in text
 

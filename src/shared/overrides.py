@@ -12,8 +12,15 @@ they are governed by the **de-risk / re-risk asymmetry** (strategy-spec §6):
 
 Structural gates apply to both directions: a falsifier + falsifier_date are mandatory,
 evidence must be clean (`clean_data_only` true and non-empty), the magnitude must sit within
-the Tier-2 band, and the direction must be valid. This module is PURE (no I/O) so it is fully
-unit-testable; the analyzer calls it after parsing the model output and before writing.
+the Tier-2 band, the direction must be valid, and (OVERRIDE_SCHEMA_V1_1 — Finding 2 D1) the
+record must name the single core `sleeve` it shelters. This module is PURE (no I/O) so it is
+fully unit-testable; the analyzer calls it after parsing the model output and before writing.
+
+Finding 2 (D1) semantics: `magnitude_pp` caps the RESIDUAL an override may shelter, not the
+move — for an out-of-band sleeve, `required_move_total = max(0, gap − max(allowed_residual,
+gap_band_pp))` MUST still trade (see `shared/reference_execution.py::reconcile`, which the
+analyzer runs after this validator). A hold-override can therefore shelter at most
+`max_magnitude_pp` of any gap; a rejected override shelters nothing.
 
 Note: an override can never *loosen* the deployment gate — `premise_challenged` is a reason to
 deviate from the reference *weights*, not a licence to buy Q1/Q2 beta while the gate is closed.
@@ -58,6 +65,7 @@ def validate_override(ov: dict, cfg: dict) -> dict:
     max_mag = float(cfg.get("max_magnitude_pp", OVERRIDE_DEFAULTS["max_magnitude_pp"]))
     re_risk_min = int(cfg.get("re_risk_min_evidence", OVERRIDE_DEFAULTS["re_risk_min_evidence"]))
 
+    sleeve = ov.get("sleeve")
     direction = ov.get("direction")
     premise = ov.get("premise_challenged")
     evidence = ov.get("evidence") or []
@@ -70,6 +78,10 @@ def validate_override(ov: dict, cfg: dict) -> dict:
         magnitude = None
 
     # --- structural gates (both directions) ---------------------------------
+    if not sleeve or not str(sleeve).strip():
+        reasons.append(
+            "missing sleeve — overrides are per-sleeve records (OVERRIDE_SCHEMA_V1_1)"
+        )
     if direction not in _VALID_DIRECTIONS:
         reasons.append(f"invalid direction {direction!r}")
     if not _premise_ok(premise or ""):

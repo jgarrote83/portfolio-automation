@@ -84,16 +84,13 @@ behavior-changing phase). The live checkpoint exposed 2 reference/override TUNIN
   scale) so it can no longer balloon. Verified on today's real snapshot: **GLD 32% / TLT 32% /
   SGOV 23.5% / AMZN 3.2% / GOOGL 5.4% / SPY,QQQ→floor** (was GOOGL 38%/AMZN 22%). Config
   `risk-limits.json → no_read_ballast`. 4 new tests, 186 green.
-- **⚠️ NEXT TASK — Finding 2 (override band vs large legit de-risk rotation), still open:** even
-  with the sane reference, today's gaps (buy GLD/TLT ~−30pp, trim SPY/QQQ +17/+14pp) exceed the
-  15pp Tier-2 override band, and **a rejected override still doesn't force an action** (silent-hold
-  gap — the exact failure Phase 4 targets). These gaps are gate-PERMITTED de-risk moves (trim
-  growth / buy ballast) the model should EXECUTE toward the reference (staged over sessions), not
-  file a hold-override for. Design options (in `memory/phase4-checkpoint-findings.md`): (a) prompt
-  executes toward the reference for gate-permitted de-risk instead of override-to-hold; (b) a
-  rejected override forces at least a partial trade toward reference; (c) per-sleeve (not basket)
-  override records; (d) a staged/partial override that passes the band. Fix Finding 2 before
-  brief Phase 5.
+- **Finding 2 (override band vs large legit de-risk rotation) ✅ FIXED 2026-07-03 (PR #11):**
+  even with the sane reference, the 2026-07-02/03 gaps (buy GLD/TLT ~−30pp, trim SPY/QQQ
+  +17/+14pp) exceeded the 15pp Tier-2 band, and **a rejected override still didn't force an
+  action** (silent-hold gap — the exact failure Phase 4 targets). Resolved as a combination
+  of design options (b)+(c)+(d): per-sleeve overrides that cap the RESIDUAL (D1), formalized
+  tranches (D2), and deterministic de-risk-only enforcement of shortfalls (D3). Details in
+  the Done entry. **Brief Phase 5 is now UNBLOCKED.**
 - **Phase 4 ✅ MERGED (PR #4, `a47d2e7` on master) — the PAYOFF phase, FIRST that changes report
   behavior; NOT merged):** the analyzer prompt now **consumes `reference_weights`/`divergences`/
   `transition_watch`** and executes toward the reference. §2 gains a Reference column + a
@@ -844,6 +841,48 @@ close this bullet.
 ---
 
 ## Done
+- **2026-07-03** (PR #11, branch `feat/finding2-band-enforcement`) — **Finding 2 FIXED:
+  the silent-hold gap is closed (OVERRIDE_SCHEMA_V1_1 + deterministic band
+  enforcement).** The gap: a hold of an out-of-band sleeve required an override; an
+  override >15pp was structurally rejected; a rejected override authorized nothing —
+  but nothing then FORCED a trade, so for any gap >15pp the protocol was unenforceable
+  (2026-06-30: correct defensive call, zero trades, "appropriately positioned";
+  2026-07-02/03: 30pp GLD/TLT gaps traded only because the model chose to). Three
+  locked decisions (the session prompt is the decision record — the memory design docs
+  are not on this box):
+  **D1 — overrides cap the RESIDUAL, not the move:** per out-of-band sleeve,
+  `required_move_total = max(0, gap − max(allowed_residual, gap_band_pp))` where the
+  residual comes only from an ACCEPTED/DOWNSIZED override for THAT sleeve (never
+  >15pp; rejected/absent ⇒ 0). Overrides became per-sleeve: mandatory `sleeve` field,
+  sentinel bumped to `OVERRIDE_SCHEMA_V1_1` (prompt + `assert_override_prompt_schema`
+  + validator in lockstep — a sleeve-less record is rejected).
+  **D2 — tranche formalization:** `required_move_today = min(required_move_total,
+  tranche_pp_max=10)`; a trade at ≥ tranche pace is CONFIRMING, first-class — this
+  makes the 2026-07-03 partial rotation legitimate by rule (replay test pins it:
+  zero synthesis).
+  **D3 — de-risk-only enforcement (option b + spec §6 asymmetry):** new PURE
+  `shared/reference_execution.py::reconcile` runs in the analyzer after
+  `validate_overrides`; where trades fall short of the tranche AND the corrective move
+  is de-risk (sell overweight Amplifier / buy underweight Damper-or-SGOV, classified
+  off `quadrants.py`), the shortfall is synthesized as a `source:"band_enforcement"`
+  trade appended to `trades[]` (executor untouched — it already reads the list; the
+  tag flows to daily-trades JSON + TradeHistory). Re-risk shortfalls are NEVER
+  synthesized, only `non_compliant_flagged` — quick to cut risk deterministically,
+  deliberate to add it. Synthesized trades respect integer shares, $115 min-notional,
+  sells-before-buys (sell proceeds fund the buys), cash-after-sells, the deployment
+  gate, EXEMPT_HOLDS (never force-sold), and a 20%-of-equity per-session enforcement
+  turnover cap. Config `risk-limits.json → reference_execution` (+ D1 semantics noted
+  in `_override_protocol_note`). OverrideHistory rows now carry `sleeve` +
+  `enforced: true` (rejected record enforced-against, or a synthetic `outcome:
+  "enforced"` row when no record existed) — the Phase-5 outcome loop will want both.
+  Prompt "Execute toward the reference" steps 4–5 rewritten (tranche default,
+  residual-shelter math, per-sleeve records, enforcement warning); asymmetry + Tier-1
+  bounds kept verbatim. 27 new tests incl. replays of the 2026-06-30 pathology (now
+  emits 3 enforcement trades inside the turnover cap) and the 2026-07-03 rotation
+  (confirming, zero synthesis); **suite 232 green, ruff clean.** The stale
+  `concentration_gap` stash was not found on this clone (it lived on the retired
+  OneDrive working copy) — nothing to drop. **Next: brief Phase 5 (override-outcome
+  stamping), now unblocked.**
 - **2026-07-03** (PR #10, branch `feat/policy-axis`) — **#16 policy axis automated
   (market-implied stance).** The classifier's policy leg was structurally dead:
   `fomc-stance.json` sat `unconfirmed` / `as_of: null` since inception, the gate could
