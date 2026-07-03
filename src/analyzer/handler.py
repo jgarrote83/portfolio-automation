@@ -25,7 +25,8 @@ from shared.storage import (
 )
 from shared.clients.foundry import FoundryClient
 from shared.overrides import OVERRIDE_DEFAULTS, validate_overrides
-from shared.quadrants import active_quadrant, benchmark_etf_for
+from shared.quadrants import CORE_ROSTER, EXEMPT_HOLDS, active_quadrant, benchmark_etf_for
+from shared.reference_execution import REFERENCE_EXECUTION_DEFAULTS, reconcile
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,27 @@ def _load_override_cfg() -> dict:
     except (FileNotFoundError, json.JSONDecodeError):
         return dict(OVERRIDE_DEFAULTS)
 
+
+def _load_reference_execution_cfg() -> dict:
+    """override_protocol + reference_execution + exempt_holds from risk-limits.json,
+    shaped for `shared.reference_execution.reconcile` (fallback to module defaults)."""
+    out = {
+        "override_protocol": dict(OVERRIDE_DEFAULTS),
+        "reference_execution": dict(REFERENCE_EXECUTION_DEFAULTS),
+        "exempt_holds": list(EXEMPT_HOLDS),
+    }
+    try:
+        data = json.loads(_RISK_LIMITS_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return out
+    for key in ("override_protocol", "reference_execution"):
+        block = data.get(key)
+        if isinstance(block, dict):
+            out[key] = {**out[key], **{k: v for k, v in block.items() if not k.startswith("_")}}
+    if isinstance(data.get("exempt_holds"), list):
+        out["exempt_holds"] = data["exempt_holds"]
+    return out
+
 # Prompt↔code schema gate for the Flex catalyst engine. The engine consumes
 # `flex_nominations` from the analyzer's output; if a stale/reverted prompt no
 # longer emits them (or the sentinel), the two engines silently desync. Fail
@@ -53,7 +75,9 @@ _FLEX_SCHEMA_SENTINELS = ("FLEX_SCHEMA_V1", "flex_nominations")
 # Prompt↔code gate for the Phase-4 override protocol: the live prompt must instruct the
 # model to consume `reference_weights` and emit the override-record schema, or the analyzer
 # is executing against a stale prompt that ignores the reference (the 2026-06-30 pathology).
-_OVERRIDE_SCHEMA_SENTINELS = ("OVERRIDE_SCHEMA_V1", "reference_weights", "overrides")
+# V1_1 (Finding 2): overrides became per-sleeve records with residual-cap semantics; a
+# prompt still on V1 would emit sleeve-less records the validator now rejects wholesale.
+_OVERRIDE_SCHEMA_SENTINELS = ("OVERRIDE_SCHEMA_V1_1", "reference_weights", "overrides")
 
 
 def assert_flex_prompt_schema(prompt: str) -> None:
@@ -168,6 +192,45 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
         logger.error("Override validation failed (non-fatal): %s", e)
         result = {"decisions": []}
 
+    # Finding 2 (D3) — deterministic band enforcement: reconcile the model's trades
+    # against the reference gaps. A de-risk shortfall below the required tranche is
+    # synthesized as a `source: "band_enforcement"` trade appended to trades[] (the
+    # executor already reads that list); a re-risk shortfall is only flagged (spec §6
+    # asymmetry). Enforcement decisions are stamped into the override decisions so
+    # OverrideHistory carries `enforced: true` for Phase 5. Non-fatal: an enforcement
+    # error must never lose the report/trades.
+    try:
+        gaps, ctx = _build_reference_gaps(snapshot)
+        if gaps:
+            rex_cfg = _load_reference_execution_cfg()
+            ctx["date"] = date_str
+            ctx["exempt_holds"] = rex_cfg["exempt_holds"]
+            recon = reconcile(
+                gaps, trades_obj.get("trades", []), result.get("decisions", []),
+                rex_cfg, ctx,
+            )
+            trades_obj["reference_execution"] = {
+                "sleeves": recon["sleeves"],
+                "summary": recon["summary"],
+                "enforcement_notional_usd": recon["enforcement_notional_usd"],
+            }
+            if recon["enforced_trades"]:
+                merged = list(trades_obj.get("trades", [])) + recon["enforced_trades"]
+                # Keep the executor's sells-before-buys contract across the merge
+                # (stable sort preserves model order within each side).
+                trades_obj["trades"] = sorted(
+                    merged, key=lambda t: str(t.get("side", "")).lower() != "sell"
+                )
+                _stamp_enforced_decisions(result.setdefault("decisions", []), recon)
+            logger.info(
+                "Reference execution: %s, enforced_notional=$%.0f",
+                recon["summary"], recon["enforcement_notional_usd"],
+            )
+        else:
+            logger.info("Reference execution: no gaps computable (reference/account absent)")
+    except Exception as e:  # noqa: BLE001
+        logger.error("Band enforcement failed (non-fatal): %s", e)
+
     write_report(date_str, report_md)
     write_trades(date_str, trades_obj)
     _write_trade_history(date_str, trades_obj, snapshot)
@@ -177,6 +240,108 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
         "=== Analyzer completed for %s — %d trades recommended ===",
         date_str, len(trades_obj.get("trades", [])),
     )
+
+
+# ---------------------------------------------------------------------------
+# Reference execution (Finding 2 — input assembly for shared/reference_execution.py)
+# ---------------------------------------------------------------------------
+
+def _build_reference_gaps(snapshot: dict) -> tuple[list[dict], dict]:
+    """Per-sleeve current-vs-reference rows + account context for `reconcile()`.
+
+    Universe = the reference `target_weights_pct` keys ∪ held core-roster names (a held
+    core name missing from the targets counts as target 0). The cash/SGOV sleeve is
+    governed by its own band, not the per-sleeve gap protocol — SGOV appears only if
+    the reference explicitly targets it. Returns ([], {}) when the reference or the
+    paper account is unavailable (enforcement then has nothing to reconcile against).
+    """
+    ref = snapshot.get("reference_weights") or {}
+    targets = ref.get("target_weights_pct") or {}
+    pa = snapshot.get("paper_account") or {}
+    try:
+        equity = float(pa.get("equity") or 0)
+    except (TypeError, ValueError):
+        equity = 0.0
+    if not targets or equity <= 0:
+        return [], {}
+
+    positions = {
+        str(p.get("ticker") or "").upper(): p
+        for p in (pa.get("positions") or []) if p.get("ticker")
+    }
+    prices = snapshot.get("prices") or {}
+
+    def _price(sym: str) -> float | None:
+        row = prices.get(sym)
+        c = row.get("c") if isinstance(row, dict) else None
+        if c is None:
+            c = (positions.get(sym) or {}).get("current_price")
+        try:
+            px = float(c)
+            return px if px > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    gaps = []
+    universe = {str(t).upper() for t in targets} | (set(positions) & set(CORE_ROSTER))
+    for sym in sorted(universe):
+        try:
+            mv = float((positions.get(sym) or {}).get("market_value") or 0)
+        except (TypeError, ValueError):
+            mv = 0.0
+        gaps.append({
+            "symbol": sym,
+            "current_pct": round(mv / equity * 100.0, 4),
+            "reference_pct": round(float(targets.get(sym, 0.0) or 0.0), 4),
+            "price": _price(sym),
+        })
+    ctx = {
+        "deployment_gate": (snapshot.get("regime_gate") or {}).get("status"),
+        "equity_usd": equity,
+        "cash_usd": float(pa.get("cash") or 0),
+    }
+    return gaps, ctx
+
+
+def _stamp_enforced_decisions(decisions: list[dict], recon: dict) -> None:
+    """Mark the override decisions enforcement fired against (Phase-5 hook).
+
+    For each enforced sleeve: a REJECTED record naming that sleeve is stamped
+    `enforced: true`; with no record at all a synthetic decision (outcome
+    `"enforced"`) is appended so OverrideHistory still carries one row per
+    enforcement event. Accepted/downsized records are never stamped — enforcement
+    only fires on the gap remainder their residual does not shelter.
+    """
+    for sym, entry in (recon.get("sleeves") or {}).items():
+        if entry.get("status") != "enforced":
+            continue
+        trade = entry.get("enforced_trade") or {}
+        stamped = False
+        for dec in decisions:
+            ov = dec.get("override") or {}
+            if (dec.get("outcome") == "rejected"
+                    and str(ov.get("sleeve") or "").upper() == sym):
+                dec["enforced"] = True
+                dec.setdefault("reasons", []).append(
+                    f"band enforcement synthesized trade {trade.get('id')} against "
+                    "this rejected record"
+                )
+                stamped = True
+        if not stamped:
+            decisions.append({
+                "outcome": "enforced",
+                "enforced": True,
+                "override": {
+                    "sleeve": sym,
+                    "direction": "de_risk",
+                    "magnitude_pp": entry.get("required_move_today_pp"),
+                },
+                "reasons": [
+                    f"band enforcement fired with no override record — synthesized "
+                    f"trade {trade.get('id')} "
+                    f"({entry.get('required_move_today_pp')}pp tranche)"
+                ],
+            })
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +537,7 @@ def _write_trade_history(date_str: str, trades_obj: dict, snapshot: dict | None 
                 "side":                 t.get("side", ""),
                 "symbol":               t.get("symbol", ""),
                 "layer":                t.get("layer", ""),
+                "source":               t.get("source") or "",   # "band_enforcement" for D3 synthesis
                 "flex_source":          t.get("flex_source") or "",
                 "quantity":             int(t.get("quantity") or 0),
                 "order_type":           t.get("order_type", ""),
@@ -421,8 +587,10 @@ def _write_override_history(date_str: str, decisions: list[dict], snapshot: dict
                 "PartitionKey":        year_month,
                 "RowKey":              row_key,
                 "recommended_at":      date_str,
-                "outcome":             dec.get("outcome", ""),          # accepted|downsized|rejected
+                "outcome":             dec.get("outcome", ""),          # accepted|downsized|rejected|enforced
                 "validator_reasons":   "; ".join(dec.get("reasons", []))[:32000],
+                "sleeve":              (ov.get("sleeve") or "").upper(),  # per-sleeve (V1_1)
+                "enforced":            bool(dec.get("enforced", False)),  # Finding 2 D3 stamp
                 "premise_challenged":  ov.get("premise_challenged", ""),
                 "direction":           ov.get("direction", ""),
                 "magnitude_pp":        ov.get("magnitude_pp"),

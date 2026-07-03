@@ -21,8 +21,9 @@ CFG = dict(OVERRIDE_DEFAULTS)  # max_magnitude_pp=15, re_risk_min_evidence=2, ga
 
 
 def _ov(**kw):
-    """A well-formed de-risk override; override fields via kwargs."""
+    """A well-formed per-sleeve de-risk override (V1_1); override fields via kwargs."""
     base = {
+        "sleeve": "SPY",
         "premise_challenged": "divergence:leading_vs_lagging_inflation",
         "direction": "de_risk",
         "magnitude_pp": 5.0,
@@ -134,6 +135,15 @@ def test_bare_premise_accepted():
 def test_non_numeric_magnitude_rejected():
     d = validate_override(_ov(magnitude_pp="a lot"), CFG)
     assert d["outcome"] == "rejected"
+
+
+def test_missing_sleeve_rejected():
+    """V1_1 (Finding 2 D1): overrides are per-sleeve — a sleeve-less record shelters
+    nothing and is rejected outright."""
+    for bad in (None, "", "   "):
+        d = validate_override(_ov(sleeve=bad), CFG)
+        assert d["outcome"] == "rejected"
+        assert any("sleeve" in r for r in d["reasons"])
 
 
 # --- batch API --------------------------------------------------------------
