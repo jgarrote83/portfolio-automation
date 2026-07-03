@@ -499,6 +499,17 @@ adopted under ~n=30; every adopted amendment gets its own outcome stamp. Include
 — membership stays deterministic, the LLM gets *proposal* rights, never direct edit.
 **Prereqs: Finding 2 fix → brief Phase 5 (override-outcome stamping) → #12.** Spec
 before building.
+**Model decision (account holder, 2026-07-02): the review runs on a stronger model than
+the daily analyzer** — two-tier design: daily stays claude-sonnet-4-6 (80K ITPM fits the
+~72K prompt; guarded execution doesn't need frontier reasoning), review uses the best
+deployable frontier model via a new `FOUNDRY_REVIEW_MODEL` app setting (Bicep) +
+`FoundryClient(model=...)` (already parametrized). Foundry facts (verified in MS Learn
+2026-07-02): `claude-fable-5` IS in the Foundry catalog (Anthropic-hosted, Global
+Standard, East US 2) but **PAYG default quota is 0** — needs the quota-increase form;
+`claude-opus-4-8` has 40K ITPM by default → **deploy Opus 4.8 as the floor, request
+Fable 5 quota in parallel, flip the setting when granted.** Review prompt must be built
+compact (aggregates/trends, not the raw snapshot) to fit 40K ITPM. Caveat recorded: a
+stronger proposer makes the falsifier/approval guardrails MORE important, not less.
 
 ### 14. Intra-quadrant selection freedom (MEDIUM, spec with #13)
 Loosen the reference *within* a quadrant only: the deterministic layer keeps setting the
@@ -508,7 +519,10 @@ single-name caps still hold, tilt logged like an override with evidence (e.g. "V
 PDBC: contango + refiner margins"). Uses LLM judgment at the altitude where it has daily
 data without letting it redefine its own benchmark (rejected: LLM-defined basket
 membership — circular anchor, breaks attribution). Small extension of the override
-protocol; spec alongside #13.
+protocol; spec alongside #13. **Cadence + model:** lean toward setting the intra-quadrant
+tilts at the #13 review cadence on the stronger model (slow-moving composition decisions
+get the deeper reasoner), with daily Sonnet executing toward them — also sidesteps the
+40K-ITPM ceiling that blocks frontier models from the ~72K daily prompt.
 
 ---
 
