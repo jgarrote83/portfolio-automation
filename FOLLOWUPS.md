@@ -240,6 +240,10 @@ barbell doctrine (`295f5b9`).
    single names (INTC/AMZN/GOOGL/MCK) into flex + a new convexity/ballast bucket
    for KMLM (token floor, scale up on stress). Not yet drafted.
 
+Forecasting track added (#15–#23): #15/#16 are standalone data-integrity fixes safe to
+do any session; #17/#18 follow Finding 2 + Phase 5 alongside #12; #23 gates the tuning
+of everything in the track.
+
 **Environment notes (read before editing):** repo is mirrored to a fresh clone at
 `C:\dev\portfolio-automation` to escape OneDrive — if you're working from the
 OneDrive path still, the **OneDrive silent-revert hazard** applies (it clobbered
@@ -510,6 +514,11 @@ Standard, East US 2) but **PAYG default quota is 0** — needs the quota-increas
 Fable 5 quota in parallel, flip the setting when granted.** Review prompt must be built
 compact (aggregates/trends, not the raw snapshot) to fit 40K ITPM. Caveat recorded: a
 stronger proposer makes the falsifier/approval guardrails MORE important, not less.
+**Cadence note (2026-07-03, spec §8 event-driven exceptions):** `transition_watch`
+activation and a newly-active `market_vs_macro_quadrant` divergence (#18) should be
+explicit event-driven rebalance-exception triggers, so an early staged lean is never
+stranded until the monthly rebalance — evidence 2026-07-03: a 30pp GLD/TLT gap executing
+in tranches has no cadence guarantee if the calendar and the turn disagree.
 
 ### 14. Intra-quadrant selection freedom (MEDIUM, spec with #13)
 Loosen the reference *within* a quadrant only: the deterministic layer keeps setting the
@@ -523,6 +532,180 @@ protocol; spec alongside #13. **Cadence + model:** lean toward setting the intra
 tilts at the #13 review cadence on the stronger model (slow-moving composition decisions
 get the deeper reasoner), with daily Sonnet executing toward them — also sidesteps the
 40K-ITPM ceiling that blocks frontier models from the ~72K daily prompt.
+
+### 15. GDPNow vintage fetch goes blind at every quarter boundary (HIGH — bug, standalone)
+**Live evidence (2026-07-03 report):** `GDPNOW_VINTAGES` empty for the 3rd consecutive
+day — since 2026-07-01, exactly the Q3 calendar boundary. Growth axis degraded to
+`cross_quarter_fallback` / low confidence; regime went indeterminate; Risk Score 9/10
+partly on a data artifact. **Root cause (already located):** the collector's FRED block
+sets `realtime_start = _q_start` (first day of the current calendar quarter) and then
+filters `r.get("date") == _q_start` — at every quarter turn this guarantees an empty
+(then <3-vintage) trajectory until the Atlanta Fed has published 3+ estimates for the
+new quarter: a recurring multi-week blind window at every quarter start (~8+ weeks/year),
+hitting exactly when a fresh growth read matters most.
+- **Design:** when current-quarter vintages < 3, extend `realtime_start` back one
+  quarter and splice in the tail of the prior quarter's vintage trajectory (the forecast
+  for the just-ended quarter), oldest-first, labeled `basis: "prior_quarter_tail"` at
+  medium confidence — never emit an empty trajectory while FRED has vintages. Once the
+  new quarter has ≥3 of its own, back to `within_quarter_vintages` / high confidence as
+  today. Pure-function change in `_build_growth_axis` input prep + the fetch window;
+  unit tests pin the boundary week.
+- **Prereqs:** none — standalone collector fix, safe any session. **Acceptance:** a
+  simulated quarter-boundary snapshot yields a non-empty trajectory and a non-fallback
+  growth axis.
+
+### 16. Automate the policy axis — market-implied stance (HIGH — standalone)
+**Live evidence (2026-07-03 report):** `fomc_stance.as_of = null`, stance `unconfirmed`
+since inception — the gate is *structurally unable to confirm Q1* until a human edits a
+JSON file. The policy leg of the classifier is effectively dead in production.
+- **Design:** new deterministic `policy_axis` precompute from series already collected —
+  DGS2 20d delta vs DFF. DGS2 rising ≥ +20bp/20d and sitting above DFF →
+  `hawkish_repricing`; falling ≤ −20bp/20d or DGS2 well below DFF → `dovish_repricing`;
+  else `neutral` (thresholds in config, no magic numbers in code). `fomc-stance.json`
+  becomes an **override layer**: if its `as_of` is within 45 days it governs
+  (SEP/dot-plot beats a market proxy); stale/null → market-implied governs. Emit both +
+  an agreement flag; `unconfirmed` should now occur only when *both* are unavailable.
+  Gate semantics unchanged (fail-closed on hawkish) — only the permanent-null pathology
+  is removed.
+- **Prereqs:** none — standalone. **Acceptance:** on the 2026-07-03 snapshot the policy
+  axis resolves (DGS2 momentum readable) instead of `unconfirmed`; the
+  manual-file-fresh case still wins in tests.
+
+### 17. Leading-growth composite + growth-side `transition_watch` (HIGH — the biggest forecasting gap)
+The inflation axis has a leading layer (breakevens + oil → `leading_vs_lagging_inflation`
+→ transition lean). The growth axis has **none** — GDPNow is a coincident nowcast and its
+confirming inputs (payrolls, retail) are lagging and revision-prone, so the growth axis
+flips ~1–3 months after markets reprice. Mirror the proven inflation-side pattern onto
+growth — which simultaneously builds the spec §6 re-entry triggers ("the biggest gap
+between strategy and automation"): the same composite turning up while realized growth
+is flat *is* the staged re-entry signal.
+- **New FRED series (add to `macro-series.json`):** `WEI` (Weekly Economic Index —
+  weekly GDP tracker, turns weeks before GDPNow), `PERMIT` (building permits),
+  `NEWORDER` (core capex orders, nondefense ex-aircraft), `NOCDFSA066MSFRBPHI` (Philly
+  Fed new orders), `GACDISA066MSFRBNY` (Empire State general activity) — the regional
+  Fed surveys print mid-month for the *current* month, the earliest monthly growth data
+  that exists — and `NFCI` (weekly financial conditions).
+- **Market-derived inputs (FMP prices already fetched):** copper/gold ratio (CPER/GLD
+  proxies), cyclicals/defensives (XLY/XLP) 20/60d, plus HY OAS 20d *direction* (level
+  already collected; direction currently unused).
+- **Design:** diffusion score in [−1, +1] (fraction of signals improving, weighted;
+  claims 4w-avg trend promoted from display-only "confirming" to an input).
+  Disagreement with the realized growth axis → new divergence
+  `leading_vs_lagging_growth` (thresholds in `divergence-config.json`; stale input →
+  `indeterminate`, never a false active — house rule). Generalize
+  `_build_transition_watch` to consume growth-side divergences symmetrically with
+  inflation-side (project the quadrant on the growth axis; same de-risk/re-risk
+  asymmetry and staged fractions; reuse, never re-derive). LLM adjudicates in §2 per
+  the Phase-4 pattern.
+- **Prereqs:** Finding 2 fixed (transition leans must be executable, not silently
+  held); sequence alongside #12. **Acceptance:** unit tests for the diffusion +
+  divergence + growth-side projection; on a replayed 2026-06 snapshot the composite
+  produces a directional read where the binary axis said flat.
+
+### 18. `market_implied_quadrant` block + `market_vs_macro_quadrant` divergence (HIGH)
+**Live evidence (2026-07-03 report):** the book proposed selling ~$51K of equities into
+a tape above its 200d SMA, on a *low-confidence* flat growth read — while
+`price_vs_regime` sat `indeterminate` because it requires a concrete `active_quadrant`
+and the regime was borderline. I.e. the one tape-vs-macro check goes blind exactly at
+borderline regimes, when it is most needed. Also: DTWEXBGS was 7d stale, blinding the
+dollar switch.
+- **Design:** compute which quadrant the cross-asset tape is pricing, from data already
+  collected: relative 20/60d momentum of the four equal-weight `QUADRANT_CONCENTRATE`
+  baskets (plumbing exists — `performance/equity-series.json` closes +
+  `_quadrant_series`), plus per-signal votes: copper/gold, XLY/XLP, DXY trend,
+  breakevens direction, HY OAS direction, 2s10s re-steepening. Emit
+  `market_implied_quadrant` + confidence + the per-vote table. New divergence
+  `market_vs_macro_quadrant` fires on disagreement with
+  `active_quadrant`/`favored_bucket` — it **works at borderline regimes by design** (the
+  implied quadrant needs no macro axis), superseding `price_vs_regime`'s blind spot
+  (keep the old detector; note the overlap). Describe-only; the LLM adjudicates
+  (Phase-4 pattern). Thresholds in `divergence-config.json`, no magic numbers in code.
+  Rationale to record: *the system cannot be later than the market if the market's own
+  vote is one of its inputs* — historically when tape and realized macro disagree at
+  turns, the tape is early more often than wrong (2022 the canonical case).
+- **Sub-item — dollar staleness:** when DTWEXBGS is >5d stale, derive a daily dollar
+  proxy from the already-collected daily FX pairs (DEXUSEU/DEXJPUS/DEXCHUS,
+  trade-weight-ish fixed blend) or UUP via FMP, so the switch and `dollar_vs_intl_tilt`
+  never run blind.
+- **Prereqs:** after Finding 2; natural companion to #12 (same basket data).
+  **Acceptance:** on the 2026-07-03 snapshot the block emits a concrete implied
+  quadrant with votes, and the new divergence fires `active` (tape risk-on vs macro
+  defensive) rather than `indeterminate`.
+
+### 19. Inflation-quality FRED adds — sticky/flexible CPI, trimmed-mean PCE, expectations (MEDIUM — trivial)
+Four lines in `macro-series.json` + small axis-payload additions:
+`CORESTICKM159SFRBATL` (sticky core CPI — persistence), `FLEXCPIM159SFRBATL` (flexible
+CPI — turns first; a natural extra leading confirmation for the re-risk bar in
+`transition_watch`), `PCETRIM12M159SFRBDAL` (Dallas trimmed-mean PCE — cleaner
+underlying trend than core), `MICH` (1y household expectations). Wire as secondary
+confirmations into `_build_inflation_axis` diagnostics and as an optional third
+confirmation signal in the leading-inflation divergence.
+- **Prereqs:** none. **Acceptance:** series in snapshot; flexible-CPI direction
+  surfaced in the divergence basis.
+
+### 20. Poor-man's economic surprise index from the FMP economic calendar (MEDIUM)
+Both axes measure rate-of-change of *data*; markets reprice on data vs *consensus*. A
+surprise measure is the closest direct read on "what isn't priced yet."
+- **Design:** FMP's economic-calendar endpoint carries consensus estimate + actual
+  (**verify the current FMP tier exposes it within the 250 req/day budget — if not,
+  park this item with that note**). Compute rolling 30/60d surprise diffusions split
+  growth-series vs inflation-series; emit a `surprise_index` block. Consumers: extra
+  confirmation input to both `transition_watch` sides; a `data_vs_expectations` context
+  line in §2; input to the #13 monthly review.
+- **Prereqs:** #17 (so it has a growth-side consumer). **Acceptance:** block populates
+  with ≥10 releases scored; graceful `indeterminate` when the endpoint is unavailable.
+
+### 21. Shelter lead for the inflation axis (MEDIUM)
+Shelter is ~35% of CPI and lags new-lease reality by 9–12 months — the best-documented
+single inflation lead available. It called both the 2021 upturn and 2023 downturn
+quarters early.
+- **Design:** small fetcher for the BLS New Tenant Rent Index (quarterly) and/or the
+  Apartment List national index / Zillow ZORI (free CSV downloads; new client under
+  `shared/clients/`, respect the no-secrets rule — these are unauthenticated). Emit
+  `shelter_lead` (new-lease YoY vs CPI shelter YoY + implied direction) and add it as a
+  third basis signal to `leading_vs_lagging_inflation`. Non-FRED sources are
+  lower-reliability — staleness handling mandatory (>45d → indeterminate).
+- **Prereqs:** none hard; natural after #19. **Acceptance:** signal present with an
+  as-of date; divergence basis includes it when fresh.
+
+### 22. Probabilistic quadrant vector (MEDIUM-HIGH — after #17/#18)
+Binary `rising/falling/flat` axes freeze at the borderline exactly when the transition
+is happening, then snap. Continuous scores let positioning scale with confidence —
+mechanically how a system gets *ahead* of a hard flip. The convex-blend machinery
+(borderline intersection, transition leans) already exists; it lacks a continuous
+driver.
+- **Design:** each axis emits a score in [−1, +1] (from the #17 growth composite / the
+  realized+leading inflation stack), combined into P(Q1..Q4). `_build_reference_weights`
+  blends across quadrant targets proportional to P (borderline handling becomes the
+  natural special case, not a separate code path); `transition_watch` staged fractions
+  become functions of the P-shift, still capped by the existing config maxima and the
+  de-risk/re-risk asymmetry. Binding `active_quadrant`/`regime_gate` stay binary and
+  untouched (echo contract unchanged) — P drives only the reference blend. Explicitly a
+  *weighted composite*, not an HMM — auditability over sophistication, per the
+  deterministic-echo doctrine.
+- **Prereqs:** #17 + #18 shipped; tune only under #23. **Acceptance:** reference
+  weights vary smoothly with P in tests; today's binary outputs reproduce as the
+  degenerate case (P concentrated on one quadrant).
+
+### 23. ALFRED point-in-time backtest harness + signal-admission rule (HIGH value — gates the whole track)
+The system cannot improve classifier lag it cannot measure. #12 measures forward from
+inception only; without point-in-time reconstruction every proposed signal is vibes —
+and revised data makes naive backtests lie (payrolls revisions especially).
+- **Design:** offline script(s) in `scripts/` (NOT the collector) using FRED's ALFRED
+  realtime parameters (`fred.get_series_vintages` already exists) to reconstruct, for
+  each historical date, what `growth_axis` / `inflation_axis` / `active_quadrant`
+  *would have said with only the data known that day*. Score median flip lag (days) vs
+  the known regime turns: 2007–08, Feb–Mar 2020, the 2020–21 reflation, the 2022
+  stagflation flip, the 2023 disinflation. **Pre-registered admission rule: no new
+  signal enters a composite unless it demonstrably reduces median point-in-time flip
+  lag without materially increasing false flips.** Output feeds the #13 monthly review
+  as its yardstick; also produces the calibration data #22 needs. Market-derived inputs
+  (#18) need point-in-time prices — FMP historical EOD suffices (prices aren't
+  revised).
+- **Prereqs:** none to build the harness; it becomes the gate for tuning #17/#18/#22
+  and for #13 amendment proposals touching classifier params. **Acceptance:** harness
+  reproduces the current axes on recent live dates (parity check) and emits a lag table
+  for ≥3 historical turns.
 
 ---
 
