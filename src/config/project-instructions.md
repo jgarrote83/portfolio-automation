@@ -314,11 +314,18 @@ the datum the block cites, and its as-of date.
   collapsing is flagged as a rear-view artifact and classified by core. **Echo
   `inflation_axis.direction`.** Breakevens are secondary — do **not** call the axis
   "falling" off falling breakevens while `inflation_axis.direction` says otherwise.
-- **Policy stance = `fomc_stance.stance`** (`hawkish` / `neutral` / `dovish` /
-  `unconfirmed`), maintained in `config/fomc-stance.json` because the dot-plot/SEP and
-  FedWatch odds are not FRED series. **A `hawkish` stance is incompatible with Q1.**
-  If `stance == "unconfirmed"`, policy **cannot confirm a Q1 call** and you must deploy
-  cautiously — do **not** write "not hawkish" from absent data. Note the `as_of` age.
+- **Policy stance = `policy_axis.stance`** (`hawkish` / `neutral` / `dovish` /
+  `unconfirmed`), resolved deterministically from two layers — **echo it with its
+  `policy_axis.source`; never re-derive from raw yields.** A fresh manual SEP/dot-plot
+  stance (`config/fomc-stance.json`, `source: "manual_fresh"`) governs; when that file
+  is stale/null the market-implied stance from DGS2 20-session momentum governs
+  (`source: "market_implied"`; the numbers are in `policy_axis.market_implied`:
+  `dgs2_delta_20d_bp`, `spread_bp` vs funds). **A `hawkish` stance is incompatible
+  with Q1.** If `stance == "unconfirmed"` (both layers unavailable), policy **cannot
+  confirm a Q1 call** and you must deploy cautiously — do **not** write "not hawkish"
+  from absent data. If `policy_axis.agreement == false` (manual and market-implied
+  disagree), surface the tension in Section 2. `fomc_stance` remains the raw manual
+  echo; note its `as_of` age when it is the governing layer.
 - **Geopolitical / energy overlay:** the last ~30 days of major-power trade,
   tariff, sanction, conflict, and supply-chain news. An acute energy /
   Strait-of-Hormuz shock is a stagflation vector — but judge it by the **oil price
@@ -338,7 +345,8 @@ actually had in-date:
 | input | value | as-of date | STALE (>5d)? | source |
 |---|---|---|---|---|
 
-At minimum cover: GDPNow, core CPI, core PCE, the FOMC stance/dot-plot, fed funds,
+At minimum cover: GDPNow, core CPI, core PCE, the policy stance (`policy_axis` —
+cite the governing layer: manual dot-plot `as_of` or DGS2 20d delta), fed funds,
 real 10y, HY OAS, and oil. **Flag anything older than 5 calendar days as STALE**, and
 flag any primary classifier that is *missing entirely* — a missing growth/policy
 input is a blind spot you must name, not paper over.
@@ -375,7 +383,7 @@ authorize buying Q1/Q2 beta when the gate is shut.
 
 The rule `regime_gate` applies (stated in `regime_gate.rule`): **OPEN only when
 `growth_axis.direction == "rising"` AND `inflation_axis.direction != "rising"` AND
-`fomc_stance.stance != "hawkish"`; otherwise CLOSED.** A `growth_axis` of
+`policy_axis.stance != "hawkish"`; otherwise CLOSED.** A `growth_axis` of
 `falling` / `flat` / `indeterminate` closes it. An `unconfirmed` policy stance does
 not by itself close the gate but is flagged in `regime_gate.policy_note` and means
 you deploy cautiously and cannot claim a confirmed Q1.
@@ -588,7 +596,7 @@ A single number describing your confidence in the quadrant call and the next
 - **9–10:** no actionable read; recommend defensive posture — overweight GLD + long-duration Treasuries (TLT) and push the cash sleeve toward its 15% ceiling (defense via duration/gold, not by hoarding cash beyond the sleeve).
 
 A **missing or stale primary axis** (GDPNow for growth, core CPI/PCE for inflation,
-the FOMC stance for policy) is "key data missing" — it pushes the score toward **7–8**,
+the resolved `policy_axis` for policy) is "key data missing" — it pushes the score toward **7–8**,
 not toward a confident low number. You cannot hold high conviction (low score) on a
 regime call whose growth or policy axis you could not actually read.
 
@@ -662,9 +670,11 @@ A single JSON snapshot for one trading day containing:
   `ICSA`/`CCSA`, `RSAFS`. Inflation: `CPILFESL` (core CPI), `PCEPILFE` (core PCE),
   headline `CPIAUCSL`/`PCEPI`, `PPIACO`, breakevens `T5YIFR`/`T5YIE`/`T10YIE`.
   Policy/rates: `DFF`, yields, `DFII10`, FX. Energy: `DCOILWTICO`/`DCOILBRENTEU`.
-  **Note:** the FOMC dot-plot / SEP and FedWatch odds are NOT FRED series — policy
-  stance comes from `fomc_stance`. Monthly inflation series carry ≥13 months for YoY;
-  some prints lag a few weeks — always cite the as-of date.
+  **Note:** the FOMC dot-plot / SEP and FedWatch odds are NOT FRED series — the
+  resolved policy stance comes from `policy_axis` (fresh manual SEP layer, else
+  market-implied DGS2 momentum); `fomc_stance` is the raw manual file. Monthly
+  inflation series carry ≥13 months for YoY; some prints lag a few weeks — always
+  cite the as-of date.
 - `news.market` / `news.forex` / `news.company` — recent news headlines per scope
 - `stock_news` — FMP per-ticker stock news
 - `congressional_trades` — recent disclosures from Quiver (or FMP fallback)
@@ -676,8 +686,9 @@ A single JSON snapshot for one trading day containing:
 - `market_shock` — short-horizon shock detector: 1d/5d price moves (SPY/DXY/VIX) with z-scores + news keyword scan, composite `shock_level` 0-3 with `triggers` and `news_examples`
 - `growth_axis` — **pre-computed growth-direction read** (the quadrant growth axis): `direction` (`rising`/`falling`/`flat`/`indeterminate`) from the GDPNow current-quarter vintage trajectory (`gdpnow_trajectory`, oldest→newest), `confidence`, `basis`, and `confirming` hard data. **Echo `direction`.**
 - `inflation_axis` — **pre-computed inflation-direction read**: `direction` from realized core (PCE-first) 3m-annualized vs YoY, with headline CPI + an oil-price-trend energy overlay (`oil_wti_20d_pct`/`oil_brent_20d_pct`); breakevens secondary. **Echo `direction`.**
-- `fomc_stance` — policy stance from `config/fomc-stance.json` (`stance`: hawkish/neutral/dovish/unconfirmed + `as_of`). The dot-plot/SEP and FedWatch odds are not FRED series, so this is manually maintained; `unconfirmed` cannot confirm Q1.
-- `regime_gate` — **pre-computed deployment gate**: `status` (`open`/`closed`), `reasons`, `policy_note`, derived from the two axes + stance. **Echo `status` into `deployment_gate`.**
+- `fomc_stance` — the RAW manually-maintained stance file (`config/fomc-stance.json`: `stance` + `as_of`), kept for reference. **The stance you must use is the resolved `policy_axis`.**
+- `policy_axis` — **pre-computed RESOLVED policy stance**: `stance` (hawkish/neutral/dovish/unconfirmed) + `source` (`manual_fresh` / `market_implied` / `unconfirmed`), `market_implied` (`stance`, `dgs2_latest`, `dff_latest`, `dgs2_delta_20d_bp`, `spread_bp`), `manual` (echo + `fresh`), `agreement` (null when either layer is unavailable), `note`. A fresh manual SEP/dot-plot governs; else DGS2 20d momentum; `unconfirmed` only when both are unavailable. **Echo `stance` + `source`.**
+- `regime_gate` — **pre-computed deployment gate**: `status` (`open`/`closed`), `reasons`, `policy_note`, derived from the two axes + the resolved `policy_axis` stance (see `derived_from.policy_source`). **Echo `status` into `deployment_gate`.**
 - `reference_weights` — **the deterministic per-ticker target allocation the book executes toward** (strategy-spec §10). `target_weights_pct` (per-ticker % of equity), `active_quadrant`/`favored_bucket`/`borderline`, `conviction_proxy`+label, `active_quadrant_target_pct_of_core`, `ceiling_pct_of_core`, `dollar_tilt`, `transition_lean` (the Phase-3 lean, already applied), `cash_sleeve_target_pct`, `binding`. **This is the reference you reason against and execute toward via the OVERRIDE_SCHEMA_V1 protocol (Section 2).** Absent ⟹ paper account unavailable; fall back to the qualitative quadrant call and say so.
 - `divergences` — the pre-computed **tension detector** (list): each `{id, description, signals, direction_implied, status}` flags two signals that should agree but don't (leading-vs-lagging inflation, credit complacency, price-vs-regime, dollar-vs-intl). **You adjudicate them** (they are not resolved for you); an `active` one may serve as override evidence, an `indeterminate` one may not. Surface them in Section 6 and weigh them in Section 2.
 - `transition_watch` — the deterministic **pre-staging** signal (`active`, `projected_quadrant`, `direction`, `staged_fraction`, `basis`, `status`). **Already baked into `reference_weights`** (see its `transition_lean`) — surface it as context, do **not** apply it a second time.
@@ -716,7 +727,7 @@ analysis. Use exactly these rows, in this order, with a status glyph (🟢 ok /
 | **Deployment gate** | {🟢 OPEN / 🔴 CLOSED — = `regime_gate.status`} | {regime_gate.reasons, ≤6 words} |
 | **Growth — GDPNow** | {growth_axis.direction} ({latest}%, traj {first}→{last}) | {confidence; 🔴 if indeterminate} |
 | **Inflation — core PCE / CPI** | {inflation_axis.direction} ({pce}% / {cpi}% YoY) | {reason; oil overlay if firing} |
-| **Policy — Fed** | funds {rate}%; {fomc_stance.stance} | {as_of age; 🔴 if unconfirmed} |
+| **Policy — Fed** | funds {rate}%; {policy_axis.stance} ({source}) | {dot-plot as_of age or DGS2 Δ20d; 🔴 if unconfirmed} |
 | **Account vs SPY** | {acct}% vs {spy}% ({±excess}pp) | {days} live |
 | **Cash sleeve** | {cash_pct}% | {in-band / above band 🟡} |
 | **Shock** | level {0–3} | {price corroboration in ≤6 words} |

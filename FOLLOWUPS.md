@@ -554,22 +554,13 @@ hitting exactly when a fresh growth read matters most.
   simulated quarter-boundary snapshot yields a non-empty trajectory and a non-fallback
   growth axis.
 
-### 16. Automate the policy axis — market-implied stance (HIGH — standalone)
-**Live evidence (2026-07-03 report):** `fomc_stance.as_of = null`, stance `unconfirmed`
-since inception — the gate is *structurally unable to confirm Q1* until a human edits a
-JSON file. The policy leg of the classifier is effectively dead in production.
-- **Design:** new deterministic `policy_axis` precompute from series already collected —
-  DGS2 20d delta vs DFF. DGS2 rising ≥ +20bp/20d and sitting above DFF →
-  `hawkish_repricing`; falling ≤ −20bp/20d or DGS2 well below DFF → `dovish_repricing`;
-  else `neutral` (thresholds in config, no magic numbers in code). `fomc-stance.json`
-  becomes an **override layer**: if its `as_of` is within 45 days it governs
-  (SEP/dot-plot beats a market proxy); stale/null → market-implied governs. Emit both +
-  an agreement flag; `unconfirmed` should now occur only when *both* are unavailable.
-  Gate semantics unchanged (fail-closed on hawkish) — only the permanent-null pathology
-  is removed.
-- **Prereqs:** none — standalone. **Acceptance:** on the 2026-07-03 snapshot the policy
-  axis resolves (DGS2 momentum readable) instead of `unconfirmed`; the
-  manual-file-fresh case still wins in tests.
+### 16. Automate the policy axis — market-implied stance ✅ DONE 2026-07-03 (PR #10)
+Fixed the same week it was filed: new deterministic `policy_axis` block resolves a
+fresh manual SEP stance (`fomc-stance.json` `as_of` within 45d — the override layer)
+else the market-implied stance from DGS2 20d momentum; the gate + conviction proxy
+consume the RESOLVED stance; `unconfirmed` now requires BOTH layers unavailable.
+The manual file remains the SEP override channel — **still update it after the
+2026-07-28/29 FOMC.** Moved to Done.
 
 ### 17. Leading-growth composite + growth-side `transition_watch` (HIGH — the biggest forecasting gap)
 The inflation axis has a leading layer (breakevens + oil → `leading_vs_lagging_inflation`
@@ -710,6 +701,31 @@ and revised data makes naive backtests lie (payrolls revisions especially).
 ---
 
 ## Done
+- **2026-07-03** (PR #10, branch `feat/policy-axis`) — **#16 policy axis automated
+  (market-implied stance).** The classifier's policy leg was structurally dead:
+  `fomc-stance.json` sat `unconfirmed` / `as_of: null` since inception, the gate could
+  never confirm Q1, and "policy unconfirmed" inflated the conviction proxy daily. New
+  pure `_build_policy_axis(macro_data, manual_stance, cfg, today)` (echo-not-re-derive;
+  DGS2/DFF already fetched at limit=90, no fetch changes) emits a `policy_axis`
+  snapshot block: **market-implied stance** from the DGS2 20d delta (≥ +20bp →
+  `hawkish`, ≤ −20bp → `dovish`, else `neutral`; DGS2−DFF `spread_bp` as context;
+  <21 obs → unavailable) **layered under the manual file** — a fresh `as_of` (≤45d)
+  GOVERNS (`source: manual_fresh`, a real SEP/dot-plot beats a market proxy), stale/
+  null → `market_implied`, both unavailable → `unconfirmed` (now rare by construction).
+  Emits both layers + `agreement` flag (disagreement surfaced in `note`, deliberately
+  NOT a new divergence entry — candidate for later). `_build_regime_gate` consumes the
+  RESOLVED stance (fail-closed on hawkish unchanged; `derived_from` gains
+  `policy_source`), which flows to `_conviction_proxy` via `derived_from.policy_stance`.
+  Config `risk-limits.json` → `policy_axis` (hawkish/dovish bp + `manual_fresh_days`).
+  Prompt updated echo-only (policy bullet, gate rule, freshness table, inputs list,
+  dashboard row — no new LLM discretion); `fomc_stance` stays in the snapshot as the
+  raw manual echo. **EXPECTED BEHAVIOR CHANGE:** policy resolves instead of
+  `unconfirmed` → conviction proxy can drop ~1pt → reference weights may shift. 13 new
+  tests (thresholds inclusive-boundary, <21-obs, manual-fresh-wins/stale-loses,
+  agreement, config freshness window, gate integration); **suite 218 green, ruff
+  clean.** The manual file remains the SEP override channel — **update it after the
+  2026-07-28/29 FOMC.** Live verification: next 09:00 ET report shows Policy resolved
+  with `source: market_implied`.
 - **2026-06-29** (ops-only, no code) — Diagnosed + restored the `/today` page after
   it broke with `/api/dates → 500`. **3rd recurrence of Open #2:** the 2026-06-28
   infra deploy wiped the SWA's `STORAGE_CONNECTION_STRING` + `FUNC_MASTER_KEY`.

@@ -94,6 +94,11 @@ _RISK_LIMITS_DEFAULTS = {
         "staged_fraction_re_risk": 0.15,
         "re_risk_min_confirmations": 2,
     },
+    "policy_axis": {
+        "dgs2_delta_20d_bp_hawkish": 20.0,
+        "dgs2_delta_20d_bp_dovish": 20.0,
+        "manual_fresh_days": 45,
+    },
 }
 
 # Conviction-sleeve flex-review defaults (overridable via config/flex-review.json).
@@ -935,12 +940,16 @@ def run() -> None:
     growth_axis = _build_growth_axis(macro_data)
     inflation_axis = _build_inflation_axis(macro_data)
     fomc_stance = _load_fomc_stance()
-    regime_gate = _build_regime_gate(growth_axis, inflation_axis, fomc_stance)
+    # Policy axis (#16): resolves manual SEP layer vs market-implied DGS2 momentum;
+    # the gate + conviction proxy consume the RESOLVED stance. fomc_stance stays in
+    # the snapshot as the raw manual echo (backward compatible).
+    policy_axis = _build_policy_axis(macro_data, fomc_stance, _load_risk_limits(), today)
+    regime_gate = _build_regime_gate(growth_axis, inflation_axis, policy_axis)
     logger.info(
-        "Quadrant axes: growth=%s(%s) inflation=%s gate=%s policy=%s",
+        "Quadrant axes: growth=%s(%s) inflation=%s gate=%s policy=%s(%s)",
         growth_axis.get("direction"), growth_axis.get("confidence"),
         inflation_axis.get("direction"), regime_gate.get("status"),
-        fomc_stance.get("stance"),
+        policy_axis.get("stance"), policy_axis.get("source"),
     )
 
     # Build order (dependency chain): divergences → transition_watch → reference_weights.
@@ -1107,6 +1116,7 @@ def run() -> None:
         "growth_axis": growth_axis,
         "inflation_axis": inflation_axis,
         "fomc_stance": fomc_stance,
+        "policy_axis": policy_axis,
         "regime_gate": regime_gate,
         "reference_weights": reference_weights,
         "transition_watch": transition_watch,
@@ -2197,25 +2207,120 @@ def _build_inflation_axis(macro_data: dict) -> dict:
     }
 
 
-def _build_regime_gate(growth_axis: dict, inflation_axis: dict, fomc_stance: dict) -> dict:
+def _build_policy_axis(macro_data: dict, manual_stance: dict, cfg: dict, today: str) -> dict:
+    """Deterministic policy stance — the classifier's *policy leg*, resolved from two
+    layers (FOLLOWUPS #16). Before this, policy came only from the manually-maintained
+    fomc-stance.json, which sat `unconfirmed` with a null `as_of` since inception — the
+    gate was STRUCTURALLY unable to confirm Q1 until a human edited a JSON file, and
+    "policy unconfirmed" inflated the conviction proxy daily.
+
+    Layer 1 (override): the manual SEP/dot-plot stance GOVERNS while fresh (`as_of`
+    within `manual_fresh_days`) — a real dot-plot beats a market proxy. Layer 2: the
+    market-implied stance from DGS2 20-session momentum (front-end repricing of the
+    policy path; DGS2/DFF already fetched at limit=90) governs when the manual file is
+    stale or null. `unconfirmed` only when BOTH layers are unavailable — rare by
+    construction. Gate semantics unchanged: fail-closed on hawkish, unconfirmed cannot
+    confirm Q1. Thresholds in risk-limits.json -> policy_axis (no magic numbers).
+    Pure — echo-not-re-derive; the fetch stays in orchestration.
+    """
+    pa_cfg = cfg.get("policy_axis") or _RISK_LIMITS_DEFAULTS["policy_axis"]
+    hawk_bp = float(pa_cfg.get("dgs2_delta_20d_bp_hawkish", 20.0))
+    dove_bp = float(pa_cfg.get("dgs2_delta_20d_bp_dovish", 20.0))
+    fresh_days = int(pa_cfg.get("manual_fresh_days", 45))
+
+    dgs2 = _macro_vals(macro_data, "DGS2")   # newest-first
+    dff = _macro_vals(macro_data, "DFF")
+    mi_stance = None
+    delta_bp = None
+    if len(dgs2) > 20:   # observation-index convention, same as the oil 20d pattern
+        delta_bp = round((dgs2[0] - dgs2[20]) * 100, 1)
+        if delta_bp >= hawk_bp:
+            mi_stance = "hawkish"
+        elif delta_bp <= -dove_bp:
+            mi_stance = "dovish"
+        else:
+            mi_stance = "neutral"
+    spread_bp = round((dgs2[0] - dff[0]) * 100, 1) if dgs2 and dff else None
+
+    m_stance = (manual_stance or {}).get("stance", "unconfirmed")
+    as_of = (manual_stance or {}).get("as_of")
+    fresh = False
+    if m_stance in ("hawkish", "neutral", "dovish") and as_of:
+        try:
+            age_days = (
+                date.fromisoformat(str(today)[:10]) - date.fromisoformat(str(as_of)[:10])
+            ).days
+            fresh = age_days <= fresh_days
+        except ValueError:
+            fresh = False
+
+    agreement = None
+    if mi_stance and m_stance in ("hawkish", "neutral", "dovish"):
+        agreement = mi_stance == m_stance
+
+    if fresh:
+        stance, source = m_stance, "manual_fresh"
+        note = (
+            f"Manual SEP/dot-plot stance '{m_stance}' (as_of {as_of}, fresh) governs; "
+            "the market-implied DGS2 read is secondary context."
+        )
+    elif mi_stance:
+        stance, source = mi_stance, "market_implied"
+        note = (
+            f"Market-implied stance '{mi_stance}' governs: DGS2 20d delta "
+            f"{delta_bp:+.1f}bp (hawkish >= +{hawk_bp:.0f}bp / dovish <= -{dove_bp:.0f}bp); "
+            f"manual fomc-stance.json stale or null (as_of {as_of}). A fresh SEP/dot-plot "
+            "update still beats this proxy."
+        )
+    else:
+        stance, source = "unconfirmed", "unconfirmed"
+        note = (
+            "Policy UNCONFIRMED: manual stance stale/absent AND <21 DGS2 observations "
+            "for the market-implied read."
+        )
+    if agreement is False:
+        note += (
+            f" DISAGREEMENT: manual says '{m_stance}', market-implied says '{mi_stance}'."
+        )
+
+    return {
+        "stance": stance,
+        "source": source,
+        "market_implied": {
+            "stance": mi_stance,
+            "dgs2_latest": round(dgs2[0], 2) if dgs2 else None,
+            "dff_latest": round(dff[0], 2) if dff else None,
+            "dgs2_delta_20d_bp": delta_bp,
+            "spread_bp": spread_bp,
+        },
+        "manual": {"stance": m_stance, "as_of": as_of, "fresh": fresh},
+        "agreement": agreement,
+        "note": note,
+    }
+
+
+def _build_regime_gate(growth_axis: dict, inflation_axis: dict, policy_axis: dict) -> dict:
     """Deterministic macro deployment gate from the precomputed axes + policy stance.
 
     CLOSED unless growth is confirmed rising, realized inflation is not rising, and
-    policy is not hawkish. An unconfirmed policy stance cannot *confirm* Q1 but does
-    not by itself hard-close the gate (it is flagged); growth/inflation drive it. The
-    analyzer echoes ``status`` into the trades JSON ``deployment_gate`` field.
+    the RESOLVED policy stance (``policy_axis``: manual-fresh SEP layer, else the
+    market-implied DGS2 read — see _build_policy_axis) is not hawkish. An unconfirmed
+    stance cannot *confirm* Q1 but does not by itself hard-close the gate (it is
+    flagged); growth/inflation drive it. The analyzer echoes ``status`` into the
+    trades JSON ``deployment_gate`` field.
     """
     reasons: list[str] = []
     g = (growth_axis or {}).get("direction")
     i = (inflation_axis or {}).get("direction")
-    stance = (fomc_stance or {}).get("stance", "unconfirmed")
+    stance = (policy_axis or {}).get("stance", "unconfirmed")
+    source = (policy_axis or {}).get("source")
 
     if g != "rising":
         reasons.append(f"growth axis {g} (not rising)")
     if i == "rising":
         reasons.append("inflation axis rising")
     if stance == "hawkish":
-        reasons.append("FOMC stance hawkish")
+        reasons.append("policy stance hawkish")
 
     status = "closed" if reasons else "open"
     policy_note = ""
@@ -2225,7 +2330,10 @@ def _build_regime_gate(growth_axis: dict, inflation_axis: dict, fomc_stance: dic
         "status": status,
         "reasons": reasons,
         "policy_note": policy_note,
-        "derived_from": {"growth": g, "inflation": i, "policy_stance": stance},
+        "derived_from": {
+            "growth": g, "inflation": i,
+            "policy_stance": stance, "policy_source": source,
+        },
         "rule": (
             "OPEN only when growth rising AND inflation not rising AND policy not "
             "hawkish; else CLOSED. Cash-sleeve band is subordinate to this gate."
