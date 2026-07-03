@@ -247,6 +247,11 @@ of everything in the track.
 Intl track added (#24–#27): #25 is standalone and cheap (any session); #24/#26/#27
 after Finding 2, alongside #17/#18; all describe-only, gate stays senior.
 
+Execution-chain hardening added from the 2026-07-03 audit (#28–#31): #28 and #29
+before the next unattended auto-exec run if possible; #30/#31 any session. Theme:
+deterministic promises currently exceed deterministic enforcement — reference
+construction is airtight, the LLM-output→broker path is trusting.
+
 **Environment notes (read before editing):** repo is mirrored to a fresh clone at
 `C:\dev\portfolio-automation` to escape OneDrive — if you're working from the
 OneDrive path still, the **OneDrive silent-revert hazard** applies (it clobbered
@@ -791,6 +796,73 @@ China credit impulse leads EM/commodities ~9–12m but isn't freely available;
   basket, not credit-impulse data**.
 - **Prereqs:** folds into #24. **Acceptance:** proxy emitted with per-leg basis; any
   leg stale → drop the leg, note it, degrade confidence.
+
+### 28. Trade-level Tier-1 validator — make "enforced downstream" true (CRITICAL — before next unattended run)
+**Evidence (2026-07-03 full-repo audit):** the analyzer prompt promises *"Bounds you
+cannot cross with an override (Tier-1, enforced downstream)"* — floor, 90%-of-core
+ceiling, AMZN/GOOGL exemption, `max_magnitude_pp`, gate-closed-forbids-growth-beta-buys.
+Traced downstream: reference construction enforces these **on the reference only**;
+`validate_overrides` checks override *records*, never trades; the executor submits
+whatever is in `daily-trades/{date}.json` unfiltered; auto mode treats every
+recommendation as approved. A hallucinated "BUY QQQ" while the gate is closed, or a
+"SELL AMZN" through its exemption, reaches Alpaca untouched at 09:35. The promised
+safety layer does not exist — and the prompt telling the model it exists reduces the
+model's own care.
+- **Design:** pure `validate_trades(trades, reference_weights, positions, regime_gate,
+  cfg)` in `src/shared/` (same module family as Finding 2's `reconcile`): per-trade
+  clamp-or-reject with logged reasons — (i) no risk-on/amplifier BUY while gate closed
+  (DAMPER/SGOV buys permitted); (ii) no SELL taking a sleeve below `sleeve_floor_pct_of_core`;
+  (iii) no trade pushing active-quadrant share past `active_quadrant_ceiling_pct_of_core`;
+  (iv) EXEMPT_HOLDS never sold below current weight; (v) net deviation from reference
+  per sleeve ≤ accepted-override residual (ties into Finding 2 semantics); (vi) integer
+  shares, sells-before-buys reorder. Analyzer calls it after override validation, before
+  writing the trades file; rejected/clamped trades logged into the report addendum +
+  OverrideHistory. Executor gains a belt-and-suspenders assert (reject file if any trade
+  carries `validation: rejected`).
+- **Prereqs:** Finding 2 merged (shares config + module family). **Acceptance:** unit
+  tests per bound incl. gate-closed QQQ buy rejected, GLD buy passes, AMZN sell-to-zero
+  clamped, reorder test; replay of a synthetic malicious trades file yields zero
+  submittable violations.
+
+### 29. Harden the auto-exec chain: retries + ET-date fix (HIGH — Open #1 exposure)
+**Evidence (audit):** collector 09:00 → blob-trigger analyzer (variable LLM latency) →
+auto-exec at a **fixed** 09:35 reading today's file. Analyzer >35 min or failed ⇒
+`no_trades` and **no retry** — the day silently never executes. This is the most likely
+silent failure of the first unattended runs. Also latent: `auto_executor` computes
+"today" as `datetime.now(timezone.utc)` — coincides with ET at 09:35, but any evening
+timer (or a naive retry addition) rolls the UTC date and reads tomorrow's empty file.
+- **Design:** (i) add retry timer fires at 10:05 and 11:05 ET calling the same
+  `execute_approvals` — already idempotent via the cached `daily-executions/{date}.json`
+  check and date-scoped `client_order_id`, so retries are safe by construction;
+  (ii) compute `date_str` with `zoneinfo("America/New_York")` in all three timers;
+  (iii) log a loud warning when 11:05 still finds no trades file (analyzer post-mortem
+  flag).
+- **Prereqs:** none — standalone. **Acceptance:** unit test for ET-date at a simulated
+  20:30 ET clock; manual test: delete today's executions blob, re-fire, cached-result
+  path exercised.
+
+### 30. Analyzer blob-trigger backfill guard (MEDIUM — history integrity)
+**Evidence (audit):** the analyzer blob trigger fires for **any** blob landing in
+`daily-snapshots/` — a seeder backfill or manual re-upload of an old snapshot re-runs
+the analyzer for that date, burning tokens and **overwriting the historical report +
+trades file with regenerated content**, corrupting the track-record data #12 depends
+on. Execution is protected (date-scoped executor, `no_match` approvals guard); history
+is not.
+- **Design:** analyzer skips (log + return) when `daily-trades/{date}.json` already
+  exists, unless env `ANALYZER_ALLOW_REGENERATE=true`. Optional: also skip when blob
+  date ≠ today unless the flag is set (explicit backfill intent).
+- **Prereqs:** none. **Acceptance:** unit test: existing trades file ⇒ skip; flag set ⇒
+  regenerate; fresh date ⇒ normal run.
+
+### 31. Config/comment hygiene from the audit (LOW — batch with any session)
+Three one-liners: (i) `function_app.py` cron comments still cite
+`WEBSITE_TIME_ZONE=Eastern Standard Time` — the Windows-only setting CLAUDE.md
+documents as silently ignored on Linux (the pre-6f42f1a 4.5h-early bug); comments must
+say `TZ=America/New_York` so nobody "restores" the wrong setting. (ii) `staleness_days:
+7` exists only as a code fallback — promote to `divergence-config.json` per the
+no-magic-numbers rule. (iii) `gap_band_pp` is defined in config but consumed by no code
+until Finding 2's `reconcile` lands — verify that consumption landed with Finding 2 and
+close this bullet.
 
 ---
 
