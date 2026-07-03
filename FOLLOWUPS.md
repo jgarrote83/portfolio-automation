@@ -244,6 +244,14 @@ Forecasting track added (#15–#23): #15/#16 are standalone data-integrity fixes
 do any session; #17/#18 follow Finding 2 + Phase 5 alongside #12; #23 gates the tuning
 of everything in the track.
 
+Intl track added (#24–#27): #25 is standalone and cheap (any session); #24/#26/#27
+after Finding 2, alongside #17/#18; all describe-only, gate stays senior.
+
+Execution-chain hardening added from the 2026-07-03 audit (#28–#31): #28 and #29
+before the next unattended auto-exec run if possible; #30/#31 any session. Theme:
+deterministic promises currently exceed deterministic enforcement — reference
+construction is airtight, the LLM-output→broker path is trusting.
+
 **Environment notes (read before editing):** repo is mirrored to a fresh clone at
 `C:\dev\portfolio-automation` to escape OneDrive — if you're working from the
 OneDrive path still, the **OneDrive silent-revert hazard** applies (it clobbered
@@ -532,27 +540,18 @@ protocol; spec alongside #13. **Cadence + model:** lean toward setting the intra
 tilts at the #13 review cadence on the stronger model (slow-moving composition decisions
 get the deeper reasoner), with daily Sonnet executing toward them — also sidesteps the
 40K-ITPM ceiling that blocks frontier models from the ~72K daily prompt.
+**Deterministic input identified (2026-07-03):** the #24 `regional_signals` scorecard is
+the intended evidence base for intl-sleeve intra-quadrant selection
+(IDMO/AIA/EWJ/IEMG/EWZ/VSS/EUAD tilts). Selection freedom without #24 is
+momentum-chasing with extra steps; #24 without #14 is a scorecard nobody can act on.
+Sequence them together in the monthly-review (#13) framework.
 
-### 15. GDPNow vintage fetch goes blind at every quarter boundary (HIGH — bug, standalone)
-**Live evidence (2026-07-03 report):** `GDPNOW_VINTAGES` empty for the 3rd consecutive
-day — since 2026-07-01, exactly the Q3 calendar boundary. Growth axis degraded to
-`cross_quarter_fallback` / low confidence; regime went indeterminate; Risk Score 9/10
-partly on a data artifact. **Root cause (already located):** the collector's FRED block
-sets `realtime_start = _q_start` (first day of the current calendar quarter) and then
-filters `r.get("date") == _q_start` — at every quarter turn this guarantees an empty
-(then <3-vintage) trajectory until the Atlanta Fed has published 3+ estimates for the
-new quarter: a recurring multi-week blind window at every quarter start (~8+ weeks/year),
-hitting exactly when a fresh growth read matters most.
-- **Design:** when current-quarter vintages < 3, extend `realtime_start` back one
-  quarter and splice in the tail of the prior quarter's vintage trajectory (the forecast
-  for the just-ended quarter), oldest-first, labeled `basis: "prior_quarter_tail"` at
-  medium confidence — never emit an empty trajectory while FRED has vintages. Once the
-  new quarter has ≥3 of its own, back to `within_quarter_vintages` / high confidence as
-  today. Pure-function change in `_build_growth_axis` input prep + the fetch window;
-  unit tests pin the boundary week.
-- **Prereqs:** none — standalone collector fix, safe any session. **Acceptance:** a
-  simulated quarter-boundary snapshot yields a non-empty trajectory and a non-fallback
-  growth axis.
+### 15. GDPNow vintage fetch goes blind at every quarter boundary ✅ DONE 2026-07-03 (PR #9)
+Fixed the same week it was filed: the ALFRED vintage window now extends back one
+quarter (`GDPNOW_VINTAGES_PRIOR` rides along in the snapshot) and `_build_growth_axis`
+splices the prior quarter's vintage tail (`basis: "prior_quarter_tail"`, medium
+confidence) when the new quarter has <3 vintages — never an empty trajectory while
+FRED has vintages. Moved to Done.
 
 ### 16. Automate the policy axis — market-implied stance ✅ DONE 2026-07-03 (PR #10)
 Fixed the same week it was filed: new deterministic `policy_axis` block resolves a
@@ -698,6 +697,150 @@ and revised data makes naive backtests lie (payrolls revisions especially).
   reproduces the current axes on recent live dates (parity check) and emits a lag table
   for ≥3 historical turns.
 
+### 24. `regional_signals` per-region scorecard (HIGH — intl track parent)
+The system has one global quadrant and one DXY switch; it has **no per-region read**,
+so "which regions get the intl allocation" is decided by relative momentum alone — a
+confirming signal, not a leading one. Every sustained intl regime (1971–78, 1985–88,
+2002–07, 2017, 2020H2–21, 2025) rode the dollar cycle *plus* regional fundamentals the
+system doesn't collect. **Live evidence (2026-07-03 report):** intl sleeve at floor on
+no-read while AIA sits +11.45pp excess vs SPY 60d; EWJ carries the Rengo 5.01% wage
+confirmation (BoJ-normalization / yen-appreciation catalyst) while JPY sits 161.67 and
+DTWEXBGS is 7d stale — the system cannot see that the equity story and the FX story
+point opposite ways.
+- **Design:** copy the bond_signals/labor_signals pattern — a deterministic scorecard
+  per region (Europe, Japan, EM-Asia, LatAm), each emitting favor/neutral/avoid +
+  confidence + a per-component table, **describe-only** (the LLM adjudicates; the
+  deterministic layer never trades on it directly). Components:
+  - **Currency trend vs USD** 20/60d: existing pairs + add `DEXUSAL` (AUD —
+    China/commodity canary), `DEXBZUS` (BRL — EWZ), `DEXKOUS` (KRW —
+    global-trade/semis canary) to `macro-series.json`.
+  - **Rate differential vs US:** DGS10 minus `IRLTLT01DEM156N` (Germany 10y, monthly —
+    new) / `IRLTLT01JPM156N` (Japan 10y, already collected). Monthly cadence is
+    acceptable — the daily speed lives in the FX legs. Fixes the one-sided
+    policy-divergence read (`regional_rotation.policy.us_2y_60d_bp_change` alone
+    penalizes intl even when foreign yields rise faster).
+  - **Equity relative strength vs SPY** 20/60d — already computed in
+    `regional_rotation`; reuse, don't re-derive.
+  - **Region-specific anchor:** ECB path (`ECBDFR`, collected) for Europe; wage/JGB
+    normalization for Japan; the #27 China proxy for EM-Asia; the commodity complex
+    for LatAm.
+- **Hierarchy (record verbatim):** global quadrant stays senior (intl outperformance
+  is a risk-on phenomenon; EM correlation to US spikes toward 1 in crises — regional
+  signals NEVER override the regime gate or the floor posture). DXY switch stays the
+  US-vs-intl sizing hinge (spec §4). `regional_signals` decides only the WHICH-region
+  tilt inside the intl sleeve — i.e., it is the deterministic input for #14's
+  intra-quadrant selection freedom. Anti-chase rule from §4 applies: scorecard favor
+  without DXY-trend confirmation sizes nothing.
+- **Prereqs:** after Finding 2; pairs naturally with #17/#18 (inherits its value from
+  the regime layer being timely). #18's daily dollar proxy is a soft prereq (DTWEXBGS
+  staleness otherwise blinds the hinge). **Acceptance:** scorecards in snapshot with
+  per-component bases; stale component → indeterminate, never a false favor (house
+  rule); unit tests per component.
+
+### 25. Currency decomposition via hedged/unhedged ETF ratios (MEDIUM — cheap, do early)
+**Live evidence (2026-07-03):** EWJ's equity thesis (Rengo 5.01%) and its FX exposure
+(JPY 161.67) point opposite directions; the system sees only the blended USD return.
+2025's intl win was ~half currency (spec §4) — local-vs-FX attribution is
+decision-grade information the book already pays for but doesn't extract.
+- **Design:** FMP prices only, no new sources: the HEWJ/EWJ ratio isolates the yen
+  effect (same index, hedged vs unhedged; DXJ works but adds an export tilt — prefer
+  HEWJ), HEZU/EZU for the euro. Emit per-region
+  `{local_return_60d, fx_return_60d, blend}` inside `regional_rotation`. Consumer rule
+  for the LLM: scorecard favor + FX headwind → the HEDGED variant is the legitimate
+  flex-watchlist candidate — "Japan working, yen killing you" and "Japan failing"
+  become distinguishable states.
+- **Prereqs:** none — independent of #24, can ship any session. **Acceptance:** ratios
+  in snapshot with 20/60d trends; report template line added.
+
+### 26. Earnings-revision breadth per region (MEDIUM — monthly cadence)
+Relative earnings revisions are the #2 predictor of sustained regional outperformance
+(the 2025 European defense/fiscal run is the live case) and a total blind spot today.
+- **Design:** monthly job (budget: spread FMP calls across days within the 250/day
+  cap): for each regional ETF (IDMO, AIA, EWJ, IEMG, EWZ, VSS) pull the top-10
+  holdings look-through (endpoint already used for concentration) + analyst-estimate
+  direction per holding vs a SPY top-10 baseline; emit a revision-breadth score per
+  region into `regional_signals`. Freshness ≤35d, else indeterminate.
+- **Prereqs:** #24 exists (this is a component of it). **Acceptance:** breadth scores
+  with as-of dates; budget accounting note in the collector logs.
+
+### 27. China proxy basket (MEDIUM — EM-Asia anchor)
+China credit impulse leads EM/commodities ~9–12m but isn't freely available;
+`CHPMINDXM` is deprecated on FRED. The EM-Asia row of #24 needs a China vote.
+- **Design:** market-derived deterministic proxy, daily, free: copper trend (CPER, or
+  `PCOPPUSDM` monthly fallback), AUD trend (`DEXUSAL`, from #24), KWEB-or-FXI relative
+  strength vs SPY (FMP). Equal-weight diffusion → `china_proxy` ∈
+  {tailwind, neutral, headwind}. The block note must state plainly it is a **proxy
+  basket, not credit-impulse data**.
+- **Prereqs:** folds into #24. **Acceptance:** proxy emitted with per-leg basis; any
+  leg stale → drop the leg, note it, degrade confidence.
+
+### 28. Trade-level Tier-1 validator — make "enforced downstream" true (CRITICAL — before next unattended run)
+**Evidence (2026-07-03 full-repo audit):** the analyzer prompt promises *"Bounds you
+cannot cross with an override (Tier-1, enforced downstream)"* — floor, 90%-of-core
+ceiling, AMZN/GOOGL exemption, `max_magnitude_pp`, gate-closed-forbids-growth-beta-buys.
+Traced downstream: reference construction enforces these **on the reference only**;
+`validate_overrides` checks override *records*, never trades; the executor submits
+whatever is in `daily-trades/{date}.json` unfiltered; auto mode treats every
+recommendation as approved. A hallucinated "BUY QQQ" while the gate is closed, or a
+"SELL AMZN" through its exemption, reaches Alpaca untouched at 09:35. The promised
+safety layer does not exist — and the prompt telling the model it exists reduces the
+model's own care.
+- **Design:** pure `validate_trades(trades, reference_weights, positions, regime_gate,
+  cfg)` in `src/shared/` (same module family as Finding 2's `reconcile`): per-trade
+  clamp-or-reject with logged reasons — (i) no risk-on/amplifier BUY while gate closed
+  (DAMPER/SGOV buys permitted); (ii) no SELL taking a sleeve below `sleeve_floor_pct_of_core`;
+  (iii) no trade pushing active-quadrant share past `active_quadrant_ceiling_pct_of_core`;
+  (iv) EXEMPT_HOLDS never sold below current weight; (v) net deviation from reference
+  per sleeve ≤ accepted-override residual (ties into Finding 2 semantics); (vi) integer
+  shares, sells-before-buys reorder. Analyzer calls it after override validation, before
+  writing the trades file; rejected/clamped trades logged into the report addendum +
+  OverrideHistory. Executor gains a belt-and-suspenders assert (reject file if any trade
+  carries `validation: rejected`).
+- **Prereqs:** Finding 2 merged (shares config + module family). **Acceptance:** unit
+  tests per bound incl. gate-closed QQQ buy rejected, GLD buy passes, AMZN sell-to-zero
+  clamped, reorder test; replay of a synthetic malicious trades file yields zero
+  submittable violations.
+
+### 29. Harden the auto-exec chain: retries + ET-date fix (HIGH — Open #1 exposure)
+**Evidence (audit):** collector 09:00 → blob-trigger analyzer (variable LLM latency) →
+auto-exec at a **fixed** 09:35 reading today's file. Analyzer >35 min or failed ⇒
+`no_trades` and **no retry** — the day silently never executes. This is the most likely
+silent failure of the first unattended runs. Also latent: `auto_executor` computes
+"today" as `datetime.now(timezone.utc)` — coincides with ET at 09:35, but any evening
+timer (or a naive retry addition) rolls the UTC date and reads tomorrow's empty file.
+- **Design:** (i) add retry timer fires at 10:05 and 11:05 ET calling the same
+  `execute_approvals` — already idempotent via the cached `daily-executions/{date}.json`
+  check and date-scoped `client_order_id`, so retries are safe by construction;
+  (ii) compute `date_str` with `zoneinfo("America/New_York")` in all three timers;
+  (iii) log a loud warning when 11:05 still finds no trades file (analyzer post-mortem
+  flag).
+- **Prereqs:** none — standalone. **Acceptance:** unit test for ET-date at a simulated
+  20:30 ET clock; manual test: delete today's executions blob, re-fire, cached-result
+  path exercised.
+
+### 30. Analyzer blob-trigger backfill guard (MEDIUM — history integrity)
+**Evidence (audit):** the analyzer blob trigger fires for **any** blob landing in
+`daily-snapshots/` — a seeder backfill or manual re-upload of an old snapshot re-runs
+the analyzer for that date, burning tokens and **overwriting the historical report +
+trades file with regenerated content**, corrupting the track-record data #12 depends
+on. Execution is protected (date-scoped executor, `no_match` approvals guard); history
+is not.
+- **Design:** analyzer skips (log + return) when `daily-trades/{date}.json` already
+  exists, unless env `ANALYZER_ALLOW_REGENERATE=true`. Optional: also skip when blob
+  date ≠ today unless the flag is set (explicit backfill intent).
+- **Prereqs:** none. **Acceptance:** unit test: existing trades file ⇒ skip; flag set ⇒
+  regenerate; fresh date ⇒ normal run.
+
+### 31. Config/comment hygiene from the audit (LOW — batch with any session)
+Three one-liners: (i) `function_app.py` cron comments still cite
+`WEBSITE_TIME_ZONE=Eastern Standard Time` — the Windows-only setting CLAUDE.md
+documents as silently ignored on Linux (the pre-6f42f1a 4.5h-early bug); comments must
+say `TZ=America/New_York` so nobody "restores" the wrong setting. (ii) `staleness_days:
+7` exists only as a code fallback — promote to `divergence-config.json` per the
+no-magic-numbers rule. (iii) `gap_band_pp` is defined in config but consumed by no code
+until Finding 2's `reconcile` lands — verify that consumption landed with Finding 2 and
+close this bullet.
+
 ---
 
 ## Done
@@ -726,6 +869,23 @@ and revised data makes naive backtests lie (payrolls revisions especially).
   clean.** The manual file remains the SEP override channel — **update it after the
   2026-07-28/29 FOMC.** Live verification: next 09:00 ET report shows Policy resolved
   with `source: market_implied`.
+- **2026-07-03** (PR #9, branch `fix/gdpnow-quarter-boundary`) — **#15 GDPNow
+  quarter-boundary blind window FIXED.** The ALFRED vintage fetch now starts at the
+  PRIOR quarter start (was current-quarter-only, which guaranteed an empty
+  `GDPNOW_VINTAGES` for weeks at every quarter turn — observed 2026-07-01..03: growth
+  axis degraded to `cross_quarter_fallback`, regime indeterminate). New pure
+  `_gdpnow_vintage_rows` splits the one ALFRED response into `GDPNOW_VINTAGES` +
+  `GDPNOW_VINTAGES_PRIOR`; `_build_growth_axis` (pure — splice decision lives here,
+  fetch stays in orchestration) reads the prior quarter's TAIL (last 6 vintages,
+  `basis: "prior_quarter_tail"`, confidence medium, explanatory note) when the current
+  quarter has <3 vintages and the prior has ≥3 — never an empty trajectory while FRED
+  has vintages in the window. ≥3-current (`within_quarter_vintages`/high), both-thin
+  (`cross_quarter_fallback`/low), and no-data (indeterminate) paths unchanged; no other
+  snapshot block, gate rule, or prompt touched. 6 new tests pin the boundary (0/1/2
+  current vintages, tail-slope-not-whole-quarter, current-wins-over-prior, both-thin
+  fallback, row splitter); **suite 211 green, ruff clean.** **Live verification = Mon
+  2026-07-06 09:00 ET run:** the growth axis should read the Q2 vintage tail
+  (`prior_quarter_tail`) instead of the fallback.
 - **2026-06-29** (ops-only, no code) — Diagnosed + restored the `/today` page after
   it broke with `/api/dates → 500`. **3rd recurrence of Open #2:** the 2026-06-28
   infra deploy wiped the SWA's `STORAGE_CONNECTION_STRING` + `FUNC_MASTER_KEY`.

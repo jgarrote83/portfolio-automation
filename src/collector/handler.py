@@ -854,15 +854,21 @@ def run() -> None:
     # slope (e.g. 3.70 -> 4.26 -> 2.54) — the deceleration the quarterly view hides.
     macro_data["GDPNOW"] = fred.get_series_latest("GDPNOW", limit=8)
     _t = date.today()
-    _q_start = date(_t.year, 3 * ((_t.month - 1) // 3) + 1, 1).isoformat()
+    _q_month = 3 * ((_t.month - 1) // 3) + 1
+    _q_start = date(_t.year, _q_month, 1).isoformat()
+    _prev_q_start = (
+        date(_t.year - 1, 10, 1) if _q_month == 1 else date(_t.year, _q_month - 3, 1)
+    ).isoformat()
+    # Window starts at the PRIOR quarter: at every quarter turn the new quarter has
+    # 0-2 vintages for weeks (the Atlanta Fed keeps nowcasting the just-ended quarter
+    # until the BEA advance release), which left GDPNOW_VINTAGES empty and degraded
+    # the growth axis exactly at the boundary (FOLLOWUPS #15, observed 2026-07-01..03).
+    # The prior quarter's trajectory rides along so _build_growth_axis can read its tail.
     _gdpnow_vint = fred.get_series_vintages(
-        "GDPNOW", realtime_start=_q_start, realtime_end=_t.isoformat()
+        "GDPNOW", realtime_start=_prev_q_start, realtime_end=_t.isoformat()
     )
-    macro_data["GDPNOW_VINTAGES"] = [
-        {"date": r.get("date"), "asof": r.get("realtime_start"), "value": r.get("value")}
-        for r in _gdpnow_vint
-        if r.get("date") == _q_start and r.get("value") not in (None, ".", "")
-    ]
+    macro_data["GDPNOW_VINTAGES"] = _gdpnow_vintage_rows(_gdpnow_vint, _q_start)
+    macro_data["GDPNOW_VINTAGES_PRIOR"] = _gdpnow_vintage_rows(_gdpnow_vint, _prev_q_start)
     # Energy axis: oil spot for the stagflation/Hormuz-shock read (~90d for baseline).
     for _oil_sid in ("DCOILWTICO", "DCOILBRENTEU"):
         macro_data[_oil_sid] = fred.get_series_latest(_oil_sid, limit=90)
@@ -2025,6 +2031,17 @@ def _macro_vals(macro_data: dict, sid: str) -> list[float]:
     return vals
 
 
+def _gdpnow_vintage_rows(rows: list, obs_date: str) -> list[dict]:
+    """One quarter's nowcast revisions from an ALFRED vintage response: the rows whose
+    observation date is ``obs_date``, oldest-first as FRED returns them, '.'/empty
+    values dropped. Pure — the fetch stays in the orchestration layer."""
+    return [
+        {"date": r.get("date"), "asof": r.get("realtime_start"), "value": r.get("value")}
+        for r in (rows or [])
+        if r.get("date") == obs_date and r.get("value") not in (None, ".", "")
+    ]
+
+
 def _build_growth_axis(macro_data: dict) -> dict:
     """Deterministic growth-direction read — the quadrant *growth axis*, computed in
     Python so the analyzer ECHOES it (mirrors bond_signals/labor_signals) rather than
@@ -2035,20 +2052,45 @@ def _build_growth_axis(macro_data: dict) -> dict:
     (``GDPNOW_VINTAGES``, oldest-first) — the within-quarter nowcast revisions. The
     standard /observations endpoint hides this (one latest value per quarter), so a
     naive cross-quarter "slope" can read 'rising' while the live quarter is being
-    marked down. Fallback: cross-quarter GDPNOW slope (low confidence) only when
-    fewer than 3 vintages are available; 'indeterminate' only with no GDPNow at all.
+    marked down. Quarter boundary (FOLLOWUPS #15): with <3 current-quarter vintages
+    but >=3 in ``GDPNOW_VINTAGES_PRIOR``, read the TAIL of the just-ended quarter's
+    trajectory (``prior_quarter_tail``, medium confidence) — never an empty trajectory
+    while FRED has vintages in the window. Fallback: cross-quarter GDPNOW slope (low
+    confidence) only with <3 vintages in both; 'indeterminate' only with no GDPNow
+    at all.
     """
-    traj = [
-        float(r["value"]) for r in (macro_data.get("GDPNOW_VINTAGES") or [])
-        if r.get("value") not in (None, ".", "")
-    ]  # oldest-first
+    def _vals(key: str) -> list[float]:
+        return [
+            float(r["value"]) for r in (macro_data.get(key) or [])
+            if r.get("value") not in (None, ".", "")
+        ]  # oldest-first
+
+    traj = _vals("GDPNOW_VINTAGES")
+    prior = _vals("GDPNOW_VINTAGES_PRIOR")   # the just-ended quarter
 
     BAND = 0.1
+    PRIOR_TAIL_N = 6   # ~3 weeks of vintages — the recent slope, not the whole quarter
     confidence = "high"
     basis = "within_quarter_vintages"
+    note = ""
+    used = traj
     if len(traj) >= 3:
         first, last = traj[0], traj[-1]
         latest = last
+    elif len(prior) >= 3:
+        # Quarter-boundary splice (FOLLOWUPS #15): the new quarter warms up over
+        # ~weeks while the Atlanta Fed is still revising the just-ended quarter —
+        # read that trajectory's tail instead of degrading to the coarse fallback.
+        used = prior[-PRIOR_TAIL_N:]
+        first, last = used[0], used[-1]
+        latest = last
+        confidence = "medium"
+        basis = "prior_quarter_tail"
+        note = (
+            f"Quarter boundary: only {len(traj)} current-quarter vintage(s) so far — "
+            "direction read from the just-ended quarter's nowcast tail at medium "
+            "confidence until the new quarter has >=3 vintages of its own."
+        )
     else:
         # Fallback: cross-quarter quarterly prints (newest-first from get_series_latest)
         q = _macro_vals(macro_data, "GDPNOW")  # newest-first
@@ -2088,7 +2130,6 @@ def _build_growth_axis(macro_data: dict) -> dict:
         else "down" if len(retail) > 1 else None
     )
 
-    note = ""
     if direction == "rising" and confidence == "low":
         note = (
             "Cross-quarter fallback only (no within-quarter vintages) — 'rising' is "
@@ -2101,8 +2142,8 @@ def _build_growth_axis(macro_data: dict) -> dict:
         "confidence": confidence,
         "basis": basis,
         "gdpnow_latest": round(latest, 2),
-        "gdpnow_trajectory": [round(v, 2) for v in traj],   # oldest -> newest
-        "gdpnow_vintage_count": len(traj),
+        "gdpnow_trajectory": [round(v, 2) for v in used],   # oldest -> newest
+        "gdpnow_vintage_count": len(used),
         "confirming": {
             "payrolls_3m_avg_k": pay_3m,
             "initial_claims_latest_k": round(claims[0] / 1000.0, 1) if claims else None,
