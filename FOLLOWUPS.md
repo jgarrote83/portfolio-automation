@@ -3,7 +3,42 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-07-01. Responsiveness brief: Phases 1–4 ALL MERGED
+**▶ START HERE — last session 2026-07-02 (outage diagnosis + streaming hotfix, PR #7;
+merged `abd1538`, deployed, live-verified).** The 2026-07-02 morning run produced NO
+report (`/today` stuck on 07-01). Root cause found and FIXED:
+- **Root cause:** `shared/clients/foundry.py` called Claude **non-streaming** — zero bytes
+  flow while the model generates, and **Azure's outbound SNAT/LB idle timeout silently
+  drops connections idle ~4 min**. Post-Phase-4 reports generate 13–16K+ output tokens
+  (~4–5 min at ~60 tok/s), so calls started dying mid-generation. Foundry metrics on
+  07-02: **13/13 calls HTTP 499**, TimeToLastByte avg **240–270 s** (the 4-min wall, not
+  the client's 600 s timeout). 07-01's *morning* run failed identically (12×499 at
+  13:00Z); its 20:28Z report only exists because a later attempt finished just under
+  4 min. Ruled OUT: SWA secret wipe (settings intact), EventGrid (DeliverySuccess=1),
+  token quota (zero 429s). The PR #5 max_tokens bump 16K→24K + verbose Phase-4 format is
+  what pushed generation over the wall.
+- **Fix (PR #7):** `FoundryClient.complete` now requests SSE (`"stream": true`) and
+  accumulates `content_block_delta` text — the connection never idles. Timeout is now
+  (connect 30 s, read 180 s **inter-chunk**); a stream that ends without `message_stop`
+  raises and the retry loop re-attempts. `complete()` signature unchanged, analyzer
+  untouched. 8 new tests pin the SSE contract; **suite 194 green, ruff clean.**
+- **Live-verified end-to-end:** re-uploaded `daily-snapshots/2026-07-02.json` (21:02Z) to
+  re-fire EventGrid → analyzer; **`daily-reports/2026-07-02.md` (35 KB) +
+  `daily-trades/2026-07-02.json` landed 21:17Z** — a >4-min generation completed, which
+  was impossible pre-fix. The report proposes the **19-trade reference-driven de-risk
+  rotation** (sell SPY/QQQ + 15 others, buy GLD/TLT ~0.8/0.72 conf) — i.e. Phase 4
+  executing toward reference instead of the silent hold; review it against **Finding 2
+  (still the NEXT TASK)** below. auto_executor had already run at 09:35 ET, so today's
+  trades were NOT auto-executed; tomorrow generates fresh ones.
+- **Watch tomorrow's 09:00 ET run end-to-end** (report ~09:05–09:20 ET, auto_executor
+  09:35 ET). Co-symptom that hid the outage: **App Insights telemetry was dark
+  ~04:00→19:15Z** (known flakiness — an app-setting touch/host restart reconnects it).
+- **Ops note (dev box):** the az CLI default subscription kept flipping back to
+  QuirchFoodsSubscription mid-session and the `jgarrote@easygrids.com` login was
+  eventually wiped from the profile entirely (suspect: VS Code Azure extension re-auth).
+  Verify `az account show` before every az block; re-login + `az account set
+  --subscription EasyGridsProduction` as needed.
+
+**▶ Prior session 2026-07-01. Responsiveness brief: Phases 1–4 ALL MERGED
 (PR #1/#2/#3/#4) + analyzer context-overflow hotfix (PR #5). Phase 4 is LIVE (first
 behavior-changing phase). The live checkpoint exposed 2 reference/override TUNING issues
 (next task) — the protocol MECHANISM itself is verified working.**
