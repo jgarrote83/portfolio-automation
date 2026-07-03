@@ -41,7 +41,14 @@ report (`/today` stuck on 07-01). Root cause found and FIXED:
   Performance tab now charts each Dalio quadrant as an **equal-weight basket of its
   `QUADRANT_CONCENTRATE` names** (Option B, decided with the account holder) vs SPY,
   with **regime shading** (background bands tinted by the day's `favored_bucket`) and a
-  per-quadrant summary strip (window return + α vs SPY, best-quadrant ★). Plumbing:
+  per-quadrant summary strip (window return + α vs SPY, best-quadrant ★). **Sequencing
+  decided with the account holder:** self-rethinking roadmap = new Open **#12 → #13 → #14**
+  (quadrant-performance feedback to the analyzer, monthly strategy-review amendment
+  channel, intra-quadrant selection freedom) — **deliberately waiting ~1 week** (release
+  verification + data accrual; n too small now) with **Finding 2 first**, then Phase 5.
+  This week = verify: Jul 3 unattended report (streaming fix), `/performance.html`
+  eyeball from home, **Mon Jul 6 full chain incl. first unattended auto-execution
+  (closes Open #1)**. Plumbing:
   collector `_load_equity_spy_series` now hydrates each cache point with `closes`
   (CORE_ROSTER EOD) + `favored_bucket` (self-healing: v1 points re-read once) and
   publishes `performance/quadrant-config.json` (quadrants.py → blob → API → chart, no
@@ -460,6 +467,48 @@ from reality over ~2 months of implementation. Worst offender `Storage_Architect
 is the current source of truth** and is maintained; these companion specs need a v1.1 pass
 (or a deprecation header pointing at CLAUDE.md). Pre-existing doc debt, not caused by
 today's work — flagged 2026-06-25 while updating storage docs for Phase C.
+
+### 12. `quadrant_performance` snapshot block — regime-call accountability (MEDIUM, ~Jul 10+)
+Feed the quadrant-vs-SPY data (built for the web chart, PR #8) back to the **analyzer**:
+a compact block with each basket's 30/60/90d return vs SPY **plus** "favored-bucket
+performance while favored" (did the quadrant the system favored actually win during the
+favored window?). One prompt rule: if the favored bucket has lagged SPY for N consecutive
+sessions while favored, the regime read is suspect — the report must confront it and the
+bar for concentrating further into it rises. Data already accrues daily in
+`performance/equity-series.json` (closes + favored_bucket per point); this is a small
+collector aggregation + prompt section. Motivating live example (2026-07-02): the model
+is rotating into Q3/Q4 while the Q3 basket is the worst performer since inception
+(−7.1%, GLD −10.5%) — currently nothing forces it to engage with that tension.
+**Deliberately deferred ~1 week** (decided with the account holder 2026-07-02): let the
+streaming fix + quadrant chart + Phase 4 prove out unattended first, and let
+shading/history accrue. Do after Finding 2.
+
+### 13. Monthly self-initiated strategy review + amendment channel (HIGH value, spec first)
+The LLM currently calibrates *trades* (track_record) but has no channel to rethink the
+*strategy* (quadrant membership, ladder shape, tunable params are fixed code/config).
+Design (discussed 2026-07-02, account holder likes it): a scheduled monthly deep-dive
+prompt section — structured retrospective (attribution by sleeve, favored-vs-realized
+quadrant divergence via #12, confidence calibration drift, override win-rate via Phase 5)
+— that may emit **`proposed_amendments[]`**: structured, falsifiable proposals against
+*named tunable parameters* (mirror the override protocol: evidence, bounded magnitude,
+falsifier + review date), write-once to a `StrategyAmendments` table, **approved by the
+account holder in the SWA like trades**, then applied as config/PR changes (git = audit
+trail). Guardrails: T1 constraints untouchable; one live amendment at a time; nothing
+adopted under ~n=30; every adopted amendment gets its own outcome stamp. Includes
+**quadrant-membership change proposals** (e.g. "EWZ off Q3, evidence: correlation flip")
+— membership stays deterministic, the LLM gets *proposal* rights, never direct edit.
+**Prereqs: Finding 2 fix → brief Phase 5 (override-outcome stamping) → #12.** Spec
+before building.
+
+### 14. Intra-quadrant selection freedom (MEDIUM, spec with #13)
+Loosen the reference *within* a quadrant only: the deterministic layer keeps setting the
+quadrant-level target (the anchor + the measuring stick stay stable), but the analyzer
+may choose **which of that quadrant's concentrate names carry the weight** — floors and
+single-name caps still hold, tilt logged like an override with evidence (e.g. "VDE over
+PDBC: contango + refiner margins"). Uses LLM judgment at the altitude where it has daily
+data without letting it redefine its own benchmark (rejected: LLM-defined basket
+membership — circular anchor, breaks attribution). Small extension of the override
+protocol; spec alongside #13.
 
 ---
 
