@@ -63,5 +63,11 @@
     "staged_fraction_re_risk": 0.15,
     "re_risk_min_confirmations": 2
   },
+  "policy_axis": {
+    "dgs2_delta_20d_bp_hawkish": 20.0,
+    "dgs2_delta_20d_bp_dovish": 20.0,
+    "manual_fresh_days": 45
+  },
+  "_policy_axis_note": "FOLLOWUPS #16 — the resolved policy leg of the classifier (collector _build_policy_axis). LAYERING: the manually-maintained fomc-stance.json is the OVERRIDE layer — while its as_of is within manual_fresh_days it GOVERNS (a real SEP/dot-plot beats a market proxy); when it is stale or null, the MARKET-IMPLIED stance governs: DGS2 20-session delta >= +dgs2_delta_20d_bp_hawkish bp -> hawkish repricing, <= -dgs2_delta_20d_bp_dovish bp -> dovish, else neutral (DGS2-DFF spread emitted as context). 'unconfirmed' only when BOTH layers are unavailable. Gate semantics unchanged: fail-closed on hawkish; unconfirmed cannot confirm Q1.",
   "_transition_watch_note": "Realized inflation is laggy, so the Q3->Q4 (etc.) turn is called late. When the Phase-2 `leading_vs_lagging_inflation` divergence is active, transition_watch pre-stages a PARTIAL, BOUNDED lean in reference_weights toward the projected quadrant WITHOUT flipping the binding active_quadrant / regime_gate / realized inflation axis (spec §6). Convex blend fraction f: reference = (1-f)*base + f*projected. ASYMMETRY (§6 safety): a de-risk transition (projecting a MORE defensive quadrant) stages readily at staged_fraction_de_risk; a re-risk transition (projecting a MORE offensive quadrant) needs a higher bar — at least re_risk_min_confirmations leading signals confirming (breakeven AND oil, not just one) — and a smaller staged_fraction_re_risk; below the bar it does not activate. Reuses the Phase-2 divergence — never re-derives the leading/realized tension."
 }
