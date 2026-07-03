@@ -37,6 +37,22 @@ report (`/today` stuck on 07-01). Root cause found and FIXED:
   eventually wiped from the profile entirely (suspect: VS Code Azure extension re-auth).
   Verify `az account show` before every az block; re-login + `az account set
   --subscription EasyGridsProduction` as needed.
+- **Also shipped: quadrant-vs-SPY performance chart (account holder request).** The
+  Performance tab now charts each Dalio quadrant as an **equal-weight basket of its
+  `QUADRANT_CONCENTRATE` names** (Option B, decided with the account holder) vs SPY,
+  with **regime shading** (background bands tinted by the day's `favored_bucket`) and a
+  per-quadrant summary strip (window return + α vs SPY, best-quadrant ★). Plumbing:
+  collector `_load_equity_spy_series` now hydrates each cache point with `closes`
+  (CORE_ROSTER EOD) + `favored_bucket` (self-healing: v1 points re-read once) and
+  publishes `performance/quadrant-config.json` (quadrants.py → blob → API → chart, no
+  duplication); `/api/performance` gained a **cache fast path** (1 small blob instead of
+  ~250 × 1.2 MB snapshot downloads per page load — legacy scan kept as fallback) +
+  `_quadrant_series` equal-weight index. Palette validated (dataviz 6-check, CVD ΔE
+  13.6). **Cache backfilled live** from the dev box (28 points since 2026-05-26
+  inception, all hydrated; quadrant indices Q1 96.9/Q2 97.5/Q3 94.9/Q4 97.9 vs SPY
+  99.4). Shading is sparse for now (axes only in recent snapshots; flat-growth days
+  correctly yield no bucket) and fills in daily. Tests: +11 (205 green). **Eyeball
+  `/performance.html` after the SWA deploy** — renders were verified by data-path only.
 
 **▶ Prior session 2026-07-01. Responsiveness brief: Phases 1–4 ALL MERGED
 (PR #1/#2/#3/#4) + analyzer context-overflow hotfix (PR #5). Phase 4 is LIVE (first

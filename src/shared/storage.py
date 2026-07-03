@@ -149,6 +149,26 @@ def write_perf_series(series: list[dict]) -> None:
                 _PERF_SERIES_CONTAINER, _PERF_SERIES_NAME, len(series))
 
 
+_PERF_QUADRANT_CONFIG_NAME = "quadrant-config.json"
+
+
+def write_perf_quadrant_config(cfg: dict) -> None:
+    """Quadrant basket definitions consumed by the web performance endpoint.
+
+    The SWA managed API cannot import src/shared, so the collector publishes the
+    shared/quadrants.py membership here each run — single source of truth flows
+    quadrants.py → this blob → /api/performance → chart.
+    """
+    client = _blob_client()
+    container = client.get_container_client(_PERF_SERIES_CONTAINER)
+    try:
+        container.create_container()
+    except Exception:
+        pass
+    blob = client.get_blob_client(_PERF_SERIES_CONTAINER, _PERF_QUADRANT_CONFIG_NAME)
+    blob.upload_blob(json.dumps(cfg, indent=2).encode("utf-8"), overwrite=True)
+
+
 def list_recent_reports(limit: int = 5) -> list[tuple[str, str]]:
     """Return up to `limit` most recent (date, markdown) pairs from daily-reports.
 

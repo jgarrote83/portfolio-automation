@@ -18,7 +18,8 @@
     <span id="user" class="user"></span>
   </header>
   <main class="container">
-    <h1>Portfolio vs S&amp;P 500</h1>
+    <h1>Portfolio &amp; Dalio quadrants vs S&amp;P 500</h1>
+    <p class="muted" style="margin-top:-.5rem">Quadrant lines are equal-weight baskets of each regime's concentrate names (Q1 Goldilocks, Q2 Reflation, Q3 Stagflation, Q4 Deflation), indexed to the window start. Click legend entries to show/hide lines.</p>
 
     <div id="window-tabs" class="window-tabs">
       <button class="btn" data-window="YTD">YTD</button>
@@ -29,6 +30,8 @@
       <button class="btn" data-window="3Y">3Y</button>
       <span id="perf-summary" class="muted" style="margin-left:1rem"></span>
     </div>
+
+    <div id="quad-summary" class="quad-summary"></div>
 
     <div class="chart-wrap">
       <canvas id="perfChart" height="120"></canvas>
