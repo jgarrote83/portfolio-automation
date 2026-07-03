@@ -14,7 +14,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from collector.handler import (  # noqa: E402
     _build_growth_axis,
     _build_inflation_axis,
+    _build_policy_axis,
     _build_regime_gate,
+    _gdpnow_vintage_rows,
 )
 
 
@@ -23,9 +25,9 @@ def _obs(values):
     return [{"value": str(v)} for v in values]
 
 
-def _vintages(values):
-    """GDPNOW_VINTAGES rows (oldest-first)."""
-    return [{"date": "2026-04-01", "asof": f"2026-04-{i:02d}", "value": str(v)}
+def _vintages(values, q="2026-04-01"):
+    """GDPNOW_VINTAGES rows (oldest-first) for the quarter starting at ``q``."""
+    return [{"date": q, "asof": f"{q[:8]}{i:02d}", "value": str(v)}
             for i, v in enumerate(values, start=1)]
 
 
@@ -85,6 +87,91 @@ def test_growth_indeterminate_no_data():
     assert g["confidence"] == "none"
 
 
+# --- growth axis: quarter-boundary splice (FOLLOWUPS #15) ---------------------
+
+def test_growth_prior_tail_when_new_quarter_empty():
+    """Day 1-3 of a new quarter: zero current vintages, but the just-ended quarter's
+    trajectory is in the window — read its tail, NOT the cross-quarter fallback
+    (which here would falsely say 'rising') and NEVER an empty trajectory."""
+    md = {
+        "GDPNOW_VINTAGES": [],
+        "GDPNOW_VINTAGES_PRIOR": _vintages([3.70, 3.99, 4.26, 3.82, 3.02, 2.54]),
+        "GDPNOW": _obs([2.54, 1.24]),  # cross-quarter says 'rising' — must NOT win
+    }
+    g = _build_growth_axis(md)
+    assert g["direction"] == "falling"
+    assert g["confidence"] == "medium"
+    assert g["basis"] == "prior_quarter_tail"
+    assert g["gdpnow_trajectory"]  # non-empty while FRED has vintages
+    assert g["gdpnow_latest"] == 2.54
+
+
+def test_growth_prior_tail_with_one_and_two_current_vintages():
+    """1 or 2 current-quarter vintages still splice to the prior tail (need >=3)."""
+    prior = _vintages([1.0, 1.2, 1.5, 1.8, 2.2, 2.6])
+    for cur in ([2.9], [2.9, 3.0]):
+        md = {
+            "GDPNOW_VINTAGES": _vintages(cur, q="2026-07-01"),
+            "GDPNOW_VINTAGES_PRIOR": prior,
+        }
+        g = _build_growth_axis(md)
+        assert g["basis"] == "prior_quarter_tail"
+        assert g["confidence"] == "medium"
+        assert g["direction"] == "rising"   # the prior tail slope, not the new prints
+        assert str(len(cur)) in g["note"]
+
+
+def test_growth_prior_tail_reads_recent_slope_not_whole_quarter():
+    """The tail (last 6 vintages) governs: a quarter that rose early but is being
+    marked down late must read 'falling'."""
+    md = {"GDPNOW_VINTAGES_PRIOR": _vintages(
+        [1.0, 2.0, 3.0, 4.0, 4.3, 4.2, 4.0, 3.7, 3.4, 3.1])}
+    g = _build_growth_axis(md)
+    assert g["direction"] == "falling"
+    assert g["gdpnow_trajectory"] == [4.3, 4.2, 4.0, 3.7, 3.4, 3.1]
+
+
+def test_growth_current_quarter_wins_over_prior():
+    """>=3 current vintages -> unchanged behavior; the prior trajectory is ignored."""
+    md = {
+        "GDPNOW_VINTAGES": _vintages([1.0, 1.4, 2.0, 2.6], q="2026-07-01"),
+        "GDPNOW_VINTAGES_PRIOR": _vintages([4.0, 3.0, 2.0]),  # falling — must NOT win
+    }
+    g = _build_growth_axis(md)
+    assert g["direction"] == "rising"
+    assert g["confidence"] == "high"
+    assert g["basis"] == "within_quarter_vintages"
+
+
+def test_growth_fallback_when_both_quarters_thin():
+    """<3 vintages in BOTH quarters -> existing cross-quarter fallback path."""
+    md = {
+        "GDPNOW_VINTAGES": _vintages([2.9], q="2026-07-01"),
+        "GDPNOW_VINTAGES_PRIOR": _vintages([2.5, 2.6]),
+        "GDPNOW": _obs([2.54, 1.24]),
+    }
+    g = _build_growth_axis(md)
+    assert g["basis"] == "cross_quarter_fallback"
+    assert g["confidence"] == "low"
+
+
+def test_gdpnow_vintage_rows_split_by_observation_date():
+    """The fetch-side helper splits one ALFRED response into per-quarter rows and
+    drops FRED's '.' placeholders."""
+    rows = [
+        {"date": "2026-04-01", "realtime_start": "2026-06-27", "value": "2.5"},
+        {"date": "2026-04-01", "realtime_start": "2026-06-30", "value": "2.6"},
+        {"date": "2026-07-01", "realtime_start": "2026-07-17", "value": "2.9"},
+        {"date": "2026-07-01", "realtime_start": "2026-07-18", "value": "."},
+    ]
+    cur = _gdpnow_vintage_rows(rows, "2026-07-01")
+    pri = _gdpnow_vintage_rows(rows, "2026-04-01")
+    assert [r["value"] for r in cur] == ["2.9"]
+    assert cur[0]["asof"] == "2026-07-17"
+    assert [r["value"] for r in pri] == ["2.5", "2.6"]
+    assert _gdpnow_vintage_rows(None, "2026-07-01") == []
+
+
 # --- inflation axis ----------------------------------------------------------
 
 def test_inflation_flat_sticky_core():
@@ -127,6 +214,115 @@ def test_inflation_rising_when_headline_hot_and_oil_rising():
     assert "energy" in i["reason"]
 
 
+# --- policy axis (FOLLOWUPS #16) ----------------------------------------------
+
+_TODAY = "2026-07-03"
+
+
+def _dgs2(latest, day20, n=30):
+    """Newest-first DGS2 rows: [0]=latest, [20]=day20, filler elsewhere."""
+    vals = [day20] * n
+    vals[0] = latest
+    return _obs(vals)
+
+
+def _policy(md, manual=None, cfg=None, today=_TODAY):
+    return _build_policy_axis(md, manual or {}, cfg or {}, today)
+
+
+def test_policy_market_implied_hawkish_at_threshold():
+    """DGS2 +20bp/20d exactly meets the hawkish bar (inclusive)."""
+    p = _policy({"DGS2": _dgs2(4.50, 4.30), "DFF": _obs([4.33])})
+    assert p["stance"] == "hawkish"
+    assert p["source"] == "market_implied"
+    assert p["market_implied"]["dgs2_delta_20d_bp"] == 20.0
+    assert p["market_implied"]["spread_bp"] == 17.0
+
+
+def test_policy_market_implied_dovish_at_threshold():
+    p = _policy({"DGS2": _dgs2(4.10, 4.30), "DFF": _obs([4.33])})
+    assert p["stance"] == "dovish"
+    assert p["market_implied"]["dgs2_delta_20d_bp"] == -20.0
+
+
+def test_policy_market_implied_neutral_inside_band():
+    """+19.9bp / -19.9bp stay neutral — the band is open below the thresholds."""
+    for latest in (4.499, 4.101):
+        p = _policy({"DGS2": _dgs2(latest, 4.30)})
+        assert p["stance"] == "neutral", latest
+        assert p["source"] == "market_implied"
+
+
+def test_policy_market_implied_needs_21_obs():
+    """20 DGS2 observations are not enough for the 20d delta -> unconfirmed."""
+    p = _policy({"DGS2": _obs([4.5] * 20)})
+    assert p["stance"] == "unconfirmed"
+    assert p["source"] == "unconfirmed"
+    assert p["market_implied"]["stance"] is None
+    assert p["market_implied"]["dgs2_delta_20d_bp"] is None
+
+
+def test_policy_manual_fresh_wins_over_market():
+    """A fresh SEP/dot-plot stance governs even when the market proxy disagrees."""
+    p = _policy(
+        {"DGS2": _dgs2(4.50, 4.30)},   # market-implied: hawkish
+        manual={"stance": "neutral", "as_of": "2026-06-18"},   # 15d old, fresh
+    )
+    assert p["stance"] == "neutral"
+    assert p["source"] == "manual_fresh"
+    assert p["manual"]["fresh"] is True
+    assert p["agreement"] is False
+    assert "DISAGREEMENT" in p["note"]
+
+
+def test_policy_manual_stale_loses_to_market():
+    p = _policy(
+        {"DGS2": _dgs2(4.50, 4.30)},
+        manual={"stance": "dovish", "as_of": "2026-03-01"},   # 124d old
+    )
+    assert p["stance"] == "hawkish"
+    assert p["source"] == "market_implied"
+    assert p["manual"]["fresh"] is False
+
+
+def test_policy_manual_null_as_of_loses_to_market():
+    """The live pathology: stance file all-null since inception -> market governs."""
+    p = _policy(
+        {"DGS2": _dgs2(4.35, 4.30), "DFF": _obs([4.33])},
+        manual={"stance": "unconfirmed", "as_of": None},
+    )
+    assert p["stance"] == "neutral"
+    assert p["source"] == "market_implied"
+
+
+def test_policy_unconfirmed_only_when_both_missing():
+    p = _policy({}, manual={"stance": "unconfirmed", "as_of": None})
+    assert p["stance"] == "unconfirmed"
+    assert p["source"] == "unconfirmed"
+    assert p["agreement"] is None
+
+
+def test_policy_agreement_true_when_layers_align():
+    p = _policy(
+        {"DGS2": _dgs2(4.35, 4.30)},
+        manual={"stance": "neutral", "as_of": "2026-06-18"},
+    )
+    assert p["source"] == "manual_fresh"
+    assert p["agreement"] is True
+    assert "DISAGREEMENT" not in p["note"]
+
+
+def test_policy_manual_fresh_days_from_config():
+    """manual_fresh_days is config-driven: a 15d-old stance is stale at 10."""
+    p = _policy(
+        {"DGS2": _dgs2(4.35, 4.30)},
+        manual={"stance": "hawkish", "as_of": "2026-06-18"},
+        cfg={"policy_axis": {"manual_fresh_days": 10}},
+    )
+    assert p["source"] == "market_implied"
+    assert p["stance"] == "neutral"
+
+
 # --- regime gate -------------------------------------------------------------
 
 def test_gate_closed_on_falling_growth():
@@ -152,3 +348,33 @@ def test_gate_closed_on_rising_inflation_and_hawkish():
     )
     assert gate["status"] == "closed"
     assert len(gate["reasons"]) == 2
+
+
+def test_gate_consumes_resolved_policy_axis():
+    """End-to-end #16: a market-implied hawkish repricing closes the gate; the
+    resolved stance + source land in derived_from (the conviction proxy reads it)."""
+    pa = _policy({"DGS2": _dgs2(4.50, 4.30)})
+    gate = _build_regime_gate({"direction": "rising"}, {"direction": "falling"}, pa)
+    assert gate["status"] == "closed"
+    assert any("hawkish" in r for r in gate["reasons"])
+    assert gate["derived_from"]["policy_stance"] == "hawkish"
+    assert gate["derived_from"]["policy_source"] == "market_implied"
+
+
+def test_gate_open_on_market_implied_neutral():
+    """The #16 payoff: a null manual file no longer strands policy at unconfirmed —
+    a readable DGS2 gives neutral, the gate opens, no policy_note."""
+    pa = _policy(
+        {"DGS2": _dgs2(4.35, 4.30)},
+        manual={"stance": "unconfirmed", "as_of": None},
+    )
+    gate = _build_regime_gate({"direction": "rising"}, {"direction": "falling"}, pa)
+    assert gate["status"] == "open"
+    assert gate["policy_note"] == ""
+
+
+def test_gate_unconfirmed_still_flags_policy_note():
+    pa = _policy({}, manual={"stance": "unconfirmed", "as_of": None})
+    gate = _build_regime_gate({"direction": "rising"}, {"direction": "falling"}, pa)
+    assert gate["status"] == "open"   # unconfirmed does not hard-close (unchanged)
+    assert "UNCONFIRMED" in gate["policy_note"]

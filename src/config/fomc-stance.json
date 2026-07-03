@@ -1,5 +1,5 @@
 {
-  "_comment": "Manually-maintained FOMC policy stance — the dot-plot/SEP and CME-FedWatch odds are NOT FRED series. Update after each SEP (8x/year) and after material Fedspeak. The collector loads this into snapshot.fomc_stance; the analyzer echoes it. 'stance' must be one of: hawkish | neutral | dovish | unconfirmed. While 'unconfirmed', policy cannot confirm a Q1 (Goldilocks) call and the analyzer deploys cautiously.",
+  "_comment": "Manually-maintained FOMC policy stance — the dot-plot/SEP and CME-FedWatch odds are NOT FRED series. Update after each SEP (8x/year) and after material Fedspeak. Since #16 this file is the OVERRIDE layer of policy_axis: it GOVERNS only while as_of is within manual_fresh_days (risk-limits.json -> policy_axis, default 45); when stale/null the market-implied stance (DGS2 20d momentum) governs instead — so a null as_of no longer strands the classifier at 'unconfirmed'. The collector loads this into snapshot.fomc_stance (raw echo) and resolves it in snapshot.policy_axis. 'stance' must be one of: hawkish | neutral | dovish | unconfirmed. While the RESOLVED stance is 'unconfirmed', policy cannot confirm a Q1 (Goldilocks) call and the analyzer deploys cautiously.",
   "stance": "unconfirmed",
   "median_dot_year_end": null,
   "change_vs_prior_sep_bp": null,
