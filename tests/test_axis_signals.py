@@ -15,6 +15,7 @@ from collector.handler import (  # noqa: E402
     _build_growth_axis,
     _build_inflation_axis,
     _build_regime_gate,
+    _gdpnow_vintage_rows,
 )
 
 
@@ -23,9 +24,9 @@ def _obs(values):
     return [{"value": str(v)} for v in values]
 
 
-def _vintages(values):
-    """GDPNOW_VINTAGES rows (oldest-first)."""
-    return [{"date": "2026-04-01", "asof": f"2026-04-{i:02d}", "value": str(v)}
+def _vintages(values, q="2026-04-01"):
+    """GDPNOW_VINTAGES rows (oldest-first) for the quarter starting at ``q``."""
+    return [{"date": q, "asof": f"{q[:8]}{i:02d}", "value": str(v)}
             for i, v in enumerate(values, start=1)]
 
 
@@ -83,6 +84,91 @@ def test_growth_indeterminate_no_data():
     g = _build_growth_axis({})
     assert g["direction"] == "indeterminate"
     assert g["confidence"] == "none"
+
+
+# --- growth axis: quarter-boundary splice (FOLLOWUPS #15) ---------------------
+
+def test_growth_prior_tail_when_new_quarter_empty():
+    """Day 1-3 of a new quarter: zero current vintages, but the just-ended quarter's
+    trajectory is in the window — read its tail, NOT the cross-quarter fallback
+    (which here would falsely say 'rising') and NEVER an empty trajectory."""
+    md = {
+        "GDPNOW_VINTAGES": [],
+        "GDPNOW_VINTAGES_PRIOR": _vintages([3.70, 3.99, 4.26, 3.82, 3.02, 2.54]),
+        "GDPNOW": _obs([2.54, 1.24]),  # cross-quarter says 'rising' — must NOT win
+    }
+    g = _build_growth_axis(md)
+    assert g["direction"] == "falling"
+    assert g["confidence"] == "medium"
+    assert g["basis"] == "prior_quarter_tail"
+    assert g["gdpnow_trajectory"]  # non-empty while FRED has vintages
+    assert g["gdpnow_latest"] == 2.54
+
+
+def test_growth_prior_tail_with_one_and_two_current_vintages():
+    """1 or 2 current-quarter vintages still splice to the prior tail (need >=3)."""
+    prior = _vintages([1.0, 1.2, 1.5, 1.8, 2.2, 2.6])
+    for cur in ([2.9], [2.9, 3.0]):
+        md = {
+            "GDPNOW_VINTAGES": _vintages(cur, q="2026-07-01"),
+            "GDPNOW_VINTAGES_PRIOR": prior,
+        }
+        g = _build_growth_axis(md)
+        assert g["basis"] == "prior_quarter_tail"
+        assert g["confidence"] == "medium"
+        assert g["direction"] == "rising"   # the prior tail slope, not the new prints
+        assert str(len(cur)) in g["note"]
+
+
+def test_growth_prior_tail_reads_recent_slope_not_whole_quarter():
+    """The tail (last 6 vintages) governs: a quarter that rose early but is being
+    marked down late must read 'falling'."""
+    md = {"GDPNOW_VINTAGES_PRIOR": _vintages(
+        [1.0, 2.0, 3.0, 4.0, 4.3, 4.2, 4.0, 3.7, 3.4, 3.1])}
+    g = _build_growth_axis(md)
+    assert g["direction"] == "falling"
+    assert g["gdpnow_trajectory"] == [4.3, 4.2, 4.0, 3.7, 3.4, 3.1]
+
+
+def test_growth_current_quarter_wins_over_prior():
+    """>=3 current vintages -> unchanged behavior; the prior trajectory is ignored."""
+    md = {
+        "GDPNOW_VINTAGES": _vintages([1.0, 1.4, 2.0, 2.6], q="2026-07-01"),
+        "GDPNOW_VINTAGES_PRIOR": _vintages([4.0, 3.0, 2.0]),  # falling — must NOT win
+    }
+    g = _build_growth_axis(md)
+    assert g["direction"] == "rising"
+    assert g["confidence"] == "high"
+    assert g["basis"] == "within_quarter_vintages"
+
+
+def test_growth_fallback_when_both_quarters_thin():
+    """<3 vintages in BOTH quarters -> existing cross-quarter fallback path."""
+    md = {
+        "GDPNOW_VINTAGES": _vintages([2.9], q="2026-07-01"),
+        "GDPNOW_VINTAGES_PRIOR": _vintages([2.5, 2.6]),
+        "GDPNOW": _obs([2.54, 1.24]),
+    }
+    g = _build_growth_axis(md)
+    assert g["basis"] == "cross_quarter_fallback"
+    assert g["confidence"] == "low"
+
+
+def test_gdpnow_vintage_rows_split_by_observation_date():
+    """The fetch-side helper splits one ALFRED response into per-quarter rows and
+    drops FRED's '.' placeholders."""
+    rows = [
+        {"date": "2026-04-01", "realtime_start": "2026-06-27", "value": "2.5"},
+        {"date": "2026-04-01", "realtime_start": "2026-06-30", "value": "2.6"},
+        {"date": "2026-07-01", "realtime_start": "2026-07-17", "value": "2.9"},
+        {"date": "2026-07-01", "realtime_start": "2026-07-18", "value": "."},
+    ]
+    cur = _gdpnow_vintage_rows(rows, "2026-07-01")
+    pri = _gdpnow_vintage_rows(rows, "2026-04-01")
+    assert [r["value"] for r in cur] == ["2.9"]
+    assert cur[0]["asof"] == "2026-07-17"
+    assert [r["value"] for r in pri] == ["2.5", "2.6"]
+    assert _gdpnow_vintage_rows(None, "2026-07-01") == []
 
 
 # --- inflation axis ----------------------------------------------------------

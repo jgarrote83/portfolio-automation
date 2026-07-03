@@ -533,26 +533,12 @@ tilts at the #13 review cadence on the stronger model (slow-moving composition d
 get the deeper reasoner), with daily Sonnet executing toward them — also sidesteps the
 40K-ITPM ceiling that blocks frontier models from the ~72K daily prompt.
 
-### 15. GDPNow vintage fetch goes blind at every quarter boundary (HIGH — bug, standalone)
-**Live evidence (2026-07-03 report):** `GDPNOW_VINTAGES` empty for the 3rd consecutive
-day — since 2026-07-01, exactly the Q3 calendar boundary. Growth axis degraded to
-`cross_quarter_fallback` / low confidence; regime went indeterminate; Risk Score 9/10
-partly on a data artifact. **Root cause (already located):** the collector's FRED block
-sets `realtime_start = _q_start` (first day of the current calendar quarter) and then
-filters `r.get("date") == _q_start` — at every quarter turn this guarantees an empty
-(then <3-vintage) trajectory until the Atlanta Fed has published 3+ estimates for the
-new quarter: a recurring multi-week blind window at every quarter start (~8+ weeks/year),
-hitting exactly when a fresh growth read matters most.
-- **Design:** when current-quarter vintages < 3, extend `realtime_start` back one
-  quarter and splice in the tail of the prior quarter's vintage trajectory (the forecast
-  for the just-ended quarter), oldest-first, labeled `basis: "prior_quarter_tail"` at
-  medium confidence — never emit an empty trajectory while FRED has vintages. Once the
-  new quarter has ≥3 of its own, back to `within_quarter_vintages` / high confidence as
-  today. Pure-function change in `_build_growth_axis` input prep + the fetch window;
-  unit tests pin the boundary week.
-- **Prereqs:** none — standalone collector fix, safe any session. **Acceptance:** a
-  simulated quarter-boundary snapshot yields a non-empty trajectory and a non-fallback
-  growth axis.
+### 15. GDPNow vintage fetch goes blind at every quarter boundary ✅ DONE 2026-07-03 (PR #9)
+Fixed the same week it was filed: the ALFRED vintage window now extends back one
+quarter (`GDPNOW_VINTAGES_PRIOR` rides along in the snapshot) and `_build_growth_axis`
+splices the prior quarter's vintage tail (`basis: "prior_quarter_tail"`, medium
+confidence) when the new quarter has <3 vintages — never an empty trajectory while
+FRED has vintages. Moved to Done.
 
 ### 16. Automate the policy axis — market-implied stance (HIGH — standalone)
 **Live evidence (2026-07-03 report):** `fomc_stance.as_of = null`, stance `unconfirmed`
@@ -710,6 +696,23 @@ and revised data makes naive backtests lie (payrolls revisions especially).
 ---
 
 ## Done
+- **2026-07-03** (PR #9, branch `fix/gdpnow-quarter-boundary`) — **#15 GDPNow
+  quarter-boundary blind window FIXED.** The ALFRED vintage fetch now starts at the
+  PRIOR quarter start (was current-quarter-only, which guaranteed an empty
+  `GDPNOW_VINTAGES` for weeks at every quarter turn — observed 2026-07-01..03: growth
+  axis degraded to `cross_quarter_fallback`, regime indeterminate). New pure
+  `_gdpnow_vintage_rows` splits the one ALFRED response into `GDPNOW_VINTAGES` +
+  `GDPNOW_VINTAGES_PRIOR`; `_build_growth_axis` (pure — splice decision lives here,
+  fetch stays in orchestration) reads the prior quarter's TAIL (last 6 vintages,
+  `basis: "prior_quarter_tail"`, confidence medium, explanatory note) when the current
+  quarter has <3 vintages and the prior has ≥3 — never an empty trajectory while FRED
+  has vintages in the window. ≥3-current (`within_quarter_vintages`/high), both-thin
+  (`cross_quarter_fallback`/low), and no-data (indeterminate) paths unchanged; no other
+  snapshot block, gate rule, or prompt touched. 6 new tests pin the boundary (0/1/2
+  current vintages, tail-slope-not-whole-quarter, current-wins-over-prior, both-thin
+  fallback, row splitter); **suite 211 green, ruff clean.** **Live verification = Mon
+  2026-07-06 09:00 ET run:** the growth axis should read the Q2 vintage tail
+  (`prior_quarter_tail`) instead of the fallback.
 - **2026-06-29** (ops-only, no code) — Diagnosed + restored the `/today` page after
   it broke with `/api/dates → 500`. **3rd recurrence of Open #2:** the 2026-06-28
   infra deploy wiped the SWA's `STORAGE_CONNECTION_STRING` + `FUNC_MASTER_KEY`.
