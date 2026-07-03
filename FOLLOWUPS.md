@@ -244,6 +244,9 @@ Forecasting track added (#15–#23): #15/#16 are standalone data-integrity fixes
 do any session; #17/#18 follow Finding 2 + Phase 5 alongside #12; #23 gates the tuning
 of everything in the track.
 
+Intl track added (#24–#27): #25 is standalone and cheap (any session); #24/#26/#27
+after Finding 2, alongside #17/#18; all describe-only, gate stays senior.
+
 **Environment notes (read before editing):** repo is mirrored to a fresh clone at
 `C:\dev\portfolio-automation` to escape OneDrive — if you're working from the
 OneDrive path still, the **OneDrive silent-revert hazard** applies (it clobbered
@@ -532,6 +535,11 @@ protocol; spec alongside #13. **Cadence + model:** lean toward setting the intra
 tilts at the #13 review cadence on the stronger model (slow-moving composition decisions
 get the deeper reasoner), with daily Sonnet executing toward them — also sidesteps the
 40K-ITPM ceiling that blocks frontier models from the ~72K daily prompt.
+**Deterministic input identified (2026-07-03):** the #24 `regional_signals` scorecard is
+the intended evidence base for intl-sleeve intra-quadrant selection
+(IDMO/AIA/EWJ/IEMG/EWZ/VSS/EUAD tilts). Selection freedom without #24 is
+momentum-chasing with extra steps; #24 without #14 is a scorecard nobody can act on.
+Sequence them together in the monthly-review (#13) framework.
 
 ### 15. GDPNow vintage fetch goes blind at every quarter boundary (HIGH — bug, standalone)
 **Live evidence (2026-07-03 report):** `GDPNOW_VINTAGES` empty for the 3rd consecutive
@@ -706,6 +714,83 @@ and revised data makes naive backtests lie (payrolls revisions especially).
   and for #13 amendment proposals touching classifier params. **Acceptance:** harness
   reproduces the current axes on recent live dates (parity check) and emits a lag table
   for ≥3 historical turns.
+
+### 24. `regional_signals` per-region scorecard (HIGH — intl track parent)
+The system has one global quadrant and one DXY switch; it has **no per-region read**,
+so "which regions get the intl allocation" is decided by relative momentum alone — a
+confirming signal, not a leading one. Every sustained intl regime (1971–78, 1985–88,
+2002–07, 2017, 2020H2–21, 2025) rode the dollar cycle *plus* regional fundamentals the
+system doesn't collect. **Live evidence (2026-07-03 report):** intl sleeve at floor on
+no-read while AIA sits +11.45pp excess vs SPY 60d; EWJ carries the Rengo 5.01% wage
+confirmation (BoJ-normalization / yen-appreciation catalyst) while JPY sits 161.67 and
+DTWEXBGS is 7d stale — the system cannot see that the equity story and the FX story
+point opposite ways.
+- **Design:** copy the bond_signals/labor_signals pattern — a deterministic scorecard
+  per region (Europe, Japan, EM-Asia, LatAm), each emitting favor/neutral/avoid +
+  confidence + a per-component table, **describe-only** (the LLM adjudicates; the
+  deterministic layer never trades on it directly). Components:
+  - **Currency trend vs USD** 20/60d: existing pairs + add `DEXUSAL` (AUD —
+    China/commodity canary), `DEXBZUS` (BRL — EWZ), `DEXKOUS` (KRW —
+    global-trade/semis canary) to `macro-series.json`.
+  - **Rate differential vs US:** DGS10 minus `IRLTLT01DEM156N` (Germany 10y, monthly —
+    new) / `IRLTLT01JPM156N` (Japan 10y, already collected). Monthly cadence is
+    acceptable — the daily speed lives in the FX legs. Fixes the one-sided
+    policy-divergence read (`regional_rotation.policy.us_2y_60d_bp_change` alone
+    penalizes intl even when foreign yields rise faster).
+  - **Equity relative strength vs SPY** 20/60d — already computed in
+    `regional_rotation`; reuse, don't re-derive.
+  - **Region-specific anchor:** ECB path (`ECBDFR`, collected) for Europe; wage/JGB
+    normalization for Japan; the #27 China proxy for EM-Asia; the commodity complex
+    for LatAm.
+- **Hierarchy (record verbatim):** global quadrant stays senior (intl outperformance
+  is a risk-on phenomenon; EM correlation to US spikes toward 1 in crises — regional
+  signals NEVER override the regime gate or the floor posture). DXY switch stays the
+  US-vs-intl sizing hinge (spec §4). `regional_signals` decides only the WHICH-region
+  tilt inside the intl sleeve — i.e., it is the deterministic input for #14's
+  intra-quadrant selection freedom. Anti-chase rule from §4 applies: scorecard favor
+  without DXY-trend confirmation sizes nothing.
+- **Prereqs:** after Finding 2; pairs naturally with #17/#18 (inherits its value from
+  the regime layer being timely). #18's daily dollar proxy is a soft prereq (DTWEXBGS
+  staleness otherwise blinds the hinge). **Acceptance:** scorecards in snapshot with
+  per-component bases; stale component → indeterminate, never a false favor (house
+  rule); unit tests per component.
+
+### 25. Currency decomposition via hedged/unhedged ETF ratios (MEDIUM — cheap, do early)
+**Live evidence (2026-07-03):** EWJ's equity thesis (Rengo 5.01%) and its FX exposure
+(JPY 161.67) point opposite directions; the system sees only the blended USD return.
+2025's intl win was ~half currency (spec §4) — local-vs-FX attribution is
+decision-grade information the book already pays for but doesn't extract.
+- **Design:** FMP prices only, no new sources: the HEWJ/EWJ ratio isolates the yen
+  effect (same index, hedged vs unhedged; DXJ works but adds an export tilt — prefer
+  HEWJ), HEZU/EZU for the euro. Emit per-region
+  `{local_return_60d, fx_return_60d, blend}` inside `regional_rotation`. Consumer rule
+  for the LLM: scorecard favor + FX headwind → the HEDGED variant is the legitimate
+  flex-watchlist candidate — "Japan working, yen killing you" and "Japan failing"
+  become distinguishable states.
+- **Prereqs:** none — independent of #24, can ship any session. **Acceptance:** ratios
+  in snapshot with 20/60d trends; report template line added.
+
+### 26. Earnings-revision breadth per region (MEDIUM — monthly cadence)
+Relative earnings revisions are the #2 predictor of sustained regional outperformance
+(the 2025 European defense/fiscal run is the live case) and a total blind spot today.
+- **Design:** monthly job (budget: spread FMP calls across days within the 250/day
+  cap): for each regional ETF (IDMO, AIA, EWJ, IEMG, EWZ, VSS) pull the top-10
+  holdings look-through (endpoint already used for concentration) + analyst-estimate
+  direction per holding vs a SPY top-10 baseline; emit a revision-breadth score per
+  region into `regional_signals`. Freshness ≤35d, else indeterminate.
+- **Prereqs:** #24 exists (this is a component of it). **Acceptance:** breadth scores
+  with as-of dates; budget accounting note in the collector logs.
+
+### 27. China proxy basket (MEDIUM — EM-Asia anchor)
+China credit impulse leads EM/commodities ~9–12m but isn't freely available;
+`CHPMINDXM` is deprecated on FRED. The EM-Asia row of #24 needs a China vote.
+- **Design:** market-derived deterministic proxy, daily, free: copper trend (CPER, or
+  `PCOPPUSDM` monthly fallback), AUD trend (`DEXUSAL`, from #24), KWEB-or-FXI relative
+  strength vs SPY (FMP). Equal-weight diffusion → `china_proxy` ∈
+  {tailwind, neutral, headwind}. The block note must state plainly it is a **proxy
+  basket, not credit-impulse data**.
+- **Prereqs:** folds into #24. **Acceptance:** proxy emitted with per-leg basis; any
+  leg stale → drop the leg, note it, degrade confidence.
 
 ---
 
