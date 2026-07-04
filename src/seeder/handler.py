@@ -26,6 +26,7 @@ from pathlib import Path
 from shared.keyvault import load_secrets
 from shared.storage import _blob_client, read_snapshot
 from shared.clients.alpaca import AlpacaClient
+from shared.timeutil import today_et
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +184,7 @@ def seed_positions(
 def _load_holdings(source: str) -> list[dict]:
     src = (source or "config").lower()
     if src in ("snapshot", "today"):
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = today_et()   # trading date, not UTC (#29) — evening runs must not roll
         try:
             snap = read_snapshot(today)
         except Exception as e:  # noqa: BLE001
