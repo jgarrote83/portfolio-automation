@@ -29,6 +29,14 @@ from shared.clients.alpaca import AlpacaClient
 
 logger = logging.getLogger(__name__)
 
+# #28 fail-closed cutoff: trades files dated on/after this carry per-trade
+# `validation` stamps from the analyzer's Tier-1 validator. On the AUTO path a file
+# from this date onward with unstamped trades (or `validation_error: true`, or any
+# trade somehow stamped rejected) is REFUSED — a missing stamp means the validator
+# did not run over that list. Files dated earlier predate the validator deploy and
+# are tolerated. Manual approval path is unaffected.
+_VALIDATION_STAMPS_REQUIRED_FROM = "2026-07-05"
+
 
 def execute_approvals(date_str: str, force: bool = False, auto: bool = False) -> dict:
     """Place Alpaca paper orders for trades on `date_str`.
@@ -58,6 +66,18 @@ def execute_approvals(date_str: str, force: bool = False, auto: bool = False) ->
         return {"date": date_str, "status": "no_trades", "executions": []}
 
     if auto:
+        # #28 belt-and-suspenders (fail-closed): never auto-submit a file the Tier-1
+        # validator flagged, skipped, or that carries a rejected-stamped trade (the
+        # analyzer removes rejected trades from trades[], so one here = tampering/bug).
+        refusal = _validation_refusal(trades_doc, trades, date_str)
+        if refusal:
+            logger.error("Auto-execute REFUSED for %s: %s", date_str, refusal)
+            return {
+                "date": date_str,
+                "status": "refused_validation",
+                "reason": refusal,
+                "executions": [],
+            }
         approved = list(trades)
         logger.info("Auto-execute: approving all %d recommended trades", len(approved))
     else:
@@ -195,6 +215,29 @@ def _extract_trades(doc: dict | list) -> list[dict]:
         trades = doc.get("trades") or doc.get("recommendations") or []
         return [t for t in trades if isinstance(t, dict)]
     return []
+
+
+def _validation_refusal(trades_doc: dict | list, trades: list[dict], date_str: str) -> str:
+    """#28 auto-path gate: a non-empty string names why the file must NOT be
+    auto-submitted; "" means it is clean. Pure — unit-testable without Alpaca/KV."""
+    if isinstance(trades_doc, dict) and trades_doc.get("validation_error"):
+        return "analyzer set validation_error (Tier-1 validator crashed — fail closed)"
+    stamped_rejected = [
+        t.get("id") for t in trades
+        if (t.get("validation") or {}).get("status") == "rejected"
+    ]
+    if stamped_rejected:
+        return f"trades stamped 'rejected' present in trades[]: {stamped_rejected}"
+    if date_str >= _VALIDATION_STAMPS_REQUIRED_FROM:
+        unstamped = [
+            t.get("id") for t in trades if not isinstance(t.get("validation"), dict)
+        ]
+        if unstamped:
+            return (
+                f"unstamped trades in a post-validator file ({unstamped}) — the "
+                "Tier-1 validator did not run over this list"
+            )
+    return ""
 
 
 def _place_one(client: AlpacaClient, trade: dict, date_str: str) -> dict:

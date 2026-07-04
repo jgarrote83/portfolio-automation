@@ -891,7 +891,11 @@ Then the numbered sections, in this order:
       current weight; exceed `max_magnitude_pp` off the reference for any sleeve; or **loosen
       the deployment gate** (a `closed` gate still forbids Q1/Q2 beta *buys* — an override can
       justify holding less-defensively-than-reference only within the band, never a new
-      growth-beta buy while closed).
+      growth-beta buy while closed). "Enforced downstream" is literal: a deterministic
+      post-validator strips or clamps any trade breaching these bounds (gate-closed
+      amplifier buys, exempt-hold sells, landings outside the reference ± sheltered-window
+      zone) and logs it in a report addendum — a violating trade never reaches the broker,
+      so file honest overrides instead of testing the bounds.
 
    The **Recommended** column of Table A = Reference ± the overrides you filed. State one
    line: "today's trades move Current toward Reference" — or, if not, name the specific

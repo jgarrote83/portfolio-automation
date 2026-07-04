@@ -777,32 +777,12 @@ China credit impulse leads EM/commodities ~9–12m but isn't freely available;
 - **Prereqs:** folds into #24. **Acceptance:** proxy emitted with per-leg basis; any
   leg stale → drop the leg, note it, degrade confidence.
 
-### 28. Trade-level Tier-1 validator — make "enforced downstream" true (CRITICAL — before next unattended run)
-**Evidence (2026-07-03 full-repo audit):** the analyzer prompt promises *"Bounds you
-cannot cross with an override (Tier-1, enforced downstream)"* — floor, 90%-of-core
-ceiling, AMZN/GOOGL exemption, `max_magnitude_pp`, gate-closed-forbids-growth-beta-buys.
-Traced downstream: reference construction enforces these **on the reference only**;
-`validate_overrides` checks override *records*, never trades; the executor submits
-whatever is in `daily-trades/{date}.json` unfiltered; auto mode treats every
-recommendation as approved. A hallucinated "BUY QQQ" while the gate is closed, or a
-"SELL AMZN" through its exemption, reaches Alpaca untouched at 09:35. The promised
-safety layer does not exist — and the prompt telling the model it exists reduces the
-model's own care.
-- **Design:** pure `validate_trades(trades, reference_weights, positions, regime_gate,
-  cfg)` in `src/shared/` (same module family as Finding 2's `reconcile`): per-trade
-  clamp-or-reject with logged reasons — (i) no risk-on/amplifier BUY while gate closed
-  (DAMPER/SGOV buys permitted); (ii) no SELL taking a sleeve below `sleeve_floor_pct_of_core`;
-  (iii) no trade pushing active-quadrant share past `active_quadrant_ceiling_pct_of_core`;
-  (iv) EXEMPT_HOLDS never sold below current weight; (v) net deviation from reference
-  per sleeve ≤ accepted-override residual (ties into Finding 2 semantics); (vi) integer
-  shares, sells-before-buys reorder. Analyzer calls it after override validation, before
-  writing the trades file; rejected/clamped trades logged into the report addendum +
-  OverrideHistory. Executor gains a belt-and-suspenders assert (reject file if any trade
-  carries `validation: rejected`).
-- **Prereqs:** Finding 2 merged (shares config + module family). **Acceptance:** unit
-  tests per bound incl. gate-closed QQQ buy rejected, GLD buy passes, AMZN sell-to-zero
-  clamped, reorder test; replay of a synthetic malicious trades file yields zero
-  submittable violations.
+### 28. Trade-level Tier-1 validator — make "enforced downstream" true ✅ DONE 2026-07-04 (PR #12)
+Fixed the day after the audit filed it: new pure `shared/trade_validation.py::
+validate_trades` runs after the Finding-2 reconcile merge — V1 gate/roster, V2
+exemption, V3 window rule (`reference ± max(residual, gap_band_pp)`, floor-protected),
+V4 held/cash/integer clamps, aggregate ceiling belt. Fail-closed: a validator crash
+flags the file and the auto-executor refuses it. Details in Done.
 
 ### 29. Harden the auto-exec chain: retries + ET-date fix (HIGH — Open #1 exposure)
 **Evidence (audit):** collector 09:00 → blob-trigger analyzer (variable LLM latency) →
@@ -840,9 +820,9 @@ Three one-liners: (i) `function_app.py` cron comments still cite
 documents as silently ignored on Linux (the pre-6f42f1a 4.5h-early bug); comments must
 say `TZ=America/New_York` so nobody "restores" the wrong setting. (ii) `staleness_days:
 7` exists only as a code fallback — promote to `divergence-config.json` per the
-no-magic-numbers rule. (iii) `gap_band_pp` is defined in config but consumed by no code
-until Finding 2's `reconcile` lands — verify that consumption landed with Finding 2 and
-close this bullet.
+no-magic-numbers rule. (iii) ✅ CLOSED 2026-07-04: `gap_band_pp` is consumed by both
+Finding 2's `reconcile` (merged PR #11) and the #28 Tier-1 validator's window rule
+(PR #12) — verified this session.
 
 ### 32. Improvement Ledger — monthly self-improvement proposals + `/improvements` tab (MEDIUM-HIGH — spec WITH #13, ship with/after it)
 **Decided with the account holder 2026-07-03.** The system learns through three loops —
@@ -891,6 +871,49 @@ the monthly #13 review — Loop 3 made visible.
 ---
 
 ## Done
+- **2026-07-04** (PR #12, branch `feat/trade-validator`) — **#28 Tier-1 trade validator:
+  "enforced downstream" is now literal.** The gap: the prompt promised Tier-1 bounds
+  "enforced downstream", but nothing downstream checked the TRADES — Finding 2's
+  `reconcile` polices what the model FAILED to do (silent-hold shortfalls); a
+  hallucinated gate-closed "BUY 500 QQQ" or a SELL through the AMZN exemption or the
+  0.1% floor flowed from LLM JSON to Alpaca untouched. New pure
+  `shared/trade_validation.py::validate_trades(gaps, trades, override_decisions, cfg,
+  quadrant_ctx)` (same gap rows/config/decisions as `reconcile`; fields normalized
+  exactly as the executor normalizes them; sells-first sorted so proceeds fund buys):
+  **V1** gate rule — gate not `open` ⇒ reject amplifier buys (Damper/SGOV pass); plus
+  any off-CORE_ROSTER buy rejected regardless of gate (trades[] is core-only; flex
+  goes through nominations). **V2** exemption — EXEMPT_HOLDS sells rejected outright
+  (per risk-limits semantics + Phase B null core stops, no legitimate exit path
+  exists). **V3 window rule (the core; D1's mirror image)** — post-trade weight must
+  land in `[max(ref − W, sleeve_floor), ref + W]`, `W = max(allowed_residual,
+  gap_band_pp)` from the SAME shared `allowed_residuals` helper reconcile uses (new,
+  refactored out — the two layers cannot disagree); deviation-reducing trades always
+  pass (tranche-paced partial trims stay first-class), overshoots CLAMP to the window
+  edge (float-epsilon so rounding never costs a share), already-outside-moving-further
+  ⇒ reject; the explicit floor bound covers ref−W dipping below 0.1% and integer
+  shares leave ≥1 share on clamped core sells. **V4** — sell ≤ held, buy ≤
+  cash-after-sells (both clamp), fractional qty floored, clamped remainders under
+  `min_notional_usd` rejected. **Aggregate belt:** post-all-trades amplifier share of
+  core > max(ceiling, PRE-trade share) ⇒ ERROR log + marginal amplifier buys stripped
+  (pre-trade threshold so an already-concentrated book — or a partial fixture
+  universe — is logged, never punished for state the trades didn't cause). Every
+  surviving trade stamped `validation: {status: passed|clamped, reasons}`; rejected
+  trades move to `trade_validation.rejected` in the daily-trades JSON + a report
+  addendum (OverrideHistory rows deliberately NOT written — the JSON + addendum carry
+  the record; that table stays override-semantics-only). **Fail-closed wiring
+  (deliberate contrast to reconcile's non-fatal wrapper):** a validator crash still
+  writes report+trades but sets `validation_error: true`; the executor's AUTO path
+  (`_validation_refusal`, pure) refuses a file with that flag, with any
+  rejected-stamped trade in trades[] (any date — its presence means tampering/bug),
+  or with unstamped trades dated ≥ 2026-07-05; manual approval path unaffected.
+  `_build_reference_gaps` rows gained `held_qty`; cfg loader gained the floor/ceiling
+  scalars; prompt step 7 now states enforcement is literal. Also closes **#31(iii)**
+  (`gap_band_pp` consumed by both layers). 25 new tests incl. the malicious-file
+  replay (gate-closed QQQ buy / exempt AMZN sell / off-roster MEME buy stripped,
+  floor-breach SPY sell clamped to leave 1 share — zero submittable violations) and
+  the band_enforcement pass-through (reconcile's synthesized trades validate
+  untouched); **suite 276 green, ruff clean.** Live verification: Mon 2026-07-06
+  trades file carries validation stamps, expected zero rejections.
 - **2026-07-03** (PR #11, branch `feat/finding2-band-enforcement`) — **Finding 2 FIXED:
   the silent-hold gap is closed (OVERRIDE_SCHEMA_V1_1 + deterministic band
   enforcement).** The gap: a hold of an out-of-band sleeve required an override; an

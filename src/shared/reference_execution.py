@@ -72,6 +72,27 @@ def is_de_risk_move(side: str, symbol: str) -> bool:
     return s in _DEFENSIVE
 
 
+def allowed_residuals(override_decisions: list[dict], max_magnitude_pp: float) -> dict[str, float]:
+    """D1 — the per-sleeve residual an override may shelter: |magnitude_pp| of the
+    ACCEPTED/DOWNSIZED record for that sleeve, capped at ``max_magnitude_pp``; a
+    rejected or absent record shelters nothing. Shared by ``reconcile`` (shortfall
+    enforcement) and ``trade_validation.validate_trades`` (the V3 window rule) so
+    the two layers can never disagree on what an override authorizes."""
+    residual: dict[str, float] = {}
+    for dec in override_decisions or []:
+        if dec.get("outcome") not in ("accepted", "downsized"):
+            continue
+        ov = dec.get("override") or {}
+        sleeve = str(ov.get("sleeve") or "").upper()
+        try:
+            mag = abs(float(ov.get("magnitude_pp")))
+        except (TypeError, ValueError):
+            continue
+        if sleeve:
+            residual[sleeve] = min(max(residual.get(sleeve, 0.0), mag), float(max_magnitude_pp))
+    return residual
+
+
 def _flag(entry: dict, reason: str) -> None:
     entry["status"] = "non_compliant_flagged"
     entry["reasons"].append(reason)
@@ -126,20 +147,8 @@ def reconcile(
 
     rows = {str(g.get("symbol") or "").upper(): g for g in gaps if g.get("symbol")}
 
-    # D1 — per-sleeve allowed residual from ACCEPTED/DOWNSIZED overrides only
-    # (a rejected or absent record shelters nothing).
-    residual: dict[str, float] = {}
-    for dec in override_decisions or []:
-        if dec.get("outcome") not in ("accepted", "downsized"):
-            continue
-        ov = dec.get("override") or {}
-        sleeve = str(ov.get("sleeve") or "").upper()
-        try:
-            mag = abs(float(ov.get("magnitude_pp")))
-        except (TypeError, ValueError):
-            continue
-        if sleeve:
-            residual[sleeve] = min(max(residual.get(sleeve, 0.0), mag), max_mag)
+    # D1 — per-sleeve allowed residual (shared helper — rejected/absent shelters nothing).
+    residual = allowed_residuals(override_decisions, max_mag)
 
     # Model's net pp move TOWARD reference per sleeve (moves away count negative),
     # plus sell/buy notionals for the cash-after-sells constraint on synthesized buys.
