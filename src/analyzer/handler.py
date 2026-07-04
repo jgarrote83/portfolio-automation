@@ -27,6 +27,7 @@ from shared.clients.foundry import FoundryClient
 from shared.overrides import OVERRIDE_DEFAULTS, validate_overrides
 from shared.quadrants import CORE_ROSTER, EXEMPT_HOLDS, active_quadrant, benchmark_etf_for
 from shared.reference_execution import REFERENCE_EXECUTION_DEFAULTS, reconcile
+from shared.trade_validation import validate_trades
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +48,16 @@ def _load_override_cfg() -> dict:
 
 
 def _load_reference_execution_cfg() -> dict:
-    """override_protocol + reference_execution + exempt_holds from risk-limits.json,
-    shaped for `shared.reference_execution.reconcile` (fallback to module defaults)."""
+    """override_protocol + reference_execution + exempt_holds (+ the Tier-1 scalars the
+    trade validator needs) from risk-limits.json, shaped for
+    `shared.reference_execution.reconcile` and `shared.trade_validation.validate_trades`
+    (fallback to module defaults)."""
     out = {
         "override_protocol": dict(OVERRIDE_DEFAULTS),
         "reference_execution": dict(REFERENCE_EXECUTION_DEFAULTS),
         "exempt_holds": list(EXEMPT_HOLDS),
+        "sleeve_floor_pct_of_core": 0.1,
+        "active_quadrant_ceiling_pct_of_core": 90.0,
     }
     try:
         data = json.loads(_RISK_LIMITS_FILE.read_text(encoding="utf-8"))
@@ -64,6 +69,9 @@ def _load_reference_execution_cfg() -> dict:
             out[key] = {**out[key], **{k: v for k, v in block.items() if not k.startswith("_")}}
     if isinstance(data.get("exempt_holds"), list):
         out["exempt_holds"] = data["exempt_holds"]
+    for key in ("sleeve_floor_pct_of_core", "active_quadrant_ceiling_pct_of_core"):
+        if isinstance(data.get(key), (int, float)):
+            out[key] = float(data[key])
     return out
 
 # Prompt↔code schema gate for the Flex catalyst engine. The engine consumes
@@ -199,12 +207,14 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
     # asymmetry). Enforcement decisions are stamped into the override decisions so
     # OverrideHistory carries `enforced: true` for Phase 5. Non-fatal: an enforcement
     # error must never lose the report/trades.
+    gaps: list[dict] = []
+    ctx: dict = {}
+    rex_cfg = _load_reference_execution_cfg()
     try:
         gaps, ctx = _build_reference_gaps(snapshot)
+        ctx["date"] = date_str
+        ctx["exempt_holds"] = rex_cfg["exempt_holds"]
         if gaps:
-            rex_cfg = _load_reference_execution_cfg()
-            ctx["date"] = date_str
-            ctx["exempt_holds"] = rex_cfg["exempt_holds"]
             recon = reconcile(
                 gaps, trades_obj.get("trades", []), result.get("decisions", []),
                 rex_cfg, ctx,
@@ -231,6 +241,40 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
     except Exception as e:  # noqa: BLE001
         logger.error("Band enforcement failed (non-fatal): %s", e)
 
+    # #28 — Tier-1 trade validation, AFTER the reconcile merge so synthesized trades
+    # are stamped too (they must pass by construction; a rejection there is a
+    # reconcile bug). FAIL-CLOSED, deliberately unlike the non-fatal blocks above: a
+    # validator crash still writes the report+trades but sets `validation_error`,
+    # which the auto-executor refuses to submit (manual approval path unaffected).
+    try:
+        vctx = dict(ctx) if ctx else {
+            "deployment_gate": (snapshot.get("regime_gate") or {}).get("status"),
+            "exempt_holds": rex_cfg["exempt_holds"],
+        }
+        tv = validate_trades(
+            gaps, trades_obj.get("trades", []), result.get("decisions", []),
+            rex_cfg, vctx,
+        )
+        trades_obj["trades"] = tv["trades"]
+        trades_obj["trade_validation"] = {
+            "summary": tv["summary"], "rejected": tv["rejected"],
+        }
+        bad_enforced = [
+            t for t in tv["rejected"] if t.get("source") == "band_enforcement"
+        ]
+        if bad_enforced:
+            logger.error(
+                "Tier-1 validator rejected %d band_enforcement trade(s) — reconcile "
+                "bug, investigate: %s",
+                len(bad_enforced), [t.get("id") for t in bad_enforced],
+            )
+        if tv["rejected"] or tv["summary"]["clamped"]:
+            report_md += _validation_addendum(tv)
+        logger.info("Trade validation: %s", tv["summary"])
+    except Exception:  # noqa: BLE001
+        logger.exception("Trade validation CRASHED — flagging file (fail-closed)")
+        trades_obj["validation_error"] = True
+
     write_report(date_str, report_md)
     write_trades(date_str, trades_obj)
     _write_trade_history(date_str, trades_obj, snapshot)
@@ -245,6 +289,30 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
 # ---------------------------------------------------------------------------
 # Reference execution (Finding 2 — input assembly for shared/reference_execution.py)
 # ---------------------------------------------------------------------------
+
+def _validation_addendum(tv: dict) -> str:
+    """Markdown addendum appended to the report when the Tier-1 validator rejected or
+    clamped anything — the human-readable record next to the model's own prose."""
+    lines = [
+        "\n\n---\n\n### ⚠️ Trade-validation addendum (deterministic, post-model)\n",
+        f"Tier-1 validator result: {tv['summary']['passed']} passed, "
+        f"{tv['summary']['clamped']} clamped, {tv['summary']['rejected']} rejected.\n",
+    ]
+    for t in tv.get("rejected", []):
+        reasons = "; ".join((t.get("validation") or {}).get("reasons", []))
+        lines.append(
+            f"- **REJECTED** {t.get('side', '?').upper()} {t.get('quantity', '?')} "
+            f"{t.get('symbol', '?')} ({t.get('id', 'no-id')}): {reasons}"
+        )
+    for t in tv.get("trades", []):
+        v = t.get("validation") or {}
+        if v.get("status") == "clamped":
+            lines.append(
+                f"- **CLAMPED** {t.get('side', '?').upper()} {t.get('symbol', '?')} "
+                f"({t.get('id', 'no-id')}): {'; '.join(v.get('reasons', []))}"
+            )
+    return "\n".join(lines) + "\n"
+
 
 def _build_reference_gaps(snapshot: dict) -> tuple[list[dict], dict]:
     """Per-sleeve current-vs-reference rows + account context for `reconcile()`.
@@ -285,15 +353,21 @@ def _build_reference_gaps(snapshot: dict) -> tuple[list[dict], dict]:
     gaps = []
     universe = {str(t).upper() for t in targets} | (set(positions) & set(CORE_ROSTER))
     for sym in sorted(universe):
+        pos = positions.get(sym) or {}
         try:
-            mv = float((positions.get(sym) or {}).get("market_value") or 0)
+            mv = float(pos.get("market_value") or 0)
         except (TypeError, ValueError):
             mv = 0.0
+        try:
+            held_qty = float(pos.get("quantity") or 0)
+        except (TypeError, ValueError):
+            held_qty = 0.0
         gaps.append({
             "symbol": sym,
             "current_pct": round(mv / equity * 100.0, 4),
             "reference_pct": round(float(targets.get(sym, 0.0) or 0.0), 4),
             "price": _price(sym),
+            "held_qty": held_qty,   # V4 sell-clamp input for the Tier-1 validator
         })
     ctx = {
         "deployment_gate": (snapshot.get("regime_gate") or {}).get("status"),
