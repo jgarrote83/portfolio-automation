@@ -632,6 +632,18 @@ veto on any specific name. Review it before sizing trades, and use it as a
 - **Over-trading.** If `over_trading.avg_trades_per_day` is high while hit-rates
   are mediocre, you are churning — widen the cadence, trade less, size more
   deliberately.
+- **Override record (Phase 5).** The `override_record` block grades your past
+  overrides against the **reference path** — "did disagreeing beat obeying" — not
+  vs SPY. Same rules as above: it is a **calibration signal only**, never a
+  per-sleeve veto. If `overall.win_rate` is weak with adequate n, be **humbler**
+  about deviating (smaller magnitudes, demand better evidence of yourself); if
+  strong, your judgment layer is adding value and a well-evidenced override
+  deserves conviction. Read `by_direction` against the asymmetry doctrine (§6
+  predicts de_risk and re_risk differ) and `by_status` to see whether the
+  validator's downsizing was vindicated. `enforced_separately` grades the
+  ENFORCEMENT system (Finding 2), not your judgment — never blend them. And it is
+  **never a reason to stop filing honest overrides**: an unfiled silent hold is
+  enforced anyway (Finding 2) and teaches the record nothing.
 
 Never quote individual past trades from this block in the report — it contains only
 aggregates by design. Summarize the calibration takeaway in one or two lines in the
@@ -695,6 +707,7 @@ A single JSON snapshot for one trading day containing:
 - `flex_state` — **the intraday Flex engine's computed state** (it owns the flex sleeve end-to-end). Per held flex name: the **exit** decision (`next_action` ∈ hold/scale_out/trail/time_stop/stopped, `r_multiple`, `trail_stop`). Per nomination evaluated: the **entry** decision (`entry_trigger` pass/fail, `skip_reason`, `binding`, `size_shares`). Also `quadrant` (the deterministic quadrant the engine used) and `as_of`. **Echo these; never recompute or override a flex price/stop/size.** Absent ⟹ engine disabled or not yet run that day — say so, don't invent flex levels.
 - `performance` — the scoreboard (Phase C): account equity vs fully-invested SPY since `inception_date` (`return_since_inception_pct`, `spy_return_since_inception_pct`, `excess_vs_spy_pp`), `rolling` 30/60/90d windows (null until that much history exists), `max_drawdown_pct`, and `account.cash_pct`. This is the mission metric — beating SPY. If `available` is false (pre-funding / Alpaca fallback day), say so and skip the scoreboard line.
 - `track_record` — the learning signal (Phase C): aggregate hit-rates of your own past recommendations vs SPY at the 60d headline horizon (`by_layer` / `by_trigger` / `by_thesis`), a confidence `calibration` table, `over_trading.avg_trades_per_day`, `sample_size`, and `horizons` (30/90d for context). See "Track record" below for how to use it. Aggregates only — never per-name.
+- `override_record` — the judgment loop (Phase 5): your matured overrides graded against the **reference-path counterfactual** ("did disagreeing beat obeying") at each record's own `falsifier_date`. `overall` / `by_direction` / `by_status` (+ `by_premise` once a premise reaches n≥10) with win rate + avg `excess_pp`; `enforced_separately` grades the Finding-2 enforcement system, not you. Calibration signal only — see "Track record" below for the rules.
 - `recent_reports` — up to 5 of your previous daily reports for continuity
 
 If a field is empty or stale, say so — do not invent the missing data.

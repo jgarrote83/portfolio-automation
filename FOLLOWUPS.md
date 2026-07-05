@@ -171,13 +171,12 @@ magnitude-bounded, asymmetric, logged override (de-risk cheap / re-risk dear). T
   parked: per-name intersection weighting (gold multiplier) — equal-weight is correct for now
   (GLD anchors via being in the intersection at ~6x any divergent name, not by out-weighting
   XLP/MCK).
-- **REMAINING (after the 2 checkpoint findings above are addressed): brief Phase 5** = override-outcome
-  stamping into the track record — when an `OverrideHistory` row's `falsifier_date` matures,
-  stamp whether the override was right/wrong (mirror the Phase-C trade outcome-stamping in the
-  collector) and surface aggregate override calibration back into the snapshot as an input, so
-  the LLM calibrates against its own override record. `OverrideHistory` already carries the
-  write-once records + null hooks (`outcome_status`/`resolved_correct`) for this. Design +
-  decisions in `memory/*-design.md`.
+- **Brief Phase 5 ✅ DONE 2026-07-05 (PR #14)** — override-outcome stamping shipped:
+  matured `OverrideHistory` rows are graded against the **reference-path
+  counterfactual** ("did disagreeing beat obeying" — locked decision 2026-07-04, NOT
+  vs SPY) and the aggregate `override_record` block feeds the snapshot + prompt.
+  **The responsiveness brief (Phases 1–5) is COMPLETE. #12 → #13/#14 are unblocked.**
+  Details in Done.
 - **Interim `concentration_gap` work** (earlier same day) is **stashed** (`git stash` "concentration_gap WIP")
   and **superseded** by `reference_weights` — its reusable bits (EXEMPT_HOLDS, favored_bucket) were
   folded in; drop the stash once Phase 4 lands.
@@ -871,6 +870,56 @@ the monthly #13 review — Loop 3 made visible.
 ---
 
 ## Done
+- **2026-07-05** (PR #14, branch `feat/phase5-override-outcomes`) — **Brief Phase 5:
+  override-outcome stamping (reference-path counterfactual) — the responsiveness
+  brief is COMPLETE.** Overrides were falsifiable bet slips nobody ever collected
+  on: the `outcome_status`/`resolved_correct` hooks sat empty since Phase 4d.
+  **Locked decision (account holder, 2026-07-04; this session's prompt is the
+  decision record — memory design docs not on this box): overrides are graded
+  against the REFERENCE PATH — "did disagreeing beat obeying" — not vs SPY.**
+  Built, mirroring the Phase-C stamper conventions exactly:
+  **(1) `_stamp_override_outcomes(fmp)`** (daily, non-fatal, after
+  `_stamp_trade_outcomes`): queries `falsifier_date le today` + unstamped (synthetic
+  enforcement rows without a falsifier_date are auto-excluded — the OData property
+  is absent; those bets are graded via their `band_enforcement` trades in
+  TradeHistory). Counterfactual per row over [filed=`recommended_at`,
+  `falsifier_date`]: `ret_sleeve` vs `ret_reference = Σ target_weights_pct[i]/100 ×
+  ret_i` using the FILED-DATE vector reconstructed from
+  `daily-snapshots/{filed}.json` (no schema change, works retroactively); the
+  vector is SGOV-denominated cash (verified: `weights["SGOV"]` is in
+  `target_weights_pct`, `__cash__` is popped to `literal_cash_target_pct`) so SGOV
+  earns its real return and literal cash implicitly earns 0.0.
+  `excess_pp = sign × (ret_sleeve − ret_reference)` where sign = +1 held-MORE /
+  −1 held-LESS, derived deterministically from direction × block membership
+  (re_risk+amplifier or de_risk+damper ⇒ MORE; the other two cells ⇒ LESS).
+  `resolved_correct = excess_pp > 0`; `indeterminate_data` on any missing material
+  input (no filed-date snapshot, unpriced sleeve, any ≥1% reference component
+  unpriced, <90% of vector weight priced) — never guess; sub-1% floor sleeves are
+  de minimis. Prices from `performance/equity-series.json` closes (last close ≤
+  boundary — falsifier dates land on weekends), FMP fallback one call per unique
+  missing symbol. Stamps `ret_sleeve_pct`/`ret_reference_pct`/`excess_pp`/
+  `resolved_correct`/`outcome_status`/`resolved_at`. Free-text falsifier
+  interpretation EXPLICITLY out of scope — mechanical grading only; falsifier
+  QUALITY is the #13 monthly review's job.
+  **(2) `override_record` snapshot block** (pure `_aggregate_override_record`,
+  sibling of track_record: capture-fine/report-coarse, same n≥10 promotion —
+  `by_premise` promotes at `_TRIGGER_PROMOTION_MIN`): `overall` win rate + avg
+  `excess_pp`, `by_direction` (the §6 asymmetry doctrine predicts de_risk ≠
+  re_risk), `by_status` (accepted/downsized/rejected), with **`enforced: true`
+  rows aggregated SEPARATELY** (they grade the enforcement system, not the model's
+  judgment — blending poisons both lessons), `sample_size` + `caveat`
+  (price-return-only v1, small-n).
+  **(3) Prompt**: "Track record — calibrate against your own results" extended with
+  the override record under the same guardrails — a CALIBRATION signal
+  (humbler/bolder about deviating), never a per-sleeve veto, never a reason to stop
+  filing honest overrides (an unfiled silent hold is enforced anyway per Finding 2
+  and learns nothing); inputs list gains `override_record`. 14 new tests (sign
+  convention all four cells, counterfactual hand-math incl. SGOV cash pricing,
+  every indeterminate guard, aggregator splits + enforced separation + premise
+  promotion); **suite 290 green, ruff clean.** Closes the judgment loop the way
+  Phase C closed the trade loop — **responsiveness brief Phases 1–5 all shipped;
+  #12 → #13/#14 unblocked.** First real stamps land when the earliest
+  `falsifier_date` records mature (~mid-July).
 - **2026-07-04** (PR #12, branch `feat/trade-validator`) — **#28 Tier-1 trade validator:
   "enforced downstream" is now literal.** The gap: the prompt promised Tier-1 bounds
   "enforced downstream", but nothing downstream checked the TRADES — Finding 2's
