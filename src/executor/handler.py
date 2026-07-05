@@ -14,6 +14,7 @@ Outputs:
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 
@@ -26,6 +27,7 @@ from shared.storage import (
     write_executions,
 )
 from shared.clients.alpaca import AlpacaClient
+from shared.timeutil import now_et, today_et
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,59 @@ logger = logging.getLogger(__name__)
 # did not run over that list. Files dated earlier predate the validator deploy and
 # are tolerated. Manual approval path is unaffected.
 _VALIDATION_STAMPS_REQUIRED_FROM = "2026-07-05"
+
+
+def run_auto_execute(label: str = "auto_executor", now: datetime | None = None) -> dict | None:
+    """Shared body for the `auto_executor` (09:35 ET) and `auto_executor_retry`
+    (10:05 + 11:05 ET) timers (#29) — the timer wrappers in function_app.py stay
+    thin so this logic is unit-testable without azure.functions.
+
+    The trading date comes from `today_et` (NEVER UTC — an evening or late fire
+    must not roll to tomorrow's empty file). Retries are idempotent by the cache
+    asymmetry in `execute_approvals`: success/`all_filtered` are cached (a retry is
+    one blob read + exit), while `no_trades`/`refused_validation`/`no_approvals`/
+    `no_match`/`deferred_market_closed` are NOT cached, so a retry genuinely
+    re-attempts. `client_order_id` is date+trade-id scoped, so even a crash
+    mid-submission cannot double-fill on retry (Alpaca rejects duplicates).
+
+    Escalation (retry fires only): `no_trades` at ≥11:00 ET logs ERROR (the
+    analyzer never produced the file — App Insights alertable); at 10:05 the same
+    outcome stays WARNING (the analyzer may still be generating).
+    `refused_validation` on a retry is ERROR either way — the file exists but is
+    quarantined, a different post-mortem. Returns the executor result (None when
+    gated off or crashed); the timers ignore it.
+    """
+    if os.getenv("AUTO_EXECUTE_ENABLED", "false").lower() != "true":
+        logger.info("AUTO_EXECUTE_ENABLED is not 'true' — skipping %s", label)
+        return None
+    et_now = now_et(now)
+    date_str = today_et(et_now)
+    try:
+        result = execute_approvals(date_str, force=False, auto=True)
+    except Exception:  # noqa: BLE001
+        logger.exception("%s failed for %s", label, date_str)
+        return None
+
+    status = result.get("status")
+    if label != "auto_executor":   # escalation applies to the retry fires only
+        if status == "no_trades":
+            if et_now.hour >= 11:
+                logger.error(
+                    "analyzer never produced daily-trades/%s.json — day will not "
+                    "auto-execute", date_str,
+                )
+            else:
+                logger.warning(
+                    "%s: no trades file yet for %s (analyzer late?) — final retry "
+                    "at 11:05 ET", label, date_str,
+                )
+        elif status == "refused_validation":
+            logger.error(
+                "%s: daily-trades/%s.json exists but is QUARANTINED (%s) — day "
+                "will not auto-execute", label, date_str, result.get("reason"),
+            )
+    logger.info("%s result for %s: %s", label, date_str, status)
+    return result
 
 
 def execute_approvals(date_str: str, force: bool = False, auto: bool = False) -> dict:
@@ -157,6 +212,12 @@ def execute_approvals(date_str: str, force: bool = False, auto: bool = False) ->
             "skipped": skipped,
             "executions": [],
         }
+        # CACHED deliberately (like success): every sell filtered away is a TERMINAL
+        # outcome for the day. Do NOT add write_executions to the other paths
+        # (no_trades / refused_validation / no_approvals / no_match /
+        # deferred_market_closed) — the #29 retry timers depend on those staying
+        # UNCACHED so a retry genuinely re-attempts; caching them kills retries
+        # silently.
         write_executions(date_str, result)
         return result
 
@@ -195,6 +256,8 @@ def execute_approvals(date_str: str, force: bool = False, auto: bool = False) ->
         "skipped": skipped,
         "executions": executions,
     }
+    # TERMINAL outcome — cached; the failure paths above stay uncached so the #29
+    # retry timers can re-attempt (see the all_filtered comment).
     write_executions(date_str, result)
     _write_trade_history(date_str, executions)
     logger.info(

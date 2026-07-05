@@ -5,3 +5,4 @@ azure-storage-blob>=12.22.0
 azure-data-tables>=12.5.0
 requests>=2.32.0
 requests-oauthlib>=2.0.0
+tzdata>=2024.1          # IANA db for zoneinfo (#29 today_et) — required on Windows dev boxes, harmless on Linux

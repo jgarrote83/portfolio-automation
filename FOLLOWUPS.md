@@ -783,22 +783,13 @@ exemption, V3 window rule (`reference ± max(residual, gap_band_pp)`, floor-prot
 V4 held/cash/integer clamps, aggregate ceiling belt. Fail-closed: a validator crash
 flags the file and the auto-executor refuses it. Details in Done.
 
-### 29. Harden the auto-exec chain: retries + ET-date fix (HIGH — Open #1 exposure)
-**Evidence (audit):** collector 09:00 → blob-trigger analyzer (variable LLM latency) →
-auto-exec at a **fixed** 09:35 reading today's file. Analyzer >35 min or failed ⇒
-`no_trades` and **no retry** — the day silently never executes. This is the most likely
-silent failure of the first unattended runs. Also latent: `auto_executor` computes
-"today" as `datetime.now(timezone.utc)` — coincides with ET at 09:35, but any evening
-timer (or a naive retry addition) rolls the UTC date and reads tomorrow's empty file.
-- **Design:** (i) add retry timer fires at 10:05 and 11:05 ET calling the same
-  `execute_approvals` — already idempotent via the cached `daily-executions/{date}.json`
-  check and date-scoped `client_order_id`, so retries are safe by construction;
-  (ii) compute `date_str` with `zoneinfo("America/New_York")` in all three timers;
-  (iii) log a loud warning when 11:05 still finds no trades file (analyzer post-mortem
-  flag).
-- **Prereqs:** none — standalone. **Acceptance:** unit test for ET-date at a simulated
-  20:30 ET clock; manual test: delete today's executions blob, re-fire, cached-result
-  path exercised.
+### 29. Harden the auto-exec chain: retries + ET-date fix ✅ DONE 2026-07-04 (PR #13)
+Fixed the day after the audit filed it: new `shared/timeutil.py::today_et/now_et`
+(zoneinfo, `tzdata` pinned), `auto_executor_retry` timer at 10:05 + 11:05 ET sharing
+`executor.run_auto_execute` with the primary 09:35 shot, escalation (no_trades
+WARNING at 10:05 → ERROR at ≥11:00 ET; refused_validation ERROR on any retry), and
+cache-asymmetry comments guarding the idempotency mechanism. Also closed #31(i).
+Details in Done.
 
 ### 30. Analyzer blob-trigger backfill guard (MEDIUM — history integrity)
 **Evidence (audit):** the analyzer blob trigger fires for **any** blob landing in
@@ -814,14 +805,13 @@ is not.
   regenerate; fresh date ⇒ normal run.
 
 ### 31. Config/comment hygiene from the audit (LOW — batch with any session)
-Three one-liners: (i) `function_app.py` cron comments still cite
-`WEBSITE_TIME_ZONE=Eastern Standard Time` — the Windows-only setting CLAUDE.md
-documents as silently ignored on Linux (the pre-6f42f1a 4.5h-early bug); comments must
-say `TZ=America/New_York` so nobody "restores" the wrong setting. (ii) `staleness_days:
-7` exists only as a code fallback — promote to `divergence-config.json` per the
-no-magic-numbers rule. (iii) ✅ CLOSED 2026-07-04: `gap_band_pp` is consumed by both
-Finding 2's `reconcile` (merged PR #11) and the #28 Tier-1 validator's window rule
-(PR #12) — verified this session.
+Three one-liners — **only (ii) remains**: (i) ✅ CLOSED 2026-07-04 (PR #13, with #29):
+`function_app.py` cron comments now cite `TZ=America/New_York` and explicitly warn
+that `WEBSITE_TIME_ZONE` is Windows-only / silently ignored on Linux (the pre-6f42f1a
+4.5h-early bug). (ii) `staleness_days: 7` exists only as a code fallback — promote to
+`divergence-config.json` per the no-magic-numbers rule. (iii) ✅ CLOSED 2026-07-04:
+`gap_band_pp` is consumed by both Finding 2's `reconcile` (merged PR #11) and the #28
+Tier-1 validator's window rule (PR #12) — verified.
 
 ### 32. Improvement Ledger — monthly self-improvement proposals + `/improvements` tab (MEDIUM-HIGH — spec WITH #13, ship with/after it)
 **Decided with the account holder 2026-07-03.** The system learns through three loops —
@@ -920,6 +910,44 @@ the monthly #13 review — Loop 3 made visible.
   Phase C closed the trade loop — **responsiveness brief Phases 1–5 all shipped;
   #12 → #13/#14 unblocked.** First real stamps land when the earliest
   `falsifier_date` records mature (~mid-July).
+- **2026-07-04** (PR #13, branch `feat/auto-exec-retries`) — **#29 auto-exec chain
+  hardened: retry timers + ET-date fix.** The gap: collector 09:00 → blob-trigger
+  analyzer (variable LLM latency; the 07-02 outage produced >4-min generations) →
+  auto-exec at a FIXED 09:35 reading today's file — analyzer >35 min or failed ⇒
+  `no_trades`, no retry, the day silently never executes; `deferred_market_closed`
+  deferred to NOTHING (no re-invocation existed — retries give it meaning); and
+  "today" was computed in UTC, which coincides with ET at 09:35 but rolls the date
+  for any evening/retry fire. Built: **(1)** `shared/timeutil.py::today_et/now_et`
+  (`zoneinfo("America/New_York")`; `tzdata` pinned in requirements — needed on
+  Windows dev boxes, harmless on Linux); the UTC-date grep found and fixed the two
+  real date-for-blob-path computations (`function_app.auto_executor`,
+  `seeder._load_holdings` snapshot mode); collector `date.today()` calls are
+  ET-correct via the `TZ` app setting (documented contract) and UTC timestamps
+  (`generated_at`/`executed_at`/`submitted_at`) are correct as-is. **(2)** New
+  `auto_executor_retry` timer, NCRONTAB `0 5 10,11 * * 1-5` (10:05 + 11:05 ET),
+  same gating; both timers are thin wrappers over the new
+  `executor.run_auto_execute(label, now)` (in executor/handler.py rather than
+  function_app.py so the logic is unit-testable without azure.functions).
+  **(3)** Escalation in the retry fires: `no_trades` at ≥11:00 ET → ERROR
+  ("analyzer never produced daily-trades/{date}.json — day will not auto-execute",
+  App Insights alertable), 10:05 → WARNING; `refused_validation` → ERROR at any
+  retry hour (file exists but quarantined — different post-mortem). **(4)** No
+  status/caching behavior change. **Two discoveries recorded:** (i) the CACHE
+  ASYMMETRY is the idempotency mechanism — `write_executions` fires ONLY on
+  `ok`/`all_filtered` (terminal), while `no_trades`/`refused_validation`/
+  `no_approvals`/`no_match`/`deferred_market_closed` return UNCACHED, so a retry on
+  a cached day is one blob read + exit and on an uncached day is a genuine
+  re-attempt (comments now guard both call sites against a future session
+  "helpfully" caching the failure paths); (ii) the date+trade-id-scoped
+  `client_order_id` (verified: `f"{date_str}-{trade_id}"[:48]`) is the double-submit
+  backstop — a crash mid-submission cannot double-fill on retry (Alpaca rejects
+  duplicates). Also closed **#31(i)** (cron comments now cite `TZ=America/New_York`
+  + warn WEBSITE_TIME_ZONE is Windows-only). 12 new tests (evening-clock ET date,
+  cached-retry-touches-nothing proof, no_trades re-attempt, 10:05/11:05 escalation
+  boundary, primary-fire-no-escalation, quarantine ERROR, evening retry reads
+  today's file); **suite 288 green, ruff clean.** Live verification Mon 2026-07-06:
+  09:35 executes; 10:05/11:05 fire, hit the cached result, exit in one read (App
+  Insights traces).
 - **2026-07-04** (PR #12, branch `feat/trade-validator`) — **#28 Tier-1 trade validator:
   "enforced downstream" is now literal.** The gap: the prompt promised Tier-1 bounds
   "enforced downstream", but nothing downstream checked the TRADES — Finding 2's

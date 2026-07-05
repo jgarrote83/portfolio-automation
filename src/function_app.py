@@ -1,13 +1,12 @@
 import json
 import logging
 import os
-from datetime import datetime, timezone
 
 import azure.functions as func
 
 from collector.handler import run as collector_run
 from analyzer.handler import analyze_snapshot
-from executor.handler import execute_approvals
+from executor.handler import execute_approvals, run_auto_execute
 from seeder.handler import seed_positions
 from flex.handler import run_flex_intraday
 from shared.storage import read_blob_bytes
@@ -18,7 +17,10 @@ app = func.FunctionApp()
 
 
 @app.timer_trigger(
-    schedule="0 0 9 * * 1-5",    # 09:00 ET weekdays (WEBSITE_TIME_ZONE=Eastern Standard Time)
+    # 09:00 ET weekdays — ET-local via the TZ=America/New_York app setting.
+    # (NOT WEBSITE_TIME_ZONE: that setting is Windows-only and silently ignored on
+    # Linux — restoring it re-introduces the pre-6f42f1a 4.5h-early cron bug.)
+    schedule="0 0 9 * * 1-5",
     arg_name="timer",
     run_on_startup=False,
     use_monitor=True,
@@ -44,29 +46,43 @@ def analyzer(snapshot: func.InputStream) -> None:
 
 
 @app.timer_trigger(
-    schedule="0 35 9 * * 1-5",   # 09:35 ET weekdays — 5 min after open (WEBSITE_TIME_ZONE)
+    # 09:35 ET weekdays — 5 min after open (ET-local via TZ=America/New_York, not
+    # the Windows-only WEBSITE_TIME_ZONE).
+    schedule="0 35 9 * * 1-5",
     arg_name="timer",
     run_on_startup=False,
     use_monitor=True,
 )
 def auto_executor(timer: func.TimerRequest) -> None:
-    """Paper-only auto-execute. Gated by AUTO_EXECUTE_ENABLED app setting.
+    """Paper-only auto-execute (thin wrapper — logic in executor.run_auto_execute).
 
-    Reads today's `daily-trades/{date}.json` and submits every recommendation
-    to Alpaca paper. Market-closed gate inside execute_approvals will defer
-    if open is missed (e.g. holiday).
+    Reads today's `daily-trades/{date}.json` (ET trading date, #29) and submits
+    every recommendation to Alpaca paper. Gated by AUTO_EXECUTE_ENABLED inside
+    the helper; market-closed gate inside execute_approvals defers if open is
+    missed (e.g. holiday).
     """
     if timer.past_due:
         logger.warning("auto_executor timer was past due — running now")
-    if os.getenv("AUTO_EXECUTE_ENABLED", "false").lower() != "true":
-        logger.info("AUTO_EXECUTE_ENABLED is not 'true' — skipping auto execution")
-        return
-    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    try:
-        result = execute_approvals(date_str, force=False, auto=True)
-        logger.info("auto_executor result for %s: %s", date_str, result.get("status"))
-    except Exception:  # noqa: BLE001
-        logger.exception("auto_executor failed for %s", date_str)
+    run_auto_execute("auto_executor")
+
+
+@app.timer_trigger(
+    # 10:05 + 11:05 ET weekday retries (#29): the 09:35 shot reads a file the
+    # analyzer produces with VARIABLE LLM latency — analyzer >35 min or failed
+    # previously meant the day silently never executed, and deferred_market_closed
+    # deferred to nothing. Idempotent by the executor's cache asymmetry (terminal
+    # outcomes cached, failures not).
+    schedule="0 5 10,11 * * 1-5",
+    arg_name="timer",
+    run_on_startup=False,
+    use_monitor=True,
+)
+def auto_executor_retry(timer: func.TimerRequest) -> None:
+    """Retry net for auto_executor (thin wrapper — logic + escalation in
+    executor.run_auto_execute: no_trades at ≥11:00 ET logs ERROR)."""
+    if timer.past_due:
+        logger.warning("auto_executor_retry timer was past due — running now")
+    run_auto_execute("auto_executor_retry")
 
 
 @app.timer_trigger(
