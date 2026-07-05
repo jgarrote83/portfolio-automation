@@ -24,6 +24,7 @@ from shared.clients.alpaca import AlpacaClient
 from shared.quadrants import (
     AMPLIFIER_INTL,
     CORE_ROSTER,
+    DAMPER,
     EXEMPT_HOLDS,
     QUADRANT_BENCHMARK_ETF,
     QUADRANT_CONCENTRATE,
@@ -646,6 +647,238 @@ def _build_track_record() -> dict:
     return _aggregate_track_record(query_entities("TradeHistory"))
 
 
+# ---------------------------------------------------------------------------
+# Brief Phase 5 — override-outcome stamping (reference-path counterfactual)
+# ---------------------------------------------------------------------------
+# Overrides are falsifiable bet slips; until Phase 5 nothing ever collected on the
+# bets (the outcome_status/resolved_correct hooks sat empty since Phase 4d).
+# LOCKED DECISION (account holder, 2026-07-04): an override is graded against the
+# REFERENCE PATH — "did disagreeing beat obeying" — NOT vs SPY. The counterfactual
+# portfolio is the filed-date reference vector itself (reference_weights.
+# target_weights_pct from that day's snapshot: per-ticker % of equity incl. the
+# SGOV-denominated cash sleeve; the small literal-cash remainder is absent from the
+# vector and thus implicitly earns 0.0, which is exactly right).
+
+def _override_sign(sleeve: str, direction: str) -> float | None:
+    """+1 when the override held MORE of the sleeve than reference, −1 when LESS.
+
+    The row stores the deviation's RISK direction, not the weight direction, but
+    the two determine each other through the block model: holding more of a
+    defensive name (or less of an amplifier) than reference IS the de-risk
+    deviation, and vice versa. None for an invalid direction."""
+    d = (direction or "").lower()
+    if d not in ("de_risk", "re_risk"):
+        return None
+    defensive = (sleeve or "").upper() in set(DAMPER)
+    return 1.0 if defensive == (d == "de_risk") else -1.0
+
+
+def _grade_override(row: dict, ref_vector: dict | None, px) -> dict:
+    """Grade ONE matured override vs the reference-path counterfactual (pure).
+
+    ``px(symbol, date) -> float | None`` returns the last close on/before `date`.
+    Over [filed=recommended_at, matured=falsifier_date]:
+        ret_sleeve    = price return of the override's sleeve
+        ret_reference = Σ target_weights_pct[i]/100 × ret_i (filed-date vector)
+        excess_pp     = sign × (ret_sleeve − ret_reference)
+    where sign is +1 if the override held MORE of the sleeve than reference
+    (hold/overweight) and −1 if LESS (refused buy / underweight). Any missing
+    material input → ``indeterminate_data`` — never guess: a reference component
+    weighing ≥1% that cannot be priced voids the grade (sub-1% floor sleeves are
+    skipped as de minimis; ≥90% of the vector's weight must be priced overall).
+    Free-text falsifier interpretation is EXPLICITLY out of scope — mechanical
+    price grading only; judging falsifier quality is the #13 monthly review's job.
+    """
+    indeterminate = {"outcome_status": "indeterminate_data", "resolved_correct": None}
+    filed = str(row.get("recommended_at") or "")[:10]
+    matured = str(row.get("falsifier_date") or "")[:10]
+    sleeve = str(row.get("sleeve") or "").upper()
+    sign = _override_sign(sleeve, row.get("direction"))
+    if not filed or not matured or not sleeve or sign is None or not ref_vector:
+        return indeterminate
+
+    p0, p1 = px(sleeve, filed), px(sleeve, matured)
+    if not p0 or not p1:
+        return indeterminate
+    ret_sleeve = (p1 / p0 - 1) * 100.0
+
+    total_w = priced_w = ret_ref = 0.0
+    for sym, w in ref_vector.items():
+        try:
+            w = float(w)
+        except (TypeError, ValueError):
+            continue
+        if w <= 0:
+            continue
+        total_w += w
+        q0 = px(str(sym).upper(), filed)
+        q1 = px(str(sym).upper(), matured)
+        if not q0 or not q1:
+            if w >= 1.0:
+                return indeterminate   # material component unpriced — void, don't guess
+            continue                   # de-minimis floor sleeve — skip
+        priced_w += w
+        ret_ref += w / 100.0 * (q1 / q0 - 1) * 100.0
+    if total_w <= 0 or priced_w / total_w < 0.9:
+        return indeterminate
+
+    excess = sign * (ret_sleeve - ret_ref)
+    return {
+        "ret_sleeve_pct": round(ret_sleeve, 4),
+        "ret_reference_pct": round(ret_ref, 4),
+        "excess_pp": round(excess, 4),
+        "resolved_correct": excess > 0,
+        "outcome_status": "resolved_correct" if excess > 0 else "resolved_wrong",
+    }
+
+
+def _stamp_override_outcomes(fmp: FMPClient) -> None:
+    """Brief Phase 5: stamp matured OverrideHistory rows (mirror of Phase C §5).
+
+    Selects rows whose `falsifier_date` has passed and whose `outcome_status` is
+    still empty. Synthetic enforcement rows without a falsifier_date are never
+    selected (the property is absent, so the OData filter excludes them) — those
+    bets are already graded via their `band_enforcement` trades in TradeHistory.
+    Prices come from the `performance/equity-series.json` closes (last close on or
+    before each boundary date — falsifier dates land on weekends); FMP fallback
+    only for gaps, one call per unique missing symbol. The filed-date reference
+    vector is reconstructed from `daily-snapshots/{filed}.json` (no schema change;
+    works retroactively). Caller wraps in try/except — never breaks the collector.
+    """
+    today = date.today().isoformat()
+    rows = query_entities("OverrideHistory", f"falsifier_date le '{today}'")
+    pending = [r for r in rows if not r.get("outcome_status")]
+    if not pending:
+        logger.info("Override stamping: nothing matured to stamp")
+        return
+
+    # Price lookup: perf-series closes first (already on disk daily), FMP per
+    # unique missing symbol as fallback.
+    perf_points = sorted(
+        ((p.get("date"), p.get("closes") or {}) for p in read_perf_series() if p.get("date")),
+    )
+    fmp_cache: dict[str, dict[str, float]] = {}
+
+    def _px(sym: str, d: str) -> float | None:
+        best = None
+        for pd, closes in perf_points:
+            if pd > d:
+                break
+            c = closes.get(sym)
+            if c is not None:
+                best = float(c)
+        if best is not None:
+            return best
+        if sym not in fmp_cache:
+            fmp_cache[sym] = _close_by_date(fmp, sym)
+        return _close_on_or_before(fmp_cache[sym], d)
+
+    # Filed-date reference vectors, one snapshot read per unique filed date.
+    ref_cache: dict[str, dict | None] = {}
+
+    def _ref_vector(filed: str) -> dict | None:
+        if filed not in ref_cache:
+            try:
+                snap = read_snapshot(filed)
+                ref_cache[filed] = (
+                    (snap.get("reference_weights") or {}).get("target_weights_pct") or None
+                )
+            except Exception:  # noqa: BLE001
+                ref_cache[filed] = None   # missing filed-date snapshot → indeterminate
+        return ref_cache[filed]
+
+    stamped = 0
+    for r in pending:
+        filed = str(r.get("recommended_at") or "")[:10]
+        grade = _grade_override(r, _ref_vector(filed) if filed else None, _px)
+        try:
+            upsert_entity("OverrideHistory", {
+                "PartitionKey": r["PartitionKey"], "RowKey": r["RowKey"],
+                "resolved_at": today, **grade,
+            })
+            stamped += 1
+        except Exception:  # noqa: BLE001
+            logger.exception("Override stamping upsert failed for %s", r.get("RowKey"))
+    logger.info("Override stamping: %d row(s) stamped (of %d pending)", stamped, len(pending))
+
+
+def _aggregate_override_record(rows: list[dict]) -> dict:
+    """Brief Phase 5 §2 — roll stamped OverrideHistory rows into the compact
+    `override_record` snapshot block (sibling of track_record: capture-fine /
+    report-coarse, same n≥10 promotion rule as 7c). Pure over `rows`.
+
+    Grades are vs the REFERENCE PATH ("did disagreeing beat obeying"), price-return
+    only in v1. `enforced: true` rows aggregate SEPARATELY — they grade the
+    ENFORCEMENT system, not the model's judgment; blending would poison both
+    lessons. Splits: `by_direction` (the §6 asymmetry doctrine predicts de_risk and
+    re_risk differ) and `by_status` (accepted/downsized vs rejected); `by_premise`
+    reports a premise only once it clears the promotion threshold.
+    """
+    resolved = [r for r in rows
+                if r.get("outcome_status") in ("resolved_correct", "resolved_wrong")]
+    model = [r for r in resolved if not r.get("enforced")]
+    enforced = [r for r in resolved if r.get("enforced")]
+
+    def _cell(subset: list[dict]) -> dict:
+        wins = sum(1 for r in subset if r.get("resolved_correct"))
+        exc = [float(r["excess_pp"]) for r in subset
+               if isinstance(r.get("excess_pp"), (int, float))]
+        return {
+            "n": len(subset),
+            "win_rate": round(wins / len(subset), 2),
+            "avg_excess_pp": round(sum(exc) / len(exc), 2) if exc else None,
+        }
+
+    block: dict = {
+        "basis": "reference_path_counterfactual",
+        "sample_size": len(model),
+    }
+    if not model and not enforced:
+        block["note"] = "no matured override outcomes yet"
+        block["caveat"] = "no matured overrides; do not infer judgment skill yet"
+        return block
+
+    if model:
+        block["overall"] = _cell(model)
+        by_direction = {}
+        for d in ("de_risk", "re_risk"):
+            sub = [r for r in model if (r.get("direction") or "").lower() == d]
+            if sub:
+                by_direction[d] = _cell(sub)
+        if by_direction:
+            block["by_direction"] = by_direction
+        by_status = {}
+        for s in ("accepted", "downsized", "rejected"):
+            sub = [r for r in model if (r.get("outcome") or "") == s]
+            if sub:
+                by_status[s] = _cell(sub)
+        if by_status:
+            block["by_status"] = by_status
+        prem_groups: dict[str, list[dict]] = {}
+        for r in model:
+            p = (r.get("premise_challenged") or "").strip()
+            if p:
+                prem_groups.setdefault(p, []).append(r)
+        by_premise = {p: _cell(sub) for p, sub in prem_groups.items()
+                      if len(sub) >= _TRIGGER_PROMOTION_MIN}
+        if by_premise:
+            block["by_premise"] = by_premise
+    if enforced:
+        # Grades the enforcement SYSTEM (Finding 2 D3), not the model's judgment.
+        block["enforced_separately"] = _cell(enforced)
+
+    block["caveat"] = (
+        f"n={len(model)} price-return-only v1; a calibration signal for how boldly "
+        "to deviate — never a per-sleeve veto, never a reason to stop filing"
+    )
+    return block
+
+
+def _build_override_record() -> dict:
+    """Query all OverrideHistory rows and aggregate them. Brief Phase 5 §2."""
+    return _aggregate_override_record(query_entities("OverrideHistory"))
+
+
 def run() -> None:
     today = date.today().isoformat()
     logger.info("=== Collector starting for %s ===", today)
@@ -1090,6 +1323,19 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Track record build failed (non-fatal)")
 
+    # --- Brief Phase 5: override_record (judgment loop, sibling of track_record) --
+    # Non-fatal. Reads OverrideHistory (stamped by _stamp_override_outcomes on
+    # prior runs); compact aggregates only.
+    override_record: dict = {}
+    try:
+        override_record = _build_override_record()
+        logger.info(
+            "Override record: sample_size=%s overall=%s",
+            override_record.get("sample_size"), override_record.get("overall"),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Override record build failed (non-fatal)")
+
     # --- Assemble snapshot ---------------------------------------------------
     snapshot = {
         "date": today,
@@ -1130,6 +1376,7 @@ def run() -> None:
         "flex_state": flex_state,
         "performance": performance,
         "track_record": track_record,
+        "override_record": override_record,
         "news": {
             "market": market_news[:50],
             "forex": forex_news[:20],
@@ -1150,6 +1397,12 @@ def run() -> None:
         _stamp_trade_outcomes(fmp)
     except Exception:  # noqa: BLE001
         logger.exception("Outcome stamping failed (non-fatal)")
+
+    # --- Brief Phase 5: stamp matured override outcomes (non-fatal) -----------
+    try:
+        _stamp_override_outcomes(fmp)
+    except Exception:  # noqa: BLE001
+        logger.exception("Override stamping failed (non-fatal)")
 
     logger.info("=== Collector completed for %s ===", today)
 
