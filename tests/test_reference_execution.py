@@ -299,13 +299,19 @@ def test_replay_2026_07_03_rotation_is_confirming():
 # --- analyzer-side input/output plumbing ----------------------------------------
 
 def test_build_reference_gaps_from_snapshot():
+    # Positions carry the COLLECTOR's paper_account field names — "qty", not
+    # "quantity" (src/collector/handler.py paper_account block). The 2026-07-07
+    # incident: a "quantity"-only read here zeroed held_qty for every position
+    # and the Tier-1 validator V4-rejected every sell as "not held".
     snap = {
         "reference_weights": {"target_weights_pct": {"SPY": 0.5, "GLD": 30.0}},
         "paper_account": {
             "equity": 100_000.0, "cash": 5_000.0,
             "positions": [
-                {"ticker": "SPY", "market_value": 17_000.0, "current_price": 550.0},
-                {"ticker": "MU", "market_value": 3_000.0, "current_price": 120.0},
+                {"ticker": "SPY", "qty": 30.0, "market_value": 17_000.0,
+                 "current_price": 550.0},
+                {"ticker": "MU", "qty": 25.0, "market_value": 3_000.0,
+                 "current_price": 120.0},
             ],
         },
         "prices": {"SPY": {"c": 555.0}, "GLD": {"c": 205.0}},
@@ -316,9 +322,60 @@ def test_build_reference_gaps_from_snapshot():
     assert set(by_sym) == {"SPY", "GLD"}          # MU is off-roster — excluded
     assert by_sym["SPY"]["current_pct"] == 17.0
     assert by_sym["SPY"]["price"] == 555.0        # snapshot price wins
+    assert by_sym["SPY"]["held_qty"] == 30.0      # read from the "qty" field
     assert by_sym["GLD"]["current_pct"] == 0.0    # unheld target still gets a row
+    assert by_sym["GLD"]["held_qty"] == 0.0
     assert ctx["deployment_gate"] == "closed"
     assert ctx["equity_usd"] == 100_000.0 and ctx["cash_usd"] == 5_000.0
+
+
+def test_build_reference_gaps_legacy_quantity_field_still_read():
+    snap = {
+        "reference_weights": {"target_weights_pct": {"SPY": 0.5}},
+        "paper_account": {
+            "equity": 100_000.0, "cash": 5_000.0,
+            "positions": [
+                {"ticker": "SPY", "quantity": 12.0, "market_value": 17_000.0},
+            ],
+        },
+        "prices": {"SPY": {"c": 555.0}},
+        "regime_gate": {"status": "closed"},
+    }
+    gaps, _ = _build_reference_gaps(snap)
+    assert gaps[0]["held_qty"] == 12.0
+
+
+def test_collector_shaped_snapshot_sell_survives_validator_seam():
+    """End-to-end seam regression (2026-07-07 all-trades-rejected incident):
+    gaps built from a collector-shaped paper_account must let the Tier-1
+    validator see real held quantities, so a legitimate sell of a held,
+    overweight sleeve passes V4 instead of dying as "not held"."""
+    from shared.trade_validation import validate_trades
+
+    snap = {
+        "reference_weights": {"target_weights_pct": {"SPY": 0.1, "GLD": 17.7}},
+        "paper_account": {
+            "equity": 100_000.0, "cash": 50.0,
+            "positions": [
+                {"ticker": "SPY", "qty": 23.0, "market_value": 17_400.0,
+                 "current_price": 750.0},
+            ],
+        },
+        "prices": {"SPY": {"c": 754.0}, "GLD": {"c": 382.0}},
+        "regime_gate": {"status": "closed"},
+    }
+    gaps, ctx = _build_reference_gaps(snap)
+    ctx["exempt_holds"] = ["AMZN", "GOOGL"]
+    res = validate_trades(
+        gaps,
+        [{"id": "T-1", "symbol": "SPY", "side": "sell", "quantity": 2},
+         {"id": "T-2", "symbol": "GLD", "side": "buy", "quantity": 3}],
+        [], {}, ctx,
+    )
+    assert res["summary"]["rejected"] == 0
+    by_sym = {t["symbol"]: t for t in res["trades"]}
+    assert by_sym["SPY"]["quantity"] == 2          # held sell passes V4
+    assert by_sym["GLD"]["quantity"] == 3          # funded by the sell proceeds
 
 
 def test_build_reference_gaps_unavailable_reference():
