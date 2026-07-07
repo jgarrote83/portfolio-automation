@@ -857,6 +857,46 @@ the monthly #13 review — Loop 3 made visible.
   record; `/improvements` renders the pipeline; one entry demonstrably traced
   observation → promotion → FOLLOWUPS → commit within two review cycles.
 
+### 33. INCIDENT 2026-07-06/07: validator rejected every sell ("not held") — ✅ RESOLVED 2026-07-07 (PR #15), residuals open
+**What happened:** from the #28 validator's first weekday run (07-06) every sell was
+V4-rejected "not held — nothing to sell" (07-06: 1 passed/6 rejected; 07-07: 0/10),
+which starved every buy of proceeds → clamped to zero. Net effect: the trade pipeline
+was frozen for two sessions (only a $1.5K GLD buy that fit literal cash escaped) and
+the "band_enforcement trade rejected — reconcile bug" ERROR fired (same root cause,
+not a reconcile bug).
+**Root cause:** `analyzer._build_reference_gaps` read `pos["quantity"]` but the
+collector writes `paper_account.positions[]` with Alpaca-native **`qty`** → `held_qty`
+was 0 for every position. `ticker`/`market_value` match both shapes, so `current_pct`
+stayed correct — only held quantities broke. The pure-module tests built `gaps` rows by
+hand (`held_qty` pre-populated) and the plumbing fixture omitted quantity fields
+entirely, so the seam was never exercised.
+**Fix (PR #15):** read `qty` first, `quantity` fallback (mirrors
+`trade_validation._norm`); fixtures now carry collector field names; new end-to-end
+seam regression (`_build_reference_gaps` → `validate_trades`). Same-day recovery:
+backfill re-ran 07-07 (11 passed/0 rejected — model tranche + 3 band-enforcement
+trades, $19.7K enforced notional), auto-exec submitted, all 11 filled at Alpaca.
+**Residuals from the 07-07 audit (open):**
+- (i) **Prompt can't see the operative config values** — `project-instructions.md`
+  names `tranche_pp_max`/`gap_band_pp`/`max_magnitude_pp` symbolically but neither the
+  snapshot nor `_build_user_message` carries the numbers; the model guessed "~2-3pp"
+  tranches (vs the configured 10) so D3 synthesis fires every session. Fix: append an
+  "operative risk-limit config" block (from `_load_reference_execution_cfg()`) to the
+  user message. HIGH.
+- (ii) **Report publishes arithmetic scratchwork** (07-07: "wait, let me recompute
+  carefully", three versions of Table A). Add an output-hygiene rule: compute silently,
+  emit each table once, final numbers only. MEDIUM.
+- (iii) **Model/validator price-basis mismatch** — prompt says use
+  `paper_account.current_price` on >1% divergence; `_build_reference_gaps._price()`
+  prefers `prices.X.c` (FMP EOD). Up to ~5% sizing drift (MU 07-07); boundary clamps
+  can differ by shares. Align both on one basis (prefer Alpaca current_price, EOD
+  fallback). MEDIUM.
+- (iv) **MU flex position is unmanaged** — `FLEX_ENABLED='false'` in IaC, no
+  flex-state blob ≥8 days, MU -25% with record insider selling flagged 07-07. Needs an
+  account-holder decision: manual exit vs dry-run then enable the engine. MEDIUM.
+- (v) **`fomc-stance.json` never populated** (`as_of: null`) — market-implied governs
+  (by design) but the daily data-trust flag won't clear until the manual layer is
+  filled after a SEP. LOW.
+
 ---
 
 ## Done
