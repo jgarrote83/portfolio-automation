@@ -359,7 +359,10 @@ def _build_reference_gaps(snapshot: dict) -> tuple[list[dict], dict]:
         except (TypeError, ValueError):
             mv = 0.0
         try:
-            held_qty = float(pos.get("quantity") or 0)
+            # paper_account.positions uses "qty" (Alpaca-native); the canonical
+            # portfolio.positions uses "quantity". A "quantity"-only read zeroed
+            # held_qty here and V4-rejected every sell as "not held" (2026-07-07).
+            held_qty = float(pos.get("qty") or pos.get("quantity") or 0)
         except (TypeError, ValueError):
             held_qty = 0.0
         gaps.append({
