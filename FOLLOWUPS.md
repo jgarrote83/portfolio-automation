@@ -251,6 +251,10 @@ construction is airtight, the LLM-output→broker path is trusting.
 #32 (improvement ledger + /improvements tab) added — spec with #13, ship with/after
 it; monthly-only by decision (2026-07-03); daily analyzer untouched.
 
+#34 (global overnight tone, flex-facing) added — independent track, gated on FMP
+tier verification for index/forex quotes; describe-only v1, gatekeeper promotion
+only via #13/#23 evidence discipline.
+
 **Environment notes (read before editing):** repo is mirrored to a fresh clone at
 `C:\dev\portfolio-automation` to escape OneDrive — if you're working from the
 OneDrive path still, the **OneDrive silent-revert hazard** applies (it clobbered
@@ -896,6 +900,49 @@ trades, $19.7K enforced notional), auto-exec submitted, all 11 filled at Alpaca.
 - (v) **`fomc-stance.json` never populated** (`as_of: null`) — market-implied governs
   (by design) but the daily data-trust flag won't clear until the manual layer is
   filled after a SEP. LOW.
+
+### 34. `global_overnight` tone block — pre-open tactical signal (MEDIUM — flex-facing)
+**Motivation (account holder, 2026-07-04):** the collector's 09:00 ET run is the ideal
+capture point for the overnight global session — Asia closed (final), Europe five
+hours into its day, US pre-market pricing the sum — and none of it currently reaches
+the analyzer or the flex layer. Honest scope: overnight signals mostly price the OPEN,
+not the day (overnight/intraday correlation is weak); the value is (a) gap-risk
+context for flex entries/stops, (b) TAIL detection — carry-unwind mornings à la
+Aug-2024 (Nikkei −12% + violent JPY strengthening) where the correct flex action is
+abstention, (c) the KOSPI/Nikkei semis-and-global-tech read-through for XSD/INTC-type
+flex names. A risk-tone instrument, not an alpha predictor — record this framing.
+- **Cadence dedupe (record verbatim):** #18 = daily cross-asset quadrant vote (EOD
+  trends); #24 = strategic regional scorecards (20/60d); #34 = tactical overnight
+  tone (hours, pre-open). Three cadences, three consumers; #34 never feeds the
+  quadrant axes or the regional tilt — it feeds the flex layer and §2 market context
+  only.
+- **Inputs (verify availability BEFORE implementation; degrade gracefully):**
+  US pre-market: SPY + QQQ pre-market last vs prior close via the Alpaca data API
+  (IEX feed, 4:00 AM+ coverage) — preferred over futures (no CME data needed).
+  Asia close: FMP `^N225` + `^KS11` quotes (VERIFY tier exposes index quotes; FRED
+  `NIKKEI225` as Nikkei fallback, KOSPI dropped if unavailable — note it).
+  Europe mid-session: FMP `^GDAXI` + `^STOXX50E` (same verification).
+  Carry stress: USDJPY overnight %Δ via FMP forex quote (FRED `DEXJPUS` is next-day
+  lagged — unusable pre-open). 10y Bund: EXCLUDED from v1 — no free real-time
+  source (FRED's German 10y is monthly); revisit only with a data-tier change.
+- **Block design (describe-only, bond_signals pattern):** per-input `{value,
+  pct_change_overnight, as_of, stale}` + two derived reads, thresholds in config:
+  `overnight_risk_tone: risk_on|neutral|risk_off` (weighted diffusion of the five
+  inputs) and `carry_stress: true|false` (USDJPY %Δ beyond threshold AND Nikkei
+  beyond threshold, same sign — the Aug-2024 signature). Any stale/missing input →
+  drop it, degrade confidence, never a false tone. LLM consumers: a §2 context line
+  + the flex-watchlist adjudication section (explicit rule: `carry_stress` or
+  strong `risk_off` argues for flex ABSTENTION that morning, not for shorts).
+  Optional later sub-item: feed `carry_stress` to the deterministic flex gatekeeper
+  as a hard input (pair with #9's data tier) — NOT in v1; promotion requires
+  evidence per the #13/#23 admission discipline.
+- **Prereqs:** none hard (independent of the #17/#18 and #24 tracks); FMP tier
+  verification is the gating unknown — if index/forex quotes are unavailable on the
+  current tier, park the item with that note rather than building on proxies of
+  proxies. **Acceptance:** block present in the 09:00 snapshot with all as-of
+  timestamps between 04:00–09:00 ET same day; tone/carry unit tests on fixtures;
+  prompt section added; a deliberately-degraded fixture (two inputs missing) yields
+  reduced confidence, never a fabricated tone.
 
 ---
 
