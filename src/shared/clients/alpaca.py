@@ -164,7 +164,10 @@ class AlpacaClient:
         """Return ``{SYMBOL: [bar, ...]}`` from the Alpaca market-data API.
 
         Bars are ``{t, o, h, l, c, v, ...}``. ``feed='iex'`` is the free tier (a
-        thin slice of the consolidated tape — see the Flex spec caveats).
+        thin slice of the consolidated tape — see the Flex spec caveats). Minute
+        bars DO include extended hours when the window covers them (verified
+        2026-07-07), but IEX pre-market prints are sparse — often a handful of
+        bars per session (DayTrade Lab spec §2 caveat).
         """
         syms = symbols if isinstance(symbols, str) else ",".join(symbols)
         if not syms:
@@ -190,6 +193,25 @@ class AlpacaClient:
                 break
             params["page_token"] = token
         return out
+
+    def get_latest_quote(self, symbol: str, feed: str = "iex") -> dict | None:
+        """Latest top-of-book quote ``{ap, as, bp, bs, t, ...}`` for one symbol.
+
+        ``feed='iex'`` is the free tier: an approximation of NBBO from the IEX
+        book only — callers gating on spread must record basis ``iex_quote``
+        (DayTrade Lab spec §2). Returns None on any error rather than raising.
+        """
+        try:
+            r = self.session.get(
+                f"{_DATA_BASE}/v2/stocks/{symbol.upper()}/quotes/latest",
+                params={"feed": feed},
+                timeout=20,
+            )
+            r.raise_for_status()
+            return (r.json() or {}).get("quote")
+        except Exception as e:  # noqa: BLE001
+            logger.error("Alpaca latest quote for %s failed: %s", symbol, e)
+            return None
 
     def get_calendar(self, start: str, end: str) -> list[dict]:
         """Trading calendar rows ``{date, open, close, ...}`` for [start, end]."""

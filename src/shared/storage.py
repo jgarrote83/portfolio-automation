@@ -254,6 +254,36 @@ def write_json_blob(container: str, name: str, obj: dict | list) -> None:
     blob.upload_blob(json.dumps(obj, default=str, indent=2), overwrite=True)
 
 
+def list_blob_names(container: str) -> list[str]:
+    """Sorted blob names in a container ([] if the container is missing)."""
+    client = _blob_client()
+    try:
+        return sorted(b.name for b in client.get_container_client(container).list_blobs())
+    except Exception as e:
+        logger.warning("Could not list %s: %s", container, e)
+        return []
+
+
+def read_jsonl_blob(container: str, name: str) -> list[dict]:
+    """Parse a .jsonl blob into a list of records ([] if missing/invalid)."""
+    try:
+        raw = read_blob_bytes(container, name).decode("utf-8")
+    except Exception:
+        return []
+    out: list[dict] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
+
+
 def append_jsonl_blob(container: str, name: str, record: dict) -> None:
     """Append one JSON record as a line to a .jsonl blob (read-modify-write).
 
