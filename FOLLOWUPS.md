@@ -944,6 +944,20 @@ flex names. A risk-tone instrument, not an alpha predictor — record this frami
   prompt section added; a deliberately-degraded fixture (two inputs missing) yields
   reduced confidence, never a fabricated tone.
 
+### 35. Fresher commodity quote for `market_shock` corroboration (LOW–MEDIUM)
+The collector's oil inputs come from FRED (`DCOILWTICO` / `DCOILBRENTEU`), which lag
+1–2 business days, so on a spike day the freshest WTI print predates the event and
+cannot corroborate it. This is what forced the 2026-07-09 freshness-discipline rule
+(the report cited WTI $69.60 as-of 07-06 as evidence the 07-08 spike "reversed").
+**Do:** source an **intraday / EOD-today** WTI (and Brent) quote via **FMP** (verify
+the tier exposes a commodity/futures quote — e.g. `CL=F` / a WTI symbol) and feed it
+into the `market_shock` energy read as same-day corroboration, keeping the FRED series
+for history. Degrade gracefully (FMP miss → fall back to FRED + the freshness label).
+**Acceptance:** snapshot carries a same-day WTI `as_of` on trading days; the analyzer
+can confirm an oil spike with a print dated on/after the event; unit test on a fixture
+where FMP is present vs absent. Independent track; FMP-tier verification is the gating
+unknown (park with a note if commodity quotes aren't on the current tier).
+
 ---
 
 ## Done
