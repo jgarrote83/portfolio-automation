@@ -1272,9 +1272,22 @@ def run() -> None:
             if isinstance(blob, dict):
                 flex_state = {"available": True, **blob}
                 break
+        # Deterministic guard (MU incident): flag broker-held flex positions the
+        # engine has forgotten (paper account is canonical). Runs even when the
+        # engine state is unavailable — an orphan is exactly the case to catch.
+        flex_state["reconciliation"] = _build_flex_reconciliation(flex_state, paper_account)
+        if flex_state["reconciliation"]["status"] == "mismatch":
+            logger.error(
+                "Flex reconciliation MISMATCH: engine_held=%s broker_held=%s — "
+                "paper account is canonical; analyzer must run kill-criteria against "
+                "the broker position and block new entries in the affected symbol",
+                flex_state["reconciliation"]["engine_held"],
+                flex_state["reconciliation"]["broker_held"],
+            )
         logger.info(
-            "Flex state: available=%s as_of=%s held=%s",
+            "Flex state: available=%s as_of=%s held=%s reconciliation=%s",
             flex_state.get("available"), flex_state.get("as_of"), flex_state.get("held"),
+            flex_state["reconciliation"]["status"],
         )
     except Exception:  # noqa: BLE001
         logger.exception("Flex state load failed (non-fatal)")
@@ -1508,6 +1521,44 @@ def _rotation_composite_category(weighted: float) -> tuple[float, str]:
     else:
         category = "rotation_underway"
     return composite, category
+
+
+def _flex_pos_qty(pos: dict) -> float:
+    """Share count from a paper_account position row (Alpaca-native `qty`, or the
+    canonical `quantity`; see the 2026-07-07 held_qty incident)."""
+    raw = pos.get("qty") if pos.get("qty") is not None else pos.get("quantity")
+    try:
+        return float(raw or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _build_flex_reconciliation(flex_state: dict, paper_account: dict) -> dict:
+    """Deterministic guard (MU incident): compare the flex engine's ledger-derived
+    ``held`` against the broker's OFF-CORE-ROSTER positions.
+
+    The paper account is CANONICAL. A broker-held flex name the engine has forgotten
+    (an orphan — the 2026-07-09 MU case: engine ``held=[]``, ``exits=[]``, yet the
+    paper account still holds MU) is a ``mismatch`` the analyzer must act on (count
+    the broker position, run kill-criteria against it, block new entries in that
+    symbol). The reverse (engine holds a name the broker doesn't) is equally a
+    mismatch. ``ok`` only when the two off-roster sets agree.
+
+    Root-cause note: the ledger is durably written only at end-of-tick, and
+    ``reconcile_ledger`` only REMOVES ledger rows to match the broker — it never
+    re-adopts a broker position missing from the ledger, and ``read_ledger`` returns
+    ``{}`` on any miss. So a lost/never-persisted ledger row makes an open flex
+    position invisible with no exit logged. This guard surfaces exactly that.
+    """
+    engine_held = sorted({str(s).upper() for s in (flex_state.get("held") or []) if s})
+    broker: set[str] = set()
+    for p in (paper_account.get("positions") or []):
+        sym = str(p.get("ticker") or p.get("symbol") or "").upper()
+        if sym and sym not in CORE_ROSTER and _flex_pos_qty(p) > 1e-6:
+            broker.add(sym)
+    broker_held = sorted(broker)
+    status = "ok" if engine_held == broker_held else "mismatch"
+    return {"status": status, "engine_held": engine_held, "broker_held": broker_held}
 
 
 def _build_regional_rotation(fmp: FMPClient, macro_data: dict) -> dict:

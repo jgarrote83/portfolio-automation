@@ -134,16 +134,31 @@ cluster), `lobbying` / `contracts`, or `thematic` (the capex cascade), cited as
 `thesis_type` — typically `catalyst` — `trigger_evidence`, `catalyst_date`) so the
 `track_record` loop can measure them.
 
-#### Reading flex_state — echo, never recompute
+#### Reading flex_state — echo when reconciled; the paper account is canonical
 
 The engine merges its computed state back into the snapshot as `flex_state`: the
 quadrant it used, the per-name **entry** decision (`entry_trigger` /
 `skip_reason` / `binding` / `size_shares`), and the per-name **exit** state
-(`next_action` / `r_multiple` / `trail_stop`). **Echo these numbers; never
-recompute or override them.** In the Portfolio review table, each `[FLEX]` row's
-note states the engine's `next_action` (hold / trailing / scaled-out / time-stop).
-If `flex_state` is absent (engine disabled or no run yet), say so and move on — do
-not invent flex levels, stops, or exits.
+(`next_action` / `r_multiple` / `trail_stop`). **When `flex_state.reconciliation.status`
+is `ok`, echo these numbers; never recompute or override them.** In the Portfolio
+review table, each `[FLEX]` row's note states the engine's `next_action` (hold /
+trailing / scaled-out / time-stop). If `flex_state` is absent (engine disabled or no
+run yet), say so and move on — do not invent flex levels, stops, or exits.
+
+**Reconciliation doctrine (ONE rule — the paper account is canonical).** The engine
+ledger can drift from the broker (a lost/never-persisted ledger row orphans an open
+position — the MU incident). The collector emits `flex_state.reconciliation`
+= `{status, engine_held, broker_held}` comparing the engine's `held` to the broker's
+off-core-roster positions. **When `status` is `"mismatch"`, the paper account wins —
+never "echo the engine state" over the broker:**
+- In the Portfolio review table, **count every `broker_held` flex position** as a
+  real `[FLEX]` holding and mark its row with a 🔴 flag (engine/broker desync).
+- **Run kill-criteria against the `paper_account` position**, using the **last
+  recorded kill/stop price from the flex / `TradeHistory` records** for that symbol
+  (not an engine level — the engine has forgotten the name).
+- **File no new flex entries in the affected symbol** until the desync is resolved.
+State the mismatch in one line in Section 6 and act on it; do not silently echo an
+empty engine state past a broker position it holds.
 
 ---
 
@@ -704,7 +719,7 @@ A single JSON snapshot for one trading day containing:
 - `reference_weights` — **the deterministic per-ticker target allocation the book executes toward** (strategy-spec §10). `target_weights_pct` (per-ticker % of equity), `active_quadrant`/`favored_bucket`/`borderline`, `conviction_proxy`+label, `active_quadrant_target_pct_of_core`, `ceiling_pct_of_core`, `dollar_tilt`, `transition_lean` (the Phase-3 lean, already applied), `cash_sleeve_target_pct`, `binding`. **This is the reference you reason against and execute toward via the OVERRIDE_SCHEMA_V1 protocol (Section 2).** Absent ⟹ paper account unavailable; fall back to the qualitative quadrant call and say so.
 - `divergences` — the pre-computed **tension detector** (list): each `{id, description, signals, direction_implied, status}` flags two signals that should agree but don't (leading-vs-lagging inflation, credit complacency, price-vs-regime, dollar-vs-intl). **You adjudicate them** (they are not resolved for you); an `active` one may serve as override evidence, an `indeterminate` one may not. Surface them in Section 6 and weigh them in Section 2.
 - `transition_watch` — the deterministic **pre-staging** signal (`active`, `projected_quadrant`, `direction`, `staged_fraction`, `basis`, `status`). **Already baked into `reference_weights`** (see its `transition_lean`) — surface it as context, do **not** apply it a second time.
-- `flex_state` — **the intraday Flex engine's computed state** (it owns the flex sleeve end-to-end). Per held flex name: the **exit** decision (`next_action` ∈ hold/scale_out/trail/time_stop/stopped, `r_multiple`, `trail_stop`). Per nomination evaluated: the **entry** decision (`entry_trigger` pass/fail, `skip_reason`, `binding`, `size_shares`). Also `quadrant` (the deterministic quadrant the engine used) and `as_of`. **Echo these; never recompute or override a flex price/stop/size.** Absent ⟹ engine disabled or not yet run that day — say so, don't invent flex levels.
+- `flex_state` — **the intraday Flex engine's computed state** (it owns the flex sleeve end-to-end). Per held flex name: the **exit** decision (`next_action` ∈ hold/scale_out/trail/time_stop/stopped, `r_multiple`, `trail_stop`). Per nomination evaluated: the **entry** decision (`entry_trigger` pass/fail, `skip_reason`, `binding`, `size_shares`). Also `quadrant` (the deterministic quadrant the engine used), `as_of`, and **`reconciliation`** (`{status, engine_held, broker_held}` — the deterministic engine-vs-broker check). **When `reconciliation.status` is `ok`, echo the engine's numbers; never recompute or override a flex price/stop/size. When it is `mismatch`, the PAPER ACCOUNT is canonical** — count `broker_held` names as real flex holdings (🔴), run kill-criteria against the broker position using the last recorded kill price from flex/`TradeHistory`, and open no new flex entry in the affected symbol until resolved (see "Reading flex_state" above). Absent ⟹ engine disabled or not yet run that day — say so, don't invent flex levels.
 - `performance` — the scoreboard (Phase C): account equity vs fully-invested SPY since `inception_date` (`return_since_inception_pct`, `spy_return_since_inception_pct`, `excess_vs_spy_pp`), `rolling` 30/60/90d windows (null until that much history exists), `max_drawdown_pct`, and `account.cash_pct`. This is the mission metric — beating SPY. If `available` is false (pre-funding / Alpaca fallback day), say so and skip the scoreboard line.
 - `track_record` — the learning signal (Phase C): aggregate hit-rates of your own past recommendations vs SPY at the 60d headline horizon (`by_layer` / `by_trigger` / `by_thesis`), a confidence `calibration` table, `over_trading.avg_trades_per_day`, `sample_size`, and `horizons` (30/90d for context). See "Track record" below for how to use it. Aggregates only — never per-name.
 - `override_record` — the judgment loop (Phase 5): your matured overrides graded against the **reference-path counterfactual** ("did disagreeing beat obeying") at each record's own `falsifier_date`. `overall` / `by_direction` / `by_status` (+ `by_premise` once a premise reaches n≥10) with win rate + avg `excess_pp`; `enforced_separately` grades the Finding-2 enforcement system, not you. Calibration signal only — see "Track record" below for the rules.

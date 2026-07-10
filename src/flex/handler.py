@@ -238,6 +238,14 @@ def _open_position(client, ledger, sym, e, nom, today, decisions, executions) ->
         sym, float(e["entry_price"]), today, stop_price, qty,
         order_ids=[str(order.get("id"))] + stop_ids,
     )
+    # Persist the ledger IMMEDIATELY on entry (defensive — MU orphan incident). The
+    # tick otherwise only writes the ledger at end-of-STEP-6; a crash/timeout after
+    # this fill but before that write left a broker position with no ledger row, and
+    # reconcile never re-adopts broker orphans, so it went invisible with no exit.
+    try:
+        write_ledger(ledger)
+    except Exception:  # noqa: BLE001
+        logger.exception("ledger persist-on-entry for %s failed", sym)
     _record_trade_history(today, sym, "buy", qty, status="submitted", extra=_enums(nom, e))
     return True
 
