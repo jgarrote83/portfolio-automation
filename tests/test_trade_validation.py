@@ -315,3 +315,58 @@ def test_executor_accepts_clean_stamped_file():
     trades = [{**_t("GLD", "buy", 1),
                "validation": {"status": "passed", "reasons": []}}]
     assert _validation_refusal({"trades": trades}, trades, "2026-07-06") == ""
+
+
+# --- Task 2: SGOV literal-cash carve-out ------------------------------------------
+# A literal-cash → SGOV conversion is a pure cash-sleeve composition swap (cash sleeve
+# = SGOV + literal cash), so it must NOT be windowed against SGOV's per-name reference.
+# (2026-07-09: SGOV 28.44% vs window ceiling 28.50% rejected a $4k cash→SGOV swap,
+# leaving ~5% of equity idle in literal cash.)
+
+def test_sgov_cash_swap_passes_above_per_name_window():
+    """cash 13.9% / SGOV 28.44% (ref 23.5, window ceiling 28.5) → 40-share cash→SGOV
+    buy passes despite landing far above the per-name window."""
+    gaps = [_gap("SGOV", 28.44, 23.5, price=100.0, held=284)]
+    res = validate_trades(gaps, [_t("SGOV", "buy", 40)], [], CFG,
+                          _ctx(cash_usd=13_900.0, literal_cash_target_pct=1.5))
+    assert res["rejected"] == []
+    assert _statuses(res)["SGOV"] == "passed"
+    assert res["trades"][0]["quantity"] == 40
+
+
+def test_sgov_cash_swap_clamped_to_buffer_edge():
+    """Pre-trade literal cash 2% with a 1.5% buffer leaves only $500 → a 40-share
+    ($4k) buy is clamped to the 5 shares the buffer allows, not rejected."""
+    gaps = [_gap("SGOV", 28.44, 23.5, price=100.0, held=284)]
+    res = validate_trades(gaps, [_t("SGOV", "buy", 40)], [], CFG,
+                          _ctx(cash_usd=2_000.0, literal_cash_target_pct=1.5))
+    assert res["rejected"] == []
+    t = res["trades"][0]
+    assert t["validation"]["status"] == "clamped"
+    assert t["quantity"] == 5
+    assert any("buffer" in r for r in t["validation"]["reasons"])
+
+
+def test_sgov_buy_funded_by_same_day_sells_gets_no_exemption():
+    """Pre-trade literal cash sits AT the buffer (budget 0), so a SGOV buy could only
+    be funded by same-day core sell proceeds — it does NOT get the exemption and is
+    rejected by the normal per-name window (clamped to zero)."""
+    gaps = [_gap("SPY", 20.0, 2.0, price=100.0, held=200),
+            _gap("SGOV", 28.44, 23.5, price=100.0, held=284)]
+    res = validate_trades(gaps, [_t("SPY", "sell", 50), _t("SGOV", "buy", 40)],
+                          [], CFG, _ctx(cash_usd=1_500.0, literal_cash_target_pct=1.5))
+    rejected_syms = [r["symbol"] for r in res["rejected"]]
+    assert "SGOV" in rejected_syms
+    assert _statuses(res).get("SPY") == "passed"
+
+
+def test_sgov_sell_still_windowed_normally():
+    """SGOV SELLs are unaffected by the buy carve-out — the window still clamps an
+    overshoot to the floor edge."""
+    gaps = [_gap("SGOV", 28.44, 23.5, price=100.0, held=284)]
+    res = validate_trades(gaps, [_t("SGOV", "sell", 200)], [], CFG,
+                          _ctx(cash_usd=13_900.0))
+    t = res["trades"][0]
+    assert t["validation"]["status"] == "clamped"
+    assert t["quantity"] == 99   # (28.44−18.5)pp of $100K at $100
+    assert res["rejected"] == []

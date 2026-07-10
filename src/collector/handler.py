@@ -34,6 +34,7 @@ from shared.quadrants import (
     favored_bucket,
     intersection_names,
     is_amplifier,
+    primary_quadrant,
 )
 
 logger = logging.getLogger(__name__)
@@ -1272,9 +1273,22 @@ def run() -> None:
             if isinstance(blob, dict):
                 flex_state = {"available": True, **blob}
                 break
+        # Deterministic guard (MU incident): flag broker-held flex positions the
+        # engine has forgotten (paper account is canonical). Runs even when the
+        # engine state is unavailable — an orphan is exactly the case to catch.
+        flex_state["reconciliation"] = _build_flex_reconciliation(flex_state, paper_account)
+        if flex_state["reconciliation"]["status"] == "mismatch":
+            logger.error(
+                "Flex reconciliation MISMATCH: engine_held=%s broker_held=%s — "
+                "paper account is canonical; analyzer must run kill-criteria against "
+                "the broker position and block new entries in the affected symbol",
+                flex_state["reconciliation"]["engine_held"],
+                flex_state["reconciliation"]["broker_held"],
+            )
         logger.info(
-            "Flex state: available=%s as_of=%s held=%s",
+            "Flex state: available=%s as_of=%s held=%s reconciliation=%s",
             flex_state.get("available"), flex_state.get("as_of"), flex_state.get("held"),
+            flex_state["reconciliation"]["status"],
         )
     except Exception:  # noqa: BLE001
         logger.exception("Flex state load failed (non-fatal)")
@@ -1490,6 +1504,76 @@ def _write_etf_history(today: str, etf_holdings: dict, prices: dict) -> None:
             "close_price":     price_data.get("c", 0),
             "volume":          price_data.get("v", 0),
         })
+
+
+def _rotation_composite_category(weighted: float) -> tuple[float, str]:
+    """Round the weighted rotation score to 1dp, then bucket the ROUNDED value.
+
+    The displayed ``composite`` and the ``category`` are derived from the same
+    rounded number so they can never disagree — the 2026-07-09 seam where an
+    unrounded 3.049 displayed as 3.0 but bucketed "transition_window". Rubric:
+    composite <= 3 us_leadership_intact; 4-6 transition_window; 7-10 rotation_underway.
+    """
+    composite = round(weighted, 1)
+    if composite <= 3:
+        category = "us_leadership_intact"
+    elif composite <= 6:
+        category = "transition_window"
+    else:
+        category = "rotation_underway"
+    return composite, category
+
+
+def _flex_pos_qty(pos: dict) -> float:
+    """Share count from a paper_account position row (Alpaca-native `qty`, or the
+    canonical `quantity`; see the 2026-07-07 held_qty incident)."""
+    raw = pos.get("qty") if pos.get("qty") is not None else pos.get("quantity")
+    try:
+        return float(raw or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _build_flex_reconciliation(flex_state: dict, paper_account: dict) -> dict:
+    """Deterministic guard (MU incident): compare the flex engine's ledger-derived
+    ``held`` against the broker's OFF-CORE-ROSTER positions.
+
+    The paper account is CANONICAL. A broker-held flex name the engine has forgotten
+    (an orphan — the 2026-07-09 MU case: engine ``held=[]``, ``exits=[]``, yet the
+    paper account still holds MU) is a ``mismatch`` the analyzer must act on (count
+    the broker position, run kill-criteria against it, block new entries in that
+    symbol). The reverse (engine holds a name the broker doesn't) is equally a
+    mismatch. ``ok`` only when the two off-roster sets agree.
+
+    Root-cause note: the ledger is durably written only at end-of-tick, and
+    ``reconcile_ledger`` only REMOVES ledger rows to match the broker — it never
+    re-adopts a broker position missing from the ledger, and ``read_ledger`` returns
+    ``{}`` on any miss. So a lost/never-persisted ledger row makes an open flex
+    position invisible with no exit logged. This guard surfaces exactly that.
+    """
+    engine_held = sorted({str(s).upper() for s in (flex_state.get("held") or []) if s})
+    broker: set[str] = set()
+    for p in (paper_account.get("positions") or []):
+        sym = str(p.get("ticker") or p.get("symbol") or "").upper()
+        if sym and sym not in CORE_ROSTER and _flex_pos_qty(p) > 1e-6:
+            broker.add(sym)
+    broker_held = sorted(broker)
+    status = "ok" if engine_held == broker_held else "mismatch"
+    return {"status": status, "engine_held": engine_held, "broker_held": broker_held}
+
+
+def _aggregate_by_quadrant(target_weights_pct: dict, literal_cash_pct: float) -> dict:
+    """Deterministic per-quadrant aggregation of the reference `target_weights_pct`
+    (Task 5). Each ticker lands in exactly one bucket via `primary_quadrant`; SGOV's
+    target plus the literal-cash buffer form the `cash_sleeve` bucket. The analyzer
+    echoes this verbatim rather than re-deriving quadrant totals freehand. Sums to
+    ~100 within rounding (sub-0.05% floors already dropped from target_weights_pct)."""
+    buckets = {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "cash_sleeve": 0.0}
+    for tkr, w in (target_weights_pct or {}).items():
+        q = primary_quadrant(tkr)
+        buckets[q] = buckets.get(q, 0.0) + float(w or 0.0)
+    buckets["cash_sleeve"] += float(literal_cash_pct or 0.0)
+    return {k: round(v, 2) for k, v in buckets.items()}
 
 
 def _build_regional_rotation(fmp: FMPClient, macro_data: dict) -> dict:
@@ -1737,15 +1821,14 @@ def _build_regional_rotation(fmp: FMPClient, macro_data: dict) -> dict:
     components["valuation_gap"] = {"score": v_score, "weight": 20, "input": None, "note": "ETF forward-P/E aggregation not available on current data tier"}
 
     weighted = sum(c["score"] * c["weight"] for c in components.values()) / 100.0
-    if weighted <= 3:
-        category = "us_leadership_intact"
-    elif weighted <= 6:
-        category = "transition_window"
-    else:
-        category = "rotation_underway"
+    # Round FIRST, then bucket on the rounded composite — otherwise the category can
+    # be derived from an unrounded score that disagrees with the displayed number
+    # (2026-07-09: weighted 3.049 displayed as 3.0 but bucketed "transition_window",
+    # handing the analyzer a "don't tilt" number with a "tilt" label).
+    composite, category = _rotation_composite_category(weighted)
 
     out["rotation_score"] = {
-        "composite": round(weighted, 1),
+        "composite": composite,
         "category": category,
         "components": components,
         "components_missing": missing,
@@ -3084,6 +3167,14 @@ def _build_reference_weights(
     weights["SGOV"] = round(sgov_w, 3)
     weights["__cash__"] = round(cash_sleeve_target - sgov_w, 3)
 
+    # Deterministic per-quadrant aggregation (Task 5) — the analyzer echoes this
+    # verbatim in the Quadrant Allocation table's Reference column instead of summing
+    # the per-name references freehand (the 2026-07-09 report claimed Q3 ~42.9% while
+    # its own footnote summed to ~58% and the column totalled ~89.5%).
+    literal_cash_pct = round(weights.pop("__cash__", 0.0), 3)
+    target_pct = {t: w for t, w in sorted(weights.items()) if w >= 0.05}
+    by_quadrant = _aggregate_by_quadrant(target_pct, literal_cash_pct)
+
     # --- which constraints bound (surface, like flex `binding`) -----------------
     binding: list[str] = []
     if active_target_core >= ceiling_core:
@@ -3117,8 +3208,9 @@ def _build_reference_weights(
             if tw_applied else {"applied": False}
         ),
         "cash_sleeve_target_pct": round(cash_sleeve_target, 2),
-        "literal_cash_target_pct": weights.pop("__cash__", 0.0),
-        "target_weights_pct": {t: w for t, w in sorted(weights.items()) if w >= 0.05},
+        "literal_cash_target_pct": literal_cash_pct,
+        "target_weights_pct": target_pct,
+        "by_quadrant": by_quadrant,
         "binding": binding,
         "rule": (
             "Reference allocation the analyzer executes toward — NOT a mandate. Deviate "

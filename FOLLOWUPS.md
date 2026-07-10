@@ -944,6 +944,39 @@ flex names. A risk-tone instrument, not an alpha predictor — record this frami
   prompt section added; a deliberately-degraded fixture (two inputs missing) yields
   reduced confidence, never a fabricated tone.
 
+### 35. Fresher commodity quote for `market_shock` corroboration (LOW–MEDIUM)
+The collector's oil inputs come from FRED (`DCOILWTICO` / `DCOILBRENTEU`), which lag
+1–2 business days, so on a spike day the freshest WTI print predates the event and
+cannot corroborate it. This is what forced the 2026-07-09 freshness-discipline rule
+(the report cited WTI $69.60 as-of 07-06 as evidence the 07-08 spike "reversed").
+**Do:** source an **intraday / EOD-today** WTI (and Brent) quote via **FMP** (verify
+the tier exposes a commodity/futures quote — e.g. `CL=F` / a WTI symbol) and feed it
+into the `market_shock` energy read as same-day corroboration, keeping the FRED series
+for history. Degrade gracefully (FMP miss → fall back to FRED + the freshness label).
+**Acceptance:** snapshot carries a same-day WTI `as_of` on trading days; the analyzer
+can confirm an oil spike with a print dated on/after the event; unit test on a fixture
+where FMP is present vs absent. Independent track; FMP-tier verification is the gating
+unknown (park with a note if commodity quotes aren't on the current tier).
+
+### 36. International governance redesign (dollar/rotation-governed intl sleeve, flex migration, gate precedence) — ⏸ PENDING HUMAN DECISION
+**Do not implement without an explicit human design decision.** The 2026-07-09 audit
+exposed that the international sleeve has no first-class governance: rotation signals,
+the DXY dollar switch, the deployment gate, and the flex sleeve interact ad-hoc, and
+the analyzer improvised a gate-vs-rotation precedence on the fly. The interim patch
+(Task 8 #5) codifies only the stop-gap — **a CLOSED `regime_gate` suppresses rotation
+tilts into international to size 0** — so the book cannot add intl beta through a gate.
+The real redesign is a separate, human-reviewed change spanning:
+- a **dollar/rotation-governed intl sleeve** — a deterministic target for the
+  international allocation driven by the DXY switch + rotation score, folded into
+  `reference_weights` (not an LLM freehand tilt);
+- **flex migration** of the single-name intl exposure vs the core ETF intl sleeve
+  (which names live in core vs flex);
+- **explicit gate precedence** for international (replacing the interim size-0 rule
+  with a governed interaction between the gate, the rotation score, and the sleeve).
+This touches strategy semantics (the reference math + the gate), so it must be
+specced and decided by the account holder first — the audit branch deliberately does
+NOT implement it.
+
 ---
 
 ## Done
