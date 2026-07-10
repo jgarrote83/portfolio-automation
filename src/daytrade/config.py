@@ -91,6 +91,13 @@ class DayTradeConfig:
     # --- execution ---
     scale_mode: str = "none"           # "none" (bracket) | "half_at_1r" (managed)
     llm_classify: bool = False
+    # --- global sector pulse (spec §10) ---
+    pulse_strong_pct: float = 0.6      # |avg %| for strong_up/strong_down…
+    pulse_up_pct: float = 0.2          # …and for plain up/down
+    pulse_strong_breadth: float = 0.75  # breadth needed alongside a strong avg
+    pulse_volume_ratio: float = 2.0    # member ≥2× its 30d pm ratio ⇒ volume_flag
+    pulse_stale_after_s: int = 3600    # no print in the last 60 min ⇒ stale
+    pulse_foreign_source: str = "off"  # v2: "fmp" foreign quotes (^N225 etc.) — not built
     # --- breakers + grading (spec §5/§6, pre-registered) ---
     haircut_pp_per_side: float = 0.10
     day_max_loss_r: float = 1.0        # one loss ends the day (max −1R/day)
@@ -132,6 +139,13 @@ class DayTradeConfig:
             raise ValueError("breaker signs invalid (day > 0, week < 0)")
         if not (0 < self.unlock_n <= self.cell_n):
             raise ValueError("grading n-triggers invalid")
+        if not (0 < self.pulse_up_pct <= self.pulse_strong_pct):
+            raise ValueError("pulse thresholds invalid (0 < up ≤ strong)")
+        if not (0.5 <= self.pulse_strong_breadth <= 1.0):
+            raise ValueError("pulse_strong_breadth out of bounds [0.5, 1]")
+        if self.pulse_foreign_source not in ("off", "fmp"):
+            raise ValueError(
+                f"pulse_foreign_source must be off|fmp: {self.pulse_foreign_source}")
 
 
 def load_daytrade_config() -> DayTradeConfig:
@@ -159,6 +173,12 @@ def load_daytrade_config() -> DayTradeConfig:
         flat_min=_env_int("DAYTRADE_FLAT_MIN", 105),
         scale_mode=_env_str("DAYTRADE_SCALE_MODE", "none"),
         llm_classify=_env_bool("DAYTRADE_LLM_CLASSIFY", False),
+        pulse_strong_pct=_env_float("DAYTRADE_PULSE_STRONG_PCT", 0.6),
+        pulse_up_pct=_env_float("DAYTRADE_PULSE_UP_PCT", 0.2),
+        pulse_strong_breadth=_env_float("DAYTRADE_PULSE_STRONG_BREADTH", 0.75),
+        pulse_volume_ratio=_env_float("DAYTRADE_PULSE_VOLUME_RATIO", 2.0),
+        pulse_stale_after_s=_env_int("DAYTRADE_PULSE_STALE_AFTER_S", 3600),
+        pulse_foreign_source=_env_str("DAYTRADE_PULSE_FOREIGN_SOURCE", "off"),
         haircut_pp_per_side=_env_float("DAYTRADE_HAIRCUT_PP_PER_SIDE", 0.10),
         day_max_loss_r=_env_float("DAYTRADE_DAY_MAX_LOSS_R", 1.0),
         week_halt_r=_env_float("DAYTRADE_WEEK_HALT_R", -3.0),

@@ -17,6 +17,14 @@ from __future__ import annotations
 N_UNLOCK = 20   # graded trades before the unlock/kill rule triggers
 N_CELL = 40     # graded trades before negative cells are removed
 
+# Dormant contra-pulse rule (spec §10.4) — encoded NOW, activated only by data
+# (mirrors the n=20 concurrency-unlock pattern): with ≥N_PULSE_SPLIT trades on
+# EACH side of the sector-pulse alignment split, if contra-pulse expectancy is
+# ≥PULSE_MATERIAL_GAP_R worse than aligned, the engine enforces
+# "contra-pulse ⇒ half size" on subsequent entries.
+N_PULSE_SPLIT = 10
+PULSE_MATERIAL_GAP_R = 0.5
+
 _GRADED_OUTCOMES = ("win", "loss", "scratch")
 
 
@@ -90,6 +98,20 @@ def build_daytrade_grades(rows: list[dict], spec_version: str) -> dict:
         slots.setdefault(key, []).append(r)
     per_slot = {k: _agg(v) for k, v in sorted(slots.items())}
 
+    # Sector-pulse alignment split (spec §10.4) — measured, not assumed. The
+    # alignment stamp is the ENGINE's (set at entry), never the LLM's text.
+    aligned_rows = [r for r in graded if r.get("sector_pulse_aligned") is True]
+    contra_rows = [r for r in graded if r.get("sector_pulse_aligned") is False]
+    pulse_split = {"aligned": _agg(aligned_rows), "contra": _agg(contra_rows)}
+    a_exp = pulse_split["aligned"]["expectancy_net_r"]
+    c_exp = pulse_split["contra"]["expectancy_net_r"]
+    contra_restrict = bool(
+        pulse_split["aligned"]["n"] >= N_PULSE_SPLIT
+        and pulse_split["contra"]["n"] >= N_PULSE_SPLIT
+        and a_exp is not None and c_exp is not None
+        and (a_exp - c_exp) >= PULSE_MATERIAL_GAP_R
+    )
+
     n = overall["n"]
     exp = overall["expectancy_net_r"]
     unlock = bool(n >= N_UNLOCK and exp is not None and exp > 0)
@@ -105,6 +127,7 @@ def build_daytrade_grades(rows: list[dict], spec_version: str) -> dict:
         "overall": overall,
         "per_cell": per_cell,
         "per_slot": per_slot,
+        "pulse_split": pulse_split,
         # Pre-registered rules — trigger counts recorded beside their flags.
         "rules": {
             "n_unlock": N_UNLOCK,
@@ -112,6 +135,9 @@ def build_daytrade_grades(rows: list[dict], spec_version: str) -> dict:
             "concurrency_unlock": unlock,
             "kill": kill,
             "blocked_cells": blocked_cells,
+            "n_pulse_split": N_PULSE_SPLIT,
+            "pulse_material_gap_r": PULSE_MATERIAL_GAP_R,
+            "contra_pulse_half_size": contra_restrict,
         },
     }
 
@@ -132,3 +158,15 @@ def entry_refusal(grades: dict | None, spec_version: str,
     if cell in (rules.get("blocked_cells") or []):
         return f"cell_blocked:{cell}"
     return None
+
+
+def contra_pulse_half(grades: dict | None, spec_version: str,
+                      aligned: bool | None) -> bool:
+    """The dormant rule's enforcement seam (spec §10.4): True ⇒ this entry takes
+    HALF risk because it fights its sector's pulse AND the data (n≥10 per side,
+    contra ≥0.5R worse) activated the restriction. 'na' alignment never halves."""
+    if aligned is not False or not grades:
+        return False
+    if str(grades.get("spec_version")) != spec_version:
+        return False
+    return bool((grades.get("rules") or {}).get("contra_pulse_half_size"))
