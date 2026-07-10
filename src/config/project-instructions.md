@@ -878,6 +878,21 @@ Then the numbered sections, in this order:
         most `max_magnitude_pp` of residual gap** — for a larger gap you MUST still
         trade the remainder (≥ the `required_move_today` computed above). No record ⇒
         no deviation; a rejected record shelters nothing.
+
+      **Pre-flight every trade before you emit it (submittability check).** For each
+      trade you intend to propose, compute the **post-trade landing weight**
+      (`current% ± quantity·price/equity·100`) and verify it lands **within
+      `reference ± max(allowed_residual, gap_band_pp)` and above the sleeve floor** —
+      the exact window the deterministic Tier-1 validator enforces downstream. If the
+      **tradable room** to the near window edge is worth less than
+      `reference_execution.min_notional_usd`, the trade is **un-submittable** — do NOT
+      propose it and do NOT build the report narrative on it. Instead state the binding
+      constraint in **one line of prose** (e.g. "SGOV already at 28.44% vs its 28.50%
+      window ceiling — no room to add; ~$X of literal cash stays idle until the
+      reference lifts"). A trade the validator would reject or clamp to zero must never
+      appear as an executed action in the body. *(Exception: a literal-cash → SGOV swap
+      funded from pre-trade cash is submittable via the cash-sleeve carve-out even above
+      SGOV's per-name window — size it to the `literal_cash_target_pct` buffer.)*
    5. **A silent hold is now impossible — shortfalls are enforced deterministically.**
       After validation, the analyzer reconciles your trades against every out-of-band
       sleeve. If they fall short of `required_move_today` and the corrective move is
