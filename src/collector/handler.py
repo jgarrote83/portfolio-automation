@@ -34,6 +34,7 @@ from shared.quadrants import (
     favored_bucket,
     intersection_names,
     is_amplifier,
+    primary_quadrant,
 )
 
 logger = logging.getLogger(__name__)
@@ -1559,6 +1560,20 @@ def _build_flex_reconciliation(flex_state: dict, paper_account: dict) -> dict:
     broker_held = sorted(broker)
     status = "ok" if engine_held == broker_held else "mismatch"
     return {"status": status, "engine_held": engine_held, "broker_held": broker_held}
+
+
+def _aggregate_by_quadrant(target_weights_pct: dict, literal_cash_pct: float) -> dict:
+    """Deterministic per-quadrant aggregation of the reference `target_weights_pct`
+    (Task 5). Each ticker lands in exactly one bucket via `primary_quadrant`; SGOV's
+    target plus the literal-cash buffer form the `cash_sleeve` bucket. The analyzer
+    echoes this verbatim rather than re-deriving quadrant totals freehand. Sums to
+    ~100 within rounding (sub-0.05% floors already dropped from target_weights_pct)."""
+    buckets = {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "cash_sleeve": 0.0}
+    for tkr, w in (target_weights_pct or {}).items():
+        q = primary_quadrant(tkr)
+        buckets[q] = buckets.get(q, 0.0) + float(w or 0.0)
+    buckets["cash_sleeve"] += float(literal_cash_pct or 0.0)
+    return {k: round(v, 2) for k, v in buckets.items()}
 
 
 def _build_regional_rotation(fmp: FMPClient, macro_data: dict) -> dict:
@@ -3152,6 +3167,14 @@ def _build_reference_weights(
     weights["SGOV"] = round(sgov_w, 3)
     weights["__cash__"] = round(cash_sleeve_target - sgov_w, 3)
 
+    # Deterministic per-quadrant aggregation (Task 5) — the analyzer echoes this
+    # verbatim in the Quadrant Allocation table's Reference column instead of summing
+    # the per-name references freehand (the 2026-07-09 report claimed Q3 ~42.9% while
+    # its own footnote summed to ~58% and the column totalled ~89.5%).
+    literal_cash_pct = round(weights.pop("__cash__", 0.0), 3)
+    target_pct = {t: w for t, w in sorted(weights.items()) if w >= 0.05}
+    by_quadrant = _aggregate_by_quadrant(target_pct, literal_cash_pct)
+
     # --- which constraints bound (surface, like flex `binding`) -----------------
     binding: list[str] = []
     if active_target_core >= ceiling_core:
@@ -3185,8 +3208,9 @@ def _build_reference_weights(
             if tw_applied else {"applied": False}
         ),
         "cash_sleeve_target_pct": round(cash_sleeve_target, 2),
-        "literal_cash_target_pct": weights.pop("__cash__", 0.0),
-        "target_weights_pct": {t: w for t, w in sorted(weights.items()) if w >= 0.05},
+        "literal_cash_target_pct": literal_cash_pct,
+        "target_weights_pct": target_pct,
+        "by_quadrant": by_quadrant,
         "binding": binding,
         "rule": (
             "Reference allocation the analyzer executes toward — NOT a mandate. Deviate "

@@ -90,6 +90,33 @@ EXEMPT_HOLDS = ("AMZN", "GOOGL")
 CORE_ROSTER = tuple(sorted(set(AMPLIFIER_US) | set(AMPLIFIER_INTL) | set(DAMPER)))
 
 
+# Deterministic PRIMARY-quadrant map (single bucket per ticker) for aggregating the
+# reference weights by quadrant. The strategy deliberately has no single "primary
+# quadrant per ticker" model — QUADRANT_CONCENTRATE lets a name recur across quadrants
+# (GLD in Q3+Q4, TIP in Q2+Q3, …). But a Quadrant Allocation TABLE needs each name in
+# exactly one bucket, so we derive one deterministically: a ticker's primary is the
+# FIRST quadrant (Q1→Q2→Q3→Q4 order) whose concentrate list contains it. That
+# first-match rule reproduces the prompt's documented primaries (GLD→Q3, TLT→Q4,
+# AMZN/GOOGL→Q1, EWZ→Q2, TIP→Q2, XLP/MCK→Q3). SGOV is the cash sleeve (intentionally
+# absent from the concentrate lists), mapped explicitly to "cash_sleeve".
+def _build_primary_quadrant_map() -> dict[str, str]:
+    m: dict[str, str] = {}
+    for q in ("Q1", "Q2", "Q3", "Q4"):
+        for t in QUADRANT_CONCENTRATE.get(q, ()):
+            m.setdefault(t.upper(), q)
+    m["SGOV"] = "cash_sleeve"
+    return m
+
+
+PRIMARY_QUADRANT = _build_primary_quadrant_map()
+
+
+def primary_quadrant(ticker: str) -> str:
+    """The single deterministic bucket for a core ticker: Q1-Q4, "cash_sleeve" for
+    SGOV, or "unclassified" for an off-roster/unknown name (never silently dropped)."""
+    return PRIMARY_QUADRANT.get((ticker or "").upper(), "unclassified")
+
+
 def favored_bucket(growth_direction: str | None, inflation_direction: str | None) -> list[str]:
     """The favored quadrant *bucket* the book should concentrate into.
 

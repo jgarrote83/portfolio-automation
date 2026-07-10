@@ -716,7 +716,7 @@ A single JSON snapshot for one trading day containing:
 - `fomc_stance` — the RAW manually-maintained stance file (`config/fomc-stance.json`: `stance` + `as_of`), kept for reference. **The stance you must use is the resolved `policy_axis`.**
 - `policy_axis` — **pre-computed RESOLVED policy stance**: `stance` (hawkish/neutral/dovish/unconfirmed) + `source` (`manual_fresh` / `market_implied` / `unconfirmed`), `market_implied` (`stance`, `dgs2_latest`, `dff_latest`, `dgs2_delta_20d_bp`, `spread_bp`), `manual` (echo + `fresh`), `agreement` (null when either layer is unavailable), `note`. A fresh manual SEP/dot-plot governs; else DGS2 20d momentum; `unconfirmed` only when both are unavailable. **Echo `stance` + `source`.**
 - `regime_gate` — **pre-computed deployment gate**: `status` (`open`/`closed`), `reasons`, `policy_note`, derived from the two axes + the resolved `policy_axis` stance (see `derived_from.policy_source`). **Echo `status` into `deployment_gate`.**
-- `reference_weights` — **the deterministic per-ticker target allocation the book executes toward** (strategy-spec §10). `target_weights_pct` (per-ticker % of equity), `active_quadrant`/`favored_bucket`/`borderline`, `conviction_proxy`+label, `active_quadrant_target_pct_of_core`, `ceiling_pct_of_core`, `dollar_tilt`, `transition_lean` (the Phase-3 lean, already applied), `cash_sleeve_target_pct`, `binding`. **This is the reference you reason against and execute toward via the OVERRIDE_SCHEMA_V1 protocol (Section 2).** Absent ⟹ paper account unavailable; fall back to the qualitative quadrant call and say so.
+- `reference_weights` — **the deterministic per-ticker target allocation the book executes toward** (strategy-spec §10). `target_weights_pct` (per-ticker % of equity), `by_quadrant` (the deterministic per-quadrant aggregation of `target_weights_pct` — SGOV + literal cash → `cash_sleeve`; **echo this verbatim in Table A's Reference column, never re-sum by hand**), `active_quadrant`/`favored_bucket`/`borderline`, `conviction_proxy`+label, `active_quadrant_target_pct_of_core`, `ceiling_pct_of_core`, `dollar_tilt`, `transition_lean` (the Phase-3 lean, already applied), `cash_sleeve_target_pct`, `binding`. **This is the reference you reason against and execute toward via the OVERRIDE_SCHEMA_V1 protocol (Section 2).** Absent ⟹ paper account unavailable; fall back to the qualitative quadrant call and say so.
 - `divergences` — the pre-computed **tension detector** (list): each `{id, description, signals, direction_implied, status}` flags two signals that should agree but don't (leading-vs-lagging inflation, credit complacency, price-vs-regime, dollar-vs-intl). **You adjudicate them** (they are not resolved for you); an `active` one may serve as override evidence, an `indeterminate` one may not. Surface them in Section 6 and weigh them in Section 2.
 - `transition_watch` — the deterministic **pre-staging** signal (`active`, `projected_quadrant`, `direction`, `staged_fraction`, `basis`, `status`). **Already baked into `reference_weights`** (see its `transition_lean`) — surface it as context, do **not** apply it a second time.
 - `flex_state` — **the intraday Flex engine's computed state** (it owns the flex sleeve end-to-end). Per held flex name: the **exit** decision (`next_action` ∈ hold/scale_out/trail/time_stop/stopped, `r_multiple`, `trail_stop`). Per nomination evaluated: the **entry** decision (`entry_trigger` pass/fail, `skip_reason`, `binding`, `size_shares`). Also `quadrant` (the deterministic quadrant the engine used), `as_of`, and **`reconciliation`** (`{status, engine_held, broker_held}` — the deterministic engine-vs-broker check). **When `reconciliation.status` is `ok`, echo the engine's numbers; never recompute or override a flex price/stop/size. When it is `mismatch`, the PAPER ACCOUNT is canonical** — count `broker_held` names as real flex holdings (🔴), run kill-criteria against the broker position using the last recorded kill price from flex/`TradeHistory`, and open no new flex entry in the affected symbol until resolved (see "Reading flex_state" above). Absent ⟹ engine disabled or not yet run that day — say so, don't invent flex levels.
@@ -805,8 +805,9 @@ Then the numbered sections, in this order:
    **Table A — Accounting view (every dollar counted once; rows sum to ~100%).**
    *Purpose: shows where the capital literally sits vs. the deterministic reference. Each
    name appears in exactly one quadrant, so the percentages are a true share of equity.
-   The **Reference** column is `reference_weights` aggregated by primary quadrant — the
-   target the book is meant to execute toward (see "Execute toward the reference" below).*
+   The **Reference** column is `reference_weights.by_quadrant` echoed VERBATIM — the
+   collector already aggregated the per-name targets by primary quadrant; never re-sum
+   them by hand (see "Execute toward the reference" below).*
 
    | Quadrant | Current % of equity | Reference % (`reference_weights`) | Recommended % (post-trade) |
    |---|---|---|---|
@@ -816,10 +817,14 @@ Then the numbered sections, in this order:
    | Q4 Deflation | … | … | … |
    | Cash sleeve (cash + SGOV) | … | … | … |
 
-   - **Reference** = sum of `reference_weights.target_weights_pct` over each quadrant's
-     names (SGOV + literal cash → the Cash sleeve row). **Recommended = Reference ± your
-     logged overrides** (see below) — it is NOT a free-hand number. If Recommended differs
-     from Reference for any row, an override record must justify the difference.
+   - **Reference** = `reference_weights.by_quadrant[<quadrant>]` echoed **verbatim**
+     (the collector already aggregated `target_weights_pct` by primary quadrant, with
+     SGOV + literal cash → the `cash_sleeve` row). **Do NOT re-sum the per-name targets
+     yourself** — the 2026-07-09 report did and produced a Q3 total (42.9%) that
+     disagreed with its own per-name footnote (~58%) and a Reference column that summed
+     to ~89.5% instead of 100%. **Recommended = Reference ± your logged overrides**
+     (see below) — it is NOT a free-hand number. If Recommended differs from Reference
+     for any row, an override record must justify the difference.
 
    - Assign each held name to its **primary** quadrant only so the rows sum to
      ~100% without double-counting; put cash + SGOV in the Cash sleeve row. This is
