@@ -35,6 +35,14 @@ V3 — Window rule (the core; D1's mirror image): the post-trade weight must lan
     dip below the floor (integer shares + a positive floor also leave ≥1 share on any
     clamped core sell).
 
+    SGOV literal-cash carve-out: a SGOV BUY funded purely from PRE-TRADE literal cash
+    is a pure cash-SLEEVE composition swap (cash sleeve = SGOV + literal cash) — it
+    does not change the sleeve total, so it is EXEMPT from the per-name window. The
+    exemption applies only while the buy is funded from pre-trade literal cash above
+    the `literal_cash_target_pct` buffer (same-day sell proceeds are excluded, so it
+    can never grow the sleeve); it is CLAMPED to that budget, not rejected. SGOV SELLs
+    are windowed normally; all V4 mechanical checks still apply.
+
 V4 — Mechanical sanity: sell qty ≤ held (clamped, mirroring the executor's held
     filter); buy notional ≤ cash available after the file's sells (clamped; the list
     is sells-first sorted before processing so proceeds are counted); integer shares
@@ -109,6 +117,9 @@ def validate_trades(
     equity = float(ctx.get("equity_usd") or 0)
     gate = str(ctx.get("deployment_gate") or "").lower()
     exempt = {str(t).upper() for t in (ctx.get("exempt_holds") or EXEMPT_HOLDS)}
+    # Task 2: the literal-cash buffer (SGOV carve-out) — reference_weights.
+    # literal_cash_target_pct, defaulting to the 1.5% cash buffer if absent.
+    literal_cash_buffer_pct = float(ctx.get("literal_cash_target_pct") or 1.5)
 
     rows = {str(g.get("symbol") or "").upper(): g for g in (gaps or []) if g.get("symbol")}
     residual = allowed_residuals(override_decisions, max_mag)
@@ -124,6 +135,13 @@ def validate_trades(
             held[sym] = 0.0
     cash_avail = max(0.0, float(ctx.get("cash_usd") or 0))
     have_account = equity > 0 and bool(rows)
+    # Task 2: a SEPARATE pre-trade literal-cash tracker for the SGOV carve-out. It
+    # starts at pre-trade literal cash and is decremented ONLY by exempted SGOV buys
+    # — deliberately never fed by same-day sell proceeds, so a literal-cash → SGOV
+    # swap can never become a backdoor to grow the cash sleeve past what pre-trade
+    # cash (above the buffer) supports.
+    pre_cash = cash_avail
+    literal_cash_buffer_usd = literal_cash_buffer_pct / 100.0 * equity
 
     # Sells first (stable) so sell proceeds fund the buys we validate after them.
     ordered = sorted(trades or [], key=lambda t: _norm(t)[1] != "sell")
@@ -212,20 +230,46 @@ def validate_trades(
                     )
                     qty = float(new_qty)
             else:
-                if cur > hi + _EPS_PP:
-                    _reject(t, reasons + [
-                        f"buy of already-overweight sleeve ({cur:.2f}% > window ceiling "
-                        f"{hi:.2f}% = ref {ref:.2f} + {w:.1f}) — moves further from "
-                        "reference beyond the sheltered window"
-                    ])
-                    continue
-                if post > hi + _EPS_PP:
-                    new_qty = math.floor((hi - cur) / 100.0 * equity / px + 1e-6)
-                    reasons.append(
-                        f"buy clamped {int(qty)}→{new_qty}: landing {post:.2f}% would "
-                        f"exceed the window ceiling {hi:.2f}% (ref {ref:.2f} + {w:.1f})"
-                    )
-                    qty = float(new_qty)
+                # Task 2 carve-out: a literal-cash → SGOV conversion is a pure cash-
+                # SLEEVE composition swap (cash sleeve = SGOV + literal cash), so it
+                # does not change the sleeve TOTAL and must NOT be windowed against
+                # SGOV's per-name reference. Exempt the SGOV buy from the window when
+                # it is funded purely from PRE-TRADE literal cash (never same-day sell
+                # proceeds) and only down to the literal-cash buffer; clamp to that
+                # budget rather than reject. Below-budget (e.g. only sell proceeds
+                # available) → no exemption, falls through to the normal window.
+                # (2026-07-09: SGOV 28.44% vs window ceiling 28.50% rejected a
+                # $4k cash→SGOV swap, leaving ~5% of equity idle in literal cash.)
+                sgov_exempt = False
+                if sym == "SGOV":
+                    budget = max(0.0, pre_cash - literal_cash_buffer_usd)
+                    max_shares = math.floor(budget / px)
+                    if max_shares >= 1:
+                        sgov_exempt = True
+                        if qty > max_shares:
+                            reasons.append(
+                                f"SGOV buy clamped {int(qty)}→{max_shares}: funded only "
+                                f"from pre-trade literal cash above the "
+                                f"{literal_cash_buffer_pct:.1f}% buffer (${budget:,.0f} "
+                                "available; same-day sell proceeds excluded)"
+                            )
+                            qty = float(max_shares)
+                        pre_cash -= qty * px
+                if not sgov_exempt:
+                    if cur > hi + _EPS_PP:
+                        _reject(t, reasons + [
+                            f"buy of already-overweight sleeve ({cur:.2f}% > window ceiling "
+                            f"{hi:.2f}% = ref {ref:.2f} + {w:.1f}) — moves further from "
+                            "reference beyond the sheltered window"
+                        ])
+                        continue
+                    if post > hi + _EPS_PP:
+                        new_qty = math.floor((hi - cur) / 100.0 * equity / px + 1e-6)
+                        reasons.append(
+                            f"buy clamped {int(qty)}→{new_qty}: landing {post:.2f}% would "
+                            f"exceed the window ceiling {hi:.2f}% (ref {ref:.2f} + {w:.1f})"
+                        )
+                        qty = float(new_qty)
 
         # --- V4: mechanical sanity ----------------------------------------------
         if have_account and side == "sell" and row is not None:

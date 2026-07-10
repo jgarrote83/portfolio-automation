@@ -376,6 +376,8 @@ def _build_reference_gaps(snapshot: dict) -> tuple[list[dict], dict]:
         "deployment_gate": (snapshot.get("regime_gate") or {}).get("status"),
         "equity_usd": equity,
         "cash_usd": float(pa.get("cash") or 0),
+        # Task 2: the literal-cash buffer for the Tier-1 SGOV cash-swap carve-out.
+        "literal_cash_target_pct": float(ref.get("literal_cash_target_pct") or 1.5),
     }
     return gaps, ctx
 

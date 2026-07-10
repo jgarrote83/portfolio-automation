@@ -18,7 +18,7 @@
     "ceiling": 15.0,
     "shock3_ceiling": 25.0
   },
-  "_cash_sleeve_note": "Cash sleeve = literal cash + SGOV, held to 5-15% of equity; shock_level 3 may lift the ceiling toward 25% temporarily (spec §7, prompt Cash sleeve). This is a SEPARATE sleeve outside the core block.",
+  "_cash_sleeve_note": "Cash sleeve = literal cash + SGOV, held to 5-15% of equity; shock_level 3 may lift the ceiling toward 25% temporarily (spec §7, prompt Cash sleeve). This is a SEPARATE sleeve outside the core block. Because the sleeve = SGOV + literal cash, a literal-cash -> SGOV conversion does NOT change the sleeve total (a pure composition swap): the Tier-1 validator (shared/trade_validation.py) therefore EXEMPTS a SGOV buy from SGOV's per-name window when it is funded purely from pre-trade literal cash (not same-day sell proceeds) down to the literal_cash_target_pct buffer, clamping to that budget rather than rejecting. This fixes the 2026-07-09 idle-cash pathology (SGOV 28.44% vs 28.50% window ceiling rejected a $4k cash->SGOV swap, stranding ~5% of equity in cash).",
 
   "flex_sleeve_cap_pct": {
     "soft": 15.0,
