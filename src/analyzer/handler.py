@@ -269,7 +269,7 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
                 len(bad_enforced), [t.get("id") for t in bad_enforced],
             )
         if tv["rejected"] or tv["summary"]["clamped"]:
-            report_md += _validation_addendum(tv)
+            report_md += _validation_addendum(tv, gaps, vctx)
         logger.info("Trade validation: %s", tv["summary"])
     except Exception:  # noqa: BLE001
         logger.exception("Trade validation CRASHED — flagging file (fail-closed)")
@@ -290,13 +290,24 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
 # Reference execution (Finding 2 — input assembly for shared/reference_execution.py)
 # ---------------------------------------------------------------------------
 
-def _validation_addendum(tv: dict) -> str:
+def _validation_addendum(tv: dict, gaps: list[dict] | None = None,
+                         ctx: dict | None = None) -> str:
     """Markdown addendum appended to the report when the Tier-1 validator rejected or
-    clamped anything — the human-readable record next to the model's own prose."""
+    clamped anything — the human-readable record next to the model's own prose.
+
+    Also states the **submittable count** (X of Y proposed trades) and, when a
+    rejection/clamp changed the cash arithmetic, a corrected literal-cash figure
+    (the body's cash/sleeve prose assumed every proposed trade executed — the
+    2026-07-09 report narrated a cash level built on a trade the validator dropped).
+    """
+    summary = tv["summary"]
+    submittable = len(tv.get("trades", []))
+    total = submittable + len(tv.get("rejected", []))
     lines = [
         "\n\n---\n\n### ⚠️ Trade-validation addendum (deterministic, post-model)\n",
-        f"Tier-1 validator result: {tv['summary']['passed']} passed, "
-        f"{tv['summary']['clamped']} clamped, {tv['summary']['rejected']} rejected.\n",
+        f"Tier-1 validator result: {summary['passed']} passed, "
+        f"{summary['clamped']} clamped, {summary['rejected']} rejected.\n",
+        f"**Submittable: {submittable} of {total} proposed trades.**\n",
     ]
     for t in tv.get("rejected", []):
         reasons = "; ".join((t.get("validation") or {}).get("reasons", []))
@@ -311,7 +322,51 @@ def _validation_addendum(tv: dict) -> str:
                 f"- **CLAMPED** {t.get('side', '?').upper()} {t.get('symbol', '?')} "
                 f"({t.get('id', 'no-id')}): {'; '.join(v.get('reasons', []))}"
             )
+    # Cash-invalidation note: the body assumed ALL proposed trades executed; a
+    # rejection/clamp changes the arithmetic, so recompute literal cash from the
+    # VALIDATED (post-clamp) trades + the pre-trade cash in ctx.
+    if (tv.get("rejected") or summary["clamped"]) and ctx is not None:
+        post_cash = _post_validation_cash(tv.get("trades", []), gaps or [], ctx)
+        if post_cash is not None:
+            lines.append(
+                "\n_Body cash/sleeve figures assumed all proposed trades executed; "
+                f"post-validation literal cash ≈ ${post_cash:,.0f}._"
+            )
     return "\n".join(lines) + "\n"
+
+
+def _post_validation_cash(trades: list[dict], gaps: list[dict], ctx: dict) -> float | None:
+    """Literal cash after only the VALIDATED trades execute: pre-trade cash + sell
+    proceeds - buy notional, priced off the gap rows. None if pre-trade cash is
+    unknown."""
+    try:
+        cash = float(ctx.get("cash_usd"))
+    except (TypeError, ValueError):
+        return None
+    price: dict[str, float] = {}
+    for g in gaps or []:
+        sym = str(g.get("symbol") or "").upper()
+        try:
+            px = float(g.get("price"))
+        except (TypeError, ValueError):
+            continue
+        if sym and px > 0:
+            price[sym] = px
+    for t in trades or []:
+        sym = str(t.get("symbol") or t.get("ticker") or "").upper()
+        side = str(t.get("side") or t.get("action") or "").lower()
+        try:
+            qty = float(t.get("quantity") or t.get("qty") or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        px = price.get(sym)
+        if not px or qty <= 0:
+            continue
+        if side == "sell":
+            cash += qty * px
+        elif side == "buy":
+            cash -= qty * px
+    return cash
 
 
 def _build_reference_gaps(snapshot: dict) -> tuple[list[dict], dict]:
