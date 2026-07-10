@@ -286,8 +286,10 @@ keep that sleeve between **5% and 15% of equity**. SGOV counts as cash: it is a
   near **5%** (fully deployed); low conviction / defensive (Risk Score ≥ 7) → toward
   **15%** dry powder.
 - **Inside the sleeve, prefer SGOV over idle cash** — SGOV earns the bill yield while
-  `paper_account.cash` earns ~0. Keep only a small literal-cash buffer (~1–2% of
-  equity) for settlement/execution, and hold the rest of the sleeve in SGOV. To fund
+  `paper_account.cash` earns ~0. Keep only the literal-cash buffer given by
+  **`reference_weights.literal_cash_target_pct`** (currently **1.5%** of equity) —
+  never a re-derived "1%" or "1–2%" figure — for settlement/execution, and hold the
+  rest of the sleeve in SGOV. To fund
   a buy, raise cash from SGOV first (sell SGOV before buys, like any sell).
 - **The 5–15% sleeve cap supersedes any larger SGOV "defensive overweight."** True
   Q4 / capital-preservation defense comes from long-duration Treasuries (TLT) and
@@ -447,8 +449,9 @@ Fields you will receive:
 - `composite ≥ 7`: Rotation underway. Tilt +2 to +3pp from SPY/QQQ into the top 1–2 international leaders. If a specific region is the leader (e.g. EWJ leads), name the region. If `ratio_ma_cross` for that region is `bullish_intl`, confidence is higher.
 - **De-rotation:** if `composite` falls back from ≥7 to ≤5 across two consecutive reports, unwind the tilt symmetrically.
 - Always state the score, the category, and which component drove the call (e.g. "score 7.2 driven by dollar momentum 8.5 + RS 7.0"). If a major component is missing, say so.
+- **INTERIM — the deployment gate outranks a rotation tilt (pending the international-governance redesign).** When `regime_gate.status` is **CLOSED**, any rotation tilt INTO international beta is **size 0** — a rotation signal is not a deployment authorization, and a closed gate forbids adding Q1/Q2 amplifier beta (intl included). Echo the conflict in **one line** ("rotation says +Npp {leader}; gate closed; tilt suppressed") and file **no** trade for it. This codifies what the analyzer improvised on 2026-07-09; the dollar/rotation-governed intl redesign is a **separate, human-reviewed change** (see FOLLOWUPS — do not improvise it here).
 
-When the rotation call disagrees with the quadrant call (e.g. Q1 says SPY/QQQ but rotation score is 7), **the rotation call wins on the international vs domestic split**; the quadrant call still drives the sector mix inside each region.
+When the rotation call disagrees with the quadrant call (e.g. Q1 says SPY/QQQ but rotation score is 7), **the rotation call wins on the international vs domestic split** — **subject to the INTERIM gate rule above: a CLOSED gate suppresses the international tilt to size 0**; the quadrant call still drives the sector mix inside each region.
 
 ### Event-driven override (read `market_shock` before everything else)
 
@@ -523,7 +526,7 @@ and equities disagree, **bonds usually win on a 4–8 week horizon**.
 - `scorecard.label = defensive` — if your equity-side call is bullish, soften it (smaller tilts, more SGOV).
 - `scorecard.label = acute_defensive` — must propose at least one defensive trade even if quadrant is Q1/Q2.
 
-**Confluence requirement:** the composite scorecard alone is NOT sufficient to override the quadrant. 2025–2026 bond signals are partially distorted by QT and Treasury issuance (per `bond_signals.caveat`). Require **at least 3 of the 4 sub-signals to agree** (all <=0 for defensive, all >=0 for risk-on) before letting the scorecard drive a tilt change. When signals diverge, cite the divergence in the rationale and defer to the quadrant.
+**Confluence requirement:** the composite scorecard alone is NOT sufficient to override the quadrant. 2025–2026 bond signals are partially distorted by QT and Treasury issuance (per `bond_signals.caveat`). Require **at least 3 of the 4 sub-signals to agree** before letting the scorecard drive a tilt change. **A sub-signal counts as "defensive" ONLY when its sub-score is ≤ −1 (a 0 is neutral, NOT defensive) and "risk-on" ONLY when ≥ +1.** Echo the collector's `bond_signals.scorecard.composite` and `label` **verbatim** — never freehand the "N of 4" count (the 2026-07-09 report claimed "2 of 4 defensive" while the sub-scores were 0 / 0 / +1 / −1, i.e. exactly one defensive). When signals diverge, cite the divergence in the rationale and defer to the quadrant.
 
 **Audit requirement:** echo `bond_scorecard_reading` (the composite integer) and `bond_signal_action` (the label) in the trades JSON. If any hard trigger fired, name it explicitly in the rationale of the affected trade.
 
@@ -547,7 +550,7 @@ recession case strengthens regardless of the quadrant call.
 | Signal | Bullish (+1/+2) | Bearish (-1/-2) |
 | --- | --- | --- |
 | Claims | ICSA 4w avg falling >=5% vs 26w avg | ICSA 4w avg rising >=5% (-1) or >=10% (-2) vs 26w avg |
-| Payrolls | `delta_3m_avg_k` >= 200 | `delta_3m_avg_k` < 100 (-1) or < 0 (-2) |
+| Payrolls | `delta_3m_avg_k` >= 200 (+1) | `delta_3m_avg_k` < 100 (-1) or < 0 (-2) — the **100–200 band is neutral (0)**: above 200K = +1, below 100K = −1, between = 0 |
 | Unemployment | UNRATE 6m delta <=-0.2pp | Sahm >=0.3 (-1) or >=0.5 (-2); UNRATE 6m delta >=0.4pp (-1) |
 | Wages | AHE YoY 3-4% (Goldilocks) or YoY <=3% with DFF>=4 (cuts coming) | AHE YoY >=4.5% with DFF>=4 (Fed stays hawkish, -1); YoY >=5% (-1) |
 
@@ -773,7 +776,7 @@ analysis. Use exactly these rows, in this order, with a status glyph (🟢 ok /
 | **Inflation — core PCE / CPI** | {inflation_axis.direction} ({pce}% / {cpi}% YoY) | {reason; oil overlay if firing} |
 | **Policy — Fed** | funds {rate}%; {policy_axis.stance} ({source}) | {dot-plot as_of age or DGS2 Δ20d; 🔴 if unconfirmed} |
 | **Account vs SPY** | {acct}% vs {spy}% ({±excess}pp) | {days} live |
-| **Cash sleeve** | {cash_pct}% | {in-band / above band 🟡} |
+| **Cash sleeve** | {cash_pct}% | {±pp vs `reference_weights` cash-sleeve target, e.g. "+17.3pp above ref"; 🟡 if above band} |
 | **Shock** | level {0–3} | {price corroboration in ≤6 words} |
 | **Rotation** | {leader} {+pp} / {laggard} {−pp} | score {composite} ({category}) |
 | **Bonds / Labor** | {b_composite} {b_label} / {l_composite} {l_label} | {triggers or "no triggers"} |
