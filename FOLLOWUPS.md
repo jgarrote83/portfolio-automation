@@ -958,6 +958,25 @@ can confirm an oil spike with a print dated on/after the event; unit test on a f
 where FMP is present vs absent. Independent track; FMP-tier verification is the gating
 unknown (park with a note if commodity quotes aren't on the current tier).
 
+### 36. International governance redesign (dollar/rotation-governed intl sleeve, flex migration, gate precedence) — ⏸ PENDING HUMAN DECISION
+**Do not implement without an explicit human design decision.** The 2026-07-09 audit
+exposed that the international sleeve has no first-class governance: rotation signals,
+the DXY dollar switch, the deployment gate, and the flex sleeve interact ad-hoc, and
+the analyzer improvised a gate-vs-rotation precedence on the fly. The interim patch
+(Task 8 #5) codifies only the stop-gap — **a CLOSED `regime_gate` suppresses rotation
+tilts into international to size 0** — so the book cannot add intl beta through a gate.
+The real redesign is a separate, human-reviewed change spanning:
+- a **dollar/rotation-governed intl sleeve** — a deterministic target for the
+  international allocation driven by the DXY switch + rotation score, folded into
+  `reference_weights` (not an LLM freehand tilt);
+- **flex migration** of the single-name intl exposure vs the core ETF intl sleeve
+  (which names live in core vs flex);
+- **explicit gate precedence** for international (replacing the interim size-0 rule
+  with a governed interaction between the gate, the rotation score, and the sleeve).
+This touches strategy semantics (the reference math + the gate), so it must be
+specced and decided by the account holder first — the audit branch deliberately does
+NOT implement it.
+
 ---
 
 ## Done
