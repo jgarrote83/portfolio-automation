@@ -1492,6 +1492,24 @@ def _write_etf_history(today: str, etf_holdings: dict, prices: dict) -> None:
         })
 
 
+def _rotation_composite_category(weighted: float) -> tuple[float, str]:
+    """Round the weighted rotation score to 1dp, then bucket the ROUNDED value.
+
+    The displayed ``composite`` and the ``category`` are derived from the same
+    rounded number so they can never disagree — the 2026-07-09 seam where an
+    unrounded 3.049 displayed as 3.0 but bucketed "transition_window". Rubric:
+    composite <= 3 us_leadership_intact; 4-6 transition_window; 7-10 rotation_underway.
+    """
+    composite = round(weighted, 1)
+    if composite <= 3:
+        category = "us_leadership_intact"
+    elif composite <= 6:
+        category = "transition_window"
+    else:
+        category = "rotation_underway"
+    return composite, category
+
+
 def _build_regional_rotation(fmp: FMPClient, macro_data: dict) -> dict:
     """Pre-compute the US-vs-international rotation signal block.
 
@@ -1737,15 +1755,14 @@ def _build_regional_rotation(fmp: FMPClient, macro_data: dict) -> dict:
     components["valuation_gap"] = {"score": v_score, "weight": 20, "input": None, "note": "ETF forward-P/E aggregation not available on current data tier"}
 
     weighted = sum(c["score"] * c["weight"] for c in components.values()) / 100.0
-    if weighted <= 3:
-        category = "us_leadership_intact"
-    elif weighted <= 6:
-        category = "transition_window"
-    else:
-        category = "rotation_underway"
+    # Round FIRST, then bucket on the rounded composite — otherwise the category can
+    # be derived from an unrounded score that disagrees with the displayed number
+    # (2026-07-09: weighted 3.049 displayed as 3.0 but bucketed "transition_window",
+    # handing the analyzer a "don't tilt" number with a "tilt" label).
+    composite, category = _rotation_composite_category(weighted)
 
     out["rotation_score"] = {
-        "composite": round(weighted, 1),
+        "composite": composite,
         "category": category,
         "components": components,
         "components_missing": missing,
