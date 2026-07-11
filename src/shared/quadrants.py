@@ -7,6 +7,9 @@ ETF" a flex single name is judged against (opportunity-cost gate G3 + the dual-b
 flex review). Keeping this in one place stops the collector and analyzer from drifting.
 """
 
+import json
+from pathlib import Path
+
 # Representative active-quadrant sleeve ETF (all are held core names).
 QUADRANT_BENCHMARK_ETF = {
     "Q1": "QQQ",   # Goldilocks — growth/tech
@@ -39,55 +42,152 @@ def benchmark_etf_for(quadrant: str | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Strategy membership (growth_strategy_spec_v1.md §2 blocks + §3 rotation table)
+# Strategy membership — ROLE-BASED (roster_revision_2026-07.md)
 #
-# These power the deterministic reference-weight precompute (collector
-# `_build_reference_weights`). They deliberately model the spec's view — two
-# opposite *blocks* (Amplifier vs Damper) + a dollar switch, and a per-quadrant
-# CONCENTRATE/TRIM list where a name may appear in several quadrants' lists — NOT
-# a single "primary quadrant per ticker" map (that earlier model was too rigid and
-# the Table A/B prompt rework already flagged it). The 24-name core roster is fixed
-# (see the analyzer prompt's Core table); edits here must stay in sync with it.
+# The core is no longer a fixed ticker list. It is a set of ROLES (a job the book
+# needs done), each with a candidate `pool` and one `selected` incumbent, defined in
+# `config/sleeve-roles.json`. The Amplifier/Damper blocks, the per-quadrant CONCENTRATE
+# lists, and CORE_ROSTER all RESOLVE from that config (the `selected` member of each
+# role) — so a human config commit to `selected` is the only way a core member changes.
+# AMZN/GOOGL are no longer exempt holds; single names moved to LEGACY_EXITS (liquidated,
+# never re-bought into core). International is governed by rotation, not the US quadrant
+# (the two `rotation` roles are excluded from QUADRANT_CONCENTRATE — see collector
+# `intl_governance`).
 # ---------------------------------------------------------------------------
 
-# §2 — the two opposite blocks. The Amplifier is the return engine (can beat SPY);
-# the Damper is ballast (wins in drawdowns). The dollar switch tilts the amplifier
-# internally (US growth vs international), see `amplifier_split`.
-AMPLIFIER_US = ("SPY", "QQQ", "XSD", "AMZN", "GOOGL", "INTC")
-AMPLIFIER_INTL = ("IDMO", "AIA", "EWJ", "IEMG", "EWZ", "VSS", "EUAD")
-DAMPER = ("GLD", "TLT", "TIP", "DBA", "PDBC", "SGOV", "XLP", "MCK", "VDE", "XLI", "PPA")
+_ROLES_FILE = Path(__file__).parent.parent / "config" / "sleeve-roles.json"
 
-# §3 — per-quadrant rotation table: which core names to CONCENTRATE into when that
-# quadrant is active. Everything held and NOT in the active quadrant's concentrate
-# list is trimmed toward the 0.1% floor. Names recur across quadrants by design
-# (GLD concentrates in Q3 and Q4; TIP in Q2 and Q3; EM/IDMO in Q1 and Q2). SGOV is
-# part of the cash sleeve, handled separately — it is intentionally absent here.
-QUADRANT_CONCENTRATE = {
-    # Q1 Goldilocks — amplifier (US growth + intl-if-DXY-falling). Intl members are
-    # included; the dollar switch decides the US/intl split within the amplifier.
-    # EWZ is intentionally absent — commodity-heavy Brazil is the weakest Goldilocks
-    # fit; it lives in Q2/Q3 (reflation + stagflation via commodity exposure).
-    "Q1": ("SPY", "QQQ", "XSD", "AMZN", "GOOGL", "INTC",
-           "IDMO", "AIA", "EWJ", "IEMG", "VSS"),
-    # Q2 Reflation — energy/materials/industrials/EM/commodities/TIPS.
-    "Q2": ("VDE", "XLI", "PPA", "EUAD", "DBA", "PDBC", "EWZ", "IEMG", "IDMO", "TIP"),
-    # Q3 Stagflation — gold/energy/commodities/TIPS/defensives. EWZ included:
-    # commodity-linked EM survives stagflation via its commodity exposure.
-    "Q3": ("GLD", "VDE", "PDBC", "DBA", "TIP", "XLP", "MCK", "EWZ"),
-    # Q4 Deflation — long Treasuries + defensive equity (SGOV/cash handled in the
-    # cash sleeve, not here).
-    "Q4": ("TLT", "XLP", "MCK", "GLD"),
-}
 
-# Permanent mega-cap conviction holds — never trimmed below their current weight and
-# never forced down by the reference-weight math (spec §8 living-hedge nuance; the
-# account holder keeps them through the cycle for balance-sheet quality + cash flow).
-EXEMPT_HOLDS = ("AMZN", "GOOGL")
+def _load_roles_config() -> dict:
+    return json.loads(_ROLES_FILE.read_text(encoding="utf-8"))
 
-# The full fixed core roster (24). A held name not in this set is off-roster (a flex
-# leftover like MU, or a stale fallback entry like ADBE) — the reference math assigns
-# it to a flex/unclassified bucket, never a core quadrant target.
-CORE_ROSTER = tuple(sorted(set(AMPLIFIER_US) | set(AMPLIFIER_INTL) | set(DAMPER)))
+
+_ROLES_CONFIG = _load_roles_config()
+_ROLES: dict[str, dict] = {r["role_id"]: r for r in _ROLES_CONFIG.get("roles", [])}
+
+
+def selected_for_role(role_id: str) -> str | None:
+    """The currently `selected` incumbent ticker for a role (None if unknown)."""
+    r = _ROLES.get(role_id)
+    sel = r.get("selected") if r else None
+    return sel.upper() if isinstance(sel, str) else None
+
+
+def role_of(ticker: str) -> str | None:
+    """The role_id whose POOL contains `ticker` (None if off-roster)."""
+    t = (ticker or "").upper()
+    for rid, r in _ROLES.items():
+        if t in {str(m).upper() for m in r.get("pool", ())}:
+            return rid
+    return None
+
+
+def intl_roles() -> tuple[str, ...]:
+    """The rotation-governed international roles (quadrants == 'rotation')."""
+    return tuple(rid for rid, r in _ROLES.items() if r.get("quadrants") == "rotation")
+
+
+def roles_config() -> list[dict]:
+    """All role definitions (raw dicts) from sleeve-roles.json."""
+    return list(_ROLES_CONFIG.get("roles", []))
+
+
+def selection_config() -> dict:
+    """The sleeve_selection scorecard tunables (momentum blend, hysteresis, corr floor)."""
+    return dict(_ROLES_CONFIG.get("selection_config", {}))
+
+
+def intl_config() -> dict:
+    """The international sizing-ladder tunables (intl_governance)."""
+    return dict(_ROLES_CONFIG.get("intl_config", {}))
+
+
+# Retired single names — liquidated in tranches, never re-bought into CORE (Task D).
+# INTC/MCK/PPA/EUAD are re-enterable as FLEX theses (see flex-candidates.json).
+LEGACY_EXITS = ("AMZN", "GOOGL", "INTC", "MCK", "DBA", "TIP", "XSD", "PPA", "EUAD")
+
+# Exempt-hold doctrine RETIRED (roster_revision_2026-07). Kept as an empty tuple so the
+# validator V2 rule and the reference-weight pinning become NO-OPS rather than being
+# deleted — the machinery survives for any future designated hold.
+EXEMPT_HOLDS: tuple[str, ...] = ()
+
+
+def _selected_by_block(block: str) -> tuple[str, ...]:
+    out: list[str] = []
+    for r in _ROLES.values():
+        if r.get("block") == block:
+            sel = (r.get("selected") or "").upper()
+            if sel and sel not in out:
+                out.append(sel)
+    return tuple(out)
+
+
+# The two opposite blocks, resolved from the SELECTED member of each role. Amplifier =
+# return engine; Damper = ballast. Intl = the two rotation roles' selected members.
+AMPLIFIER_US = _selected_by_block("amplifier_us")
+AMPLIFIER_INTL = _selected_by_block("amplifier_intl")
+DAMPER = _selected_by_block("damper")
+
+
+def _build_quadrant_concentrate() -> dict[str, tuple[str, ...]]:
+    """Per-quadrant CONCENTRATE list = the SELECTED member of every quadrant-governed
+    role tagged with that quadrant. Rotation (intl) and cash roles are excluded."""
+    out: dict[str, list[str]] = {"Q1": [], "Q2": [], "Q3": [], "Q4": []}
+    for r in _ROLES.values():
+        quads = r.get("quadrants")
+        if not isinstance(quads, list):   # "rotation" / "cash"
+            continue
+        sel = (r.get("selected") or "").upper()
+        if not sel:
+            continue
+        for q in quads:
+            if q in out and sel not in out[q]:
+                out[q].append(sel)
+    return {q: tuple(v) for q, v in out.items()}
+
+
+QUADRANT_CONCENTRATE = _build_quadrant_concentrate()
+
+
+# CORE_ROSTER = every POOL member of every role (both types) ∪ LEGACY_EXITS while held
+# (the validator must see a legacy name to validate its exit sells). A held name not in
+# this set is off-roster (a flex leftover like MU). A sold-out legacy name simply never
+# trades again (buys are rejected — Task D).
+def _build_core_roster() -> tuple[str, ...]:
+    names: set[str] = set(LEGACY_EXITS)
+    for r in _ROLES.values():
+        for m in r.get("pool", ()):
+            names.add(str(m).upper())
+    return tuple(sorted(names))
+
+
+CORE_ROSTER = _build_core_roster()
+
+
+# Deterministic PRIMARY-quadrant map (single bucket per ticker) for aggregating the
+# reference weights by quadrant. A ticker's primary is the FIRST quadrant (Q1→Q4 order)
+# whose concentrate list contains it. International (rotation) role members map to the
+# "intl" bucket (they no longer carry a US-quadrant label); SGOV is the cash sleeve.
+def _build_primary_quadrant_map() -> dict[str, str]:
+    m: dict[str, str] = {}
+    for q in ("Q1", "Q2", "Q3", "Q4"):
+        for t in QUADRANT_CONCENTRATE.get(q, ()):
+            m.setdefault(t.upper(), q)
+    for rid in intl_roles():
+        for t in _ROLES[rid].get("pool", ()):
+            m.setdefault(str(t).upper(), "intl")
+    m["SGOV"] = "cash_sleeve"
+    return m
+
+
+PRIMARY_QUADRANT = _build_primary_quadrant_map()
+
+
+def primary_quadrant(ticker: str) -> str:
+    """The single deterministic bucket for a core ticker: Q1-Q4, "intl" for a
+    rotation-governed international name, "cash_sleeve" for SGOV, or "unclassified"
+    for an off-roster/unknown name (never silently dropped)."""
+    return PRIMARY_QUADRANT.get((ticker or "").upper(), "unclassified")
 
 
 def favored_bucket(growth_direction: str | None, inflation_direction: str | None) -> list[str]:

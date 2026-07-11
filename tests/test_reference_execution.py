@@ -64,7 +64,7 @@ def _trade(sym, side, qty):
 
 def test_is_de_risk_move_classification():
     assert is_de_risk_move("sell", "SPY")        # selling amplifier = de-risk
-    assert is_de_risk_move("sell", "IDMO")       # intl amplifier too
+    assert is_de_risk_move("sell", "AIA")        # selected intl amplifier too
     assert is_de_risk_move("buy", "GLD")         # buying damper = de-risk
     assert is_de_risk_move("buy", "SGOV")        # SGOV counts as ballast
     assert not is_de_risk_move("sell", "TLT")    # selling damper = re-risk
@@ -203,10 +203,10 @@ def test_turnover_cap_across_sleeves():
     """Three 10pp enforcements would be $30K; the $20K (20%) session cap funds two,
     the third floors to zero shares and is flagged (caps exhausted)."""
     gaps = [
-        _gap("SPY", 17.0, 2.0), _gap("XSD", 17.0, 2.0), _gap("INTC", 17.0, 2.0),
+        _gap("SPY", 17.0, 2.0), _gap("QQQ", 17.0, 2.0), _gap("SMH", 17.0, 2.0),
     ]
     r = reconcile(gaps, [], [], CFG, _ctx())
-    statuses = [r["sleeves"][s]["status"] for s in ("SPY", "XSD", "INTC")]
+    statuses = [r["sleeves"][s]["status"] for s in ("SPY", "QQQ", "SMH")]
     assert statuses.count("enforced") == 2
     assert statuses.count("non_compliant_flagged") == 1
     assert r["enforcement_notional_usd"] <= 20_000.0

@@ -100,6 +100,11 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         //   before it will manage them. FLEX_* knobs default in src/flex/config.py;
         //   override here only if tuning.
         { name: 'FLEX_ENABLED',                              value: 'true' }
+        //   DayTrade Lab (daytrade_manage, every 1 min, clock/window-gated).
+        //   Ships OFF — places live (paper) broker orders. Flip to 'true' only
+        //   after dry-run validation (POST /api/daytrade {"dry_run":true}) AND
+        //   resolving consolidated_source (docs/specs/DayTrade_Lab_v0.1.md §2).
+        { name: 'DAYTRADE_ENABLED',                          value: 'false' }
         //   Analyzer Claude call on large snapshots can exceed the old 10-min
         //   Consumption cap; Flex allows more. Backstops host.json functionTimeout.
         { name: 'AzureFunctionsJobHost__functionTimeout',    value: '00:40:00' }

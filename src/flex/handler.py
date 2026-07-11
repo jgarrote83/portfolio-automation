@@ -98,7 +98,8 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
         ((snapshot.get("growth_axis") or {}).get("direction")),
         ((snapshot.get("inflation_axis") or {}).get("direction")),
     )
-    nominations = _flex_nominations(read_trades(today))
+    daytrade_syms = _daytrade_ledger_symbols()
+    nominations = _flex_nominations(read_trades(today), exclude=daytrade_syms)
     minutes = _session_minutes(client, today, now_et)
 
     # ── STEP 3 — fetch bars for held ∪ nominated symbols ─────────────────────
@@ -118,7 +119,10 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
             _act_on_exit(client, ledger, sym, st, today, decisions, executions)
 
     # ── STEP 5 — entry (morning window only) ─────────────────────────────────
-    sleeve_used = _flex_notional(positions, ledger)
+    # Joint sleeve arbitration (DayTrade_Lab spec §1): the flex sleeve cap holds
+    # across BOTH engines, so the lab's open notional consumes catalyst headroom.
+    sleeve_used = _flex_notional(positions, ledger) \
+        + _symbols_notional(positions, daytrade_syms)
     sleeve_cap_usd = cfg.sleeve_cap_pct / 100.0 * equity if equity else 0.0
     for nom in nominations:
         sym = nom["symbol"]
@@ -238,6 +242,14 @@ def _open_position(client, ledger, sym, e, nom, today, decisions, executions) ->
         sym, float(e["entry_price"]), today, stop_price, qty,
         order_ids=[str(order.get("id"))] + stop_ids,
     )
+    # Persist the ledger IMMEDIATELY on entry (defensive — MU orphan incident). The
+    # tick otherwise only writes the ledger at end-of-STEP-6; a crash/timeout after
+    # this fill but before that write left a broker position with no ledger row, and
+    # reconcile never re-adopts broker orphans, so it went invisible with no exit.
+    try:
+        write_ledger(ledger)
+    except Exception:  # noqa: BLE001
+        logger.exception("ledger persist-on-entry for %s failed", sym)
     _record_trade_history(today, sym, "buy", qty, status="submitted", extra=_enums(nom, e))
     return True
 
@@ -283,7 +295,9 @@ def _issued(decisions, executions, symbol, kind, order) -> None:
     executions.append({**rec, "submitted_at": _now_utc_iso()})
 
 
-def _flex_nominations(trades_doc) -> list[dict]:
+def _flex_nominations(trades_doc, exclude: frozenset[str] = frozenset()) -> list[dict]:
+    """Nominations minus core names and ``exclude`` (the DayTrade Lab's open
+    symbols — three-way separation, DayTrade_Lab spec §1)."""
     if not isinstance(trades_doc, dict):
         return []
     noms = trades_doc.get("flex_nominations") or []
@@ -291,9 +305,15 @@ def _flex_nominations(trades_doc) -> list[dict]:
     for n in noms:
         if isinstance(n, dict) and n.get("symbol"):
             sym = str(n["symbol"]).upper()
-            if sym not in CORE_TICKERS:  # flex only — never touch a core name
+            if sym not in CORE_TICKERS and sym not in exclude:
                 out.append({**n, "symbol": sym})
     return out
+
+
+def _daytrade_ledger_symbols() -> frozenset[str]:
+    """The DayTrade Lab's open symbols (blob read only — no daytrade import)."""
+    data = read_json_blob("daytrade-ledger", "ledger.json")
+    return frozenset(data.keys()) if isinstance(data, dict) else frozenset()
 
 
 def _sector_for(sym, snapshot, nom) -> str | None:
@@ -372,10 +392,14 @@ def _equity(client) -> float:
 
 
 def _flex_notional(positions, ledger) -> float:
+    return _symbols_notional(positions, set(ledger))
+
+
+def _symbols_notional(positions, symbols) -> float:
     total = 0.0
     for p in positions or []:
         sym = str(p.get("symbol", "")).upper()
-        if sym in ledger:
+        if sym in symbols:
             try:
                 total += abs(float(p.get("market_value") or 0))
             except (TypeError, ValueError):
@@ -405,7 +429,10 @@ def _persist(today, decisions, quadrant, ledger, executions) -> None:
 
 
 def _coid(today, sym, kind) -> str:
-    return f"flex-{today}-{sym}-{kind}-{uuid.uuid4().hex[:6]}"[:48]
+    # FLEXC- namespaces catalyst-engine orders vs the DayTrade Lab's FLEXD-
+    # (DayTrade_Lab spec §1). Reconcile keys on the ledger, not the prefix, so
+    # pre-existing "flex-" orders remain managed.
+    return f"FLEXC-{today}-{sym}-{kind}-{uuid.uuid4().hex[:6]}"[:48]
 
 
 def _now_utc_iso() -> str:

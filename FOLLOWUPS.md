@@ -251,6 +251,10 @@ construction is airtight, the LLM-output→broker path is trusting.
 #32 (improvement ledger + /improvements tab) added — spec with #13, ship with/after
 it; monthly-only by decision (2026-07-03); daily analyzer untouched.
 
+#34 (global overnight tone, flex-facing) added — independent track, gated on FMP
+tier verification for index/forex quotes; describe-only v1, gatekeeper promotion
+only via #13/#23 evidence discipline.
+
 **Environment notes (read before editing):** repo is mirrored to a fresh clone at
 `C:\dev\portfolio-automation` to escape OneDrive — if you're working from the
 OneDrive path still, the **OneDrive silent-revert hazard** applies (it clobbered
@@ -897,9 +901,106 @@ trades, $19.7K enforced notional), auto-exec submitted, all 11 filled at Alpaca.
   (by design) but the daily data-trust flag won't clear until the manual layer is
   filled after a SEP. LOW.
 
+### 34. `global_overnight` tone block — pre-open tactical signal (MEDIUM — flex-facing)
+**Motivation (account holder, 2026-07-04):** the collector's 09:00 ET run is the ideal
+capture point for the overnight global session — Asia closed (final), Europe five
+hours into its day, US pre-market pricing the sum — and none of it currently reaches
+the analyzer or the flex layer. Honest scope: overnight signals mostly price the OPEN,
+not the day (overnight/intraday correlation is weak); the value is (a) gap-risk
+context for flex entries/stops, (b) TAIL detection — carry-unwind mornings à la
+Aug-2024 (Nikkei −12% + violent JPY strengthening) where the correct flex action is
+abstention, (c) the KOSPI/Nikkei semis-and-global-tech read-through for XSD/INTC-type
+flex names. A risk-tone instrument, not an alpha predictor — record this framing.
+- **Cadence dedupe (record verbatim):** #18 = daily cross-asset quadrant vote (EOD
+  trends); #24 = strategic regional scorecards (20/60d); #34 = tactical overnight
+  tone (hours, pre-open). Three cadences, three consumers; #34 never feeds the
+  quadrant axes or the regional tilt — it feeds the flex layer and §2 market context
+  only.
+- **Inputs (verify availability BEFORE implementation; degrade gracefully):**
+  US pre-market: SPY + QQQ pre-market last vs prior close via the Alpaca data API
+  (IEX feed, 4:00 AM+ coverage) — preferred over futures (no CME data needed).
+  Asia close: FMP `^N225` + `^KS11` quotes (VERIFY tier exposes index quotes; FRED
+  `NIKKEI225` as Nikkei fallback, KOSPI dropped if unavailable — note it).
+  Europe mid-session: FMP `^GDAXI` + `^STOXX50E` (same verification).
+  Carry stress: USDJPY overnight %Δ via FMP forex quote (FRED `DEXJPUS` is next-day
+  lagged — unusable pre-open). 10y Bund: EXCLUDED from v1 — no free real-time
+  source (FRED's German 10y is monthly); revisit only with a data-tier change.
+- **Block design (describe-only, bond_signals pattern):** per-input `{value,
+  pct_change_overnight, as_of, stale}` + two derived reads, thresholds in config:
+  `overnight_risk_tone: risk_on|neutral|risk_off` (weighted diffusion of the five
+  inputs) and `carry_stress: true|false` (USDJPY %Δ beyond threshold AND Nikkei
+  beyond threshold, same sign — the Aug-2024 signature). Any stale/missing input →
+  drop it, degrade confidence, never a false tone. LLM consumers: a §2 context line
+  + the flex-watchlist adjudication section (explicit rule: `carry_stress` or
+  strong `risk_off` argues for flex ABSTENTION that morning, not for shorts).
+  Optional later sub-item: feed `carry_stress` to the deterministic flex gatekeeper
+  as a hard input (pair with #9's data tier) — NOT in v1; promotion requires
+  evidence per the #13/#23 admission discipline.
+- **Prereqs:** none hard (independent of the #17/#18 and #24 tracks); FMP tier
+  verification is the gating unknown — if index/forex quotes are unavailable on the
+  current tier, park the item with that note rather than building on proxies of
+  proxies. **Acceptance:** block present in the 09:00 snapshot with all as-of
+  timestamps between 04:00–09:00 ET same day; tone/carry unit tests on fixtures;
+  prompt section added; a deliberately-degraded fixture (two inputs missing) yields
+  reduced confidence, never a fabricated tone.
+
+### 35. Fresher commodity quote for `market_shock` corroboration (LOW–MEDIUM)
+The collector's oil inputs come from FRED (`DCOILWTICO` / `DCOILBRENTEU`), which lag
+1–2 business days, so on a spike day the freshest WTI print predates the event and
+cannot corroborate it. This is what forced the 2026-07-09 freshness-discipline rule
+(the report cited WTI $69.60 as-of 07-06 as evidence the 07-08 spike "reversed").
+**Do:** source an **intraday / EOD-today** WTI (and Brent) quote via **FMP** (verify
+the tier exposes a commodity/futures quote — e.g. `CL=F` / a WTI symbol) and feed it
+into the `market_shock` energy read as same-day corroboration, keeping the FRED series
+for history. Degrade gracefully (FMP miss → fall back to FRED + the freshness label).
+**Acceptance:** snapshot carries a same-day WTI `as_of` on trading days; the analyzer
+can confirm an oil spike with a print dated on/after the event; unit test on a fixture
+where FMP is present vs absent. Independent track; FMP-tier verification is the gating
+unknown (park with a note if commodity quotes aren't on the current tier).
+
+### 36. International governance redesign (dollar/rotation-governed intl sleeve, flex migration, gate precedence) — ✅ RESOLVED 2026-07-10 (`feat/quadrant-roles`)
+**Resolved by the roster revision v2** — see `docs/specs/roster_revision_2026-07.md`.
+The international sleeve is now governed by `intl_governance` (collector, deterministic):
+a leader-selective sizing ladder driven by the rotation composite + the DXY dollar
+switch, with a gate modifier that **halves** (never zeroes) the leader tilt — this
+REPLACES the Task-8 INTERIM suppress-to-zero rule (now deleted). The design is
+leader-selective (small `intl_broad` base + a rotation-sized `intl_leader` slot) on the
+2026-07-09 evidence that intl outperformance is narrow (AIA +11pp vs SPY while the bloc
+average is −7.5pp). Flex migration: intl single-name exposure stays in flex; the two
+intl ETF roles (`intl_broad`/`intl_leader`) are the core sleeve. `reference_weights`
+consumes the block for the intl roles instead of quadrant math. Original PENDING scope
+(kept for history):
+- a **dollar/rotation-governed intl sleeve** — a deterministic target for the
+  international allocation driven by the DXY switch + rotation score, folded into
+  `reference_weights` (not an LLM freehand tilt);
+- **flex migration** of the single-name intl exposure vs the core ETF intl sleeve
+  (which names live in core vs flex);
+- **explicit gate precedence** for international (replacing the interim size-0 rule
+  with a governed interaction between the gate, the rotation score, and the sleeve).
+
+### 37. Tune the sleeve-selection hysteresis + intl ladder params (LOW — data-gated)
+The roster revision v2 (`feat/quadrant-roles`, `docs/specs/roster_revision_2026-07.md`)
+ships with **initial** tunables in `sleeve-roles.json`: the selection hysteresis
+(challenger must lead by ≥ 2.0 for ≥ 10 consecutive runs) and the intl sizing ladder
+(`intl_base_pp` 2.0, leader tilts 1pp/3pp, `leader_min_excess_pp` 5.0). **Revisit these
+once Phase C has graded ≥ 10 switch/rotation decisions** (OverrideHistory layers
+`sleeve_switch` / `intl_leader_rotation`, graded vs the incumbent counterfactual at
+30/60/90d) — if switches whipsaw or the leader tilt is mis-sized, adjust the thresholds.
+Do not tune before the sample exists.
+
 ---
 
 ## Done
+- **2026-07-10** (branch `feat/quadrant-roles`) — **Roster revision v2: role-based core,
+  exempt-hold retirement, international governance (Tasks A–H).** The core moved from a
+  fixed 24-ticker list to ROLES with candidate pools (`sleeve-roles.json`); deterministic
+  `sleeve_selection` scorecards propose member switches (human config-commit disposes).
+  The AMZN/GOOGL exempt-hold doctrine is RETIRED (`EXEMPT_HOLDS=()`) → both are
+  LEGACY_EXITS (target 0, tranche-liquidated, buys rejected; QQQ retains the exposure).
+  International is now rotation/DXY-governed (`intl_governance`), leader-selective, with a
+  gate modifier that HALVES (never zeroes) the leader tilt — this **resolves FOLLOWUPS #36**
+  and deleted the interim suppress-to-zero rule. See `docs/specs/roster_revision_2026-07.md`.
+  Tuning follow-up is #37.
 - **2026-07-05** (PR #14, branch `feat/phase5-override-outcomes`) — **Brief Phase 5:
   override-outcome stamping (reference-path counterfactual) — the responsiveness
   brief is COMPLETE.** Overrides were falsifiable bet slips nobody ever collected

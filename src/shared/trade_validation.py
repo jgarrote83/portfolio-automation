@@ -12,14 +12,17 @@ polices what the model DID.
 Rules, per trade, in order (fields normalized exactly as the executor normalizes them):
 
 V1 — Gate rule (absolute; overrides cannot cross): `deployment_gate` not "open" ⇒
-    REJECT any BUY of an Amplifier name (Damper/SGOV buys pass). Additionally a BUY of
-    any name off the CORE_ROSTER is rejected regardless of gate — `trades[]` is
-    core-only by contract; flex goes through `flex_nominations[]`.
+    REJECT any BUY of an Amplifier name (Damper/SGOV buys pass) — EXCEPT an equal-weight
+    within-role substitution (a buy of the role's new selected member funded by selling
+    the role's old member at >= the buy notional) which is regime-neutral and passes.
+    Additionally a BUY of any name off the CORE_ROSTER is rejected regardless of gate,
+    and a BUY of any LEGACY_EXITS name is rejected regardless of gate ("legacy exit —
+    core re-entry closed (flex only)") — `trades[]` is core-only and legacy names are
+    wind-down-only; flex goes through `flex_nominations[]`.
 
-V2 — Exemption rule (absolute): SELL of an EXEMPT_HOLDS name ⇒ REJECT. Per
-    risk-limits.json exemption semantics ("never trimmed below current weight") and
-    Phase B doctrine (core stop_loss/take_profit are null), there is no legitimate
-    exempt-hold sell in `trades[]`.
+V2 — Exemption rule (absolute): SELL of an EXEMPT_HOLDS name ⇒ REJECT. Retired in the
+    roster revision (EXEMPT_HOLDS is now empty, so this is a no-op) but kept so the
+    machinery survives for any future designated hold.
 
 V3 — Window rule (the core; D1's mirror image): the post-trade weight must land inside
     `[max(reference − W, sleeve_floor), reference + W]` where
@@ -34,6 +37,14 @@ V3 — Window rule (the core; D1's mirror image): the post-trade weight must lan
     explicit `sleeve_floor` lower bound covers the case where `reference − W` would
     dip below the floor (integer shares + a positive floor also leave ≥1 share on any
     clamped core sell).
+
+    SGOV literal-cash carve-out: a SGOV BUY funded purely from PRE-TRADE literal cash
+    is a pure cash-SLEEVE composition swap (cash sleeve = SGOV + literal cash) — it
+    does not change the sleeve total, so it is EXEMPT from the per-name window. The
+    exemption applies only while the buy is funded from pre-trade literal cash above
+    the `literal_cash_target_pct` buffer (same-day sell proceeds are excluded, so it
+    can never grow the sleeve); it is CLAMPED to that budget, not rejected. SGOV SELLs
+    are windowed normally; all V4 mechanical checks still apply.
 
 V4 — Mechanical sanity: sell qty ≤ held (clamped, mirroring the executor's held
     filter); buy notional ≤ cash available after the file's sells (clamped; the list
@@ -59,7 +70,15 @@ from __future__ import annotations
 import logging
 import math
 
-from shared.quadrants import AMPLIFIER_INTL, AMPLIFIER_US, CORE_ROSTER, DAMPER, EXEMPT_HOLDS
+from shared.quadrants import (
+    AMPLIFIER_INTL,
+    AMPLIFIER_US,
+    CORE_ROSTER,
+    DAMPER,
+    EXEMPT_HOLDS,
+    LEGACY_EXITS,
+    role_of,
+)
 from shared.reference_execution import REFERENCE_EXECUTION_DEFAULTS, allowed_residuals
 
 logger = logging.getLogger(__name__)
@@ -109,6 +128,9 @@ def validate_trades(
     equity = float(ctx.get("equity_usd") or 0)
     gate = str(ctx.get("deployment_gate") or "").lower()
     exempt = {str(t).upper() for t in (ctx.get("exempt_holds") or EXEMPT_HOLDS)}
+    # Task 2: the literal-cash buffer (SGOV carve-out) — reference_weights.
+    # literal_cash_target_pct, defaulting to the 1.5% cash buffer if absent.
+    literal_cash_buffer_pct = float(ctx.get("literal_cash_target_pct") or 1.5)
 
     rows = {str(g.get("symbol") or "").upper(): g for g in (gaps or []) if g.get("symbol")}
     residual = allowed_residuals(override_decisions, max_mag)
@@ -124,9 +146,31 @@ def validate_trades(
             held[sym] = 0.0
     cash_avail = max(0.0, float(ctx.get("cash_usd") or 0))
     have_account = equity > 0 and bool(rows)
+    # Task 2: a SEPARATE pre-trade literal-cash tracker for the SGOV carve-out. It
+    # starts at pre-trade literal cash and is decremented ONLY by exempted SGOV buys
+    # — deliberately never fed by same-day sell proceeds, so a literal-cash → SGOV
+    # swap can never become a backdoor to grow the cash sleeve past what pre-trade
+    # cash (above the buffer) supports.
+    pre_cash = cash_avail
+    literal_cash_buffer_usd = literal_cash_buffer_pct / 100.0 * equity
 
     # Sells first (stable) so sell proceeds fund the buys we validate after them.
     ordered = sorted(trades or [], key=lambda t: _norm(t)[1] != "sell")
+
+    # Task D — equal-weight within-role substitution budget: sell notional per role
+    # (from sells of that role's pool members) available to fund a gate-closed buy of
+    # the role's new selected member. A within-role sell-old/buy-new at <= the old
+    # dollar weight is regime-neutral (no net-new Q1/Q2 beta), so it is exempt from the
+    # closed-gate amplifier-buy block. Legacy-exit sells are NOT in any role, so they
+    # never fund a substitution.
+    role_sub_budget: dict[str, float] = {}
+    for t in trades or []:
+        s, sd, q = _norm(t)
+        if sd == "sell" and q and q > 0:
+            r = role_of(s)
+            spx = float((rows.get(s) or {}).get("price") or 0)
+            if r and spx > 0:
+                role_sub_budget[r] = role_sub_budget.get(r, 0.0) + q * spx
 
     passed: list[dict] = []
     rejected: list[dict] = []
@@ -157,6 +201,11 @@ def validate_trades(
 
         # --- V1: gate + roster (absolute) --------------------------------------
         if side == "buy":
+            if sym in LEGACY_EXITS:
+                _reject(t, reasons + [
+                    "legacy exit — core re-entry closed (flex only)"
+                ])
+                continue
             if sym not in CORE_ROSTER:
                 _reject(t, reasons + [
                     f"off-roster buy {sym} forbidden in trades[] (core-only; flex goes "
@@ -164,11 +213,25 @@ def validate_trades(
                 ])
                 continue
             if gate != "open" and sym in _AMPLIFIER:
-                _reject(t, reasons + [
-                    f"deployment gate {gate or 'unknown'} — amplifier buy {sym} forbidden "
-                    "(Tier-1; an override cannot loosen the gate)"
-                ])
-                continue
+                # Equal-weight within-role substitution carve-out (Task D): a buy of the
+                # role's new selected member funded by selling the old member of the SAME
+                # role at >= this buy's notional is regime-neutral, not net-new beta.
+                rrole = role_of(sym)
+                bpx = float((rows.get(sym) or {}).get("price") or 0)
+                bnotional = (qty or 0) * bpx
+                if (rrole and bpx > 0 and bnotional > 0
+                        and role_sub_budget.get(rrole, 0.0) + 1e-6 >= bnotional):
+                    role_sub_budget[rrole] -= bnotional
+                    reasons.append(
+                        f"gate {gate or 'unknown'} — allowed as an equal-weight within-role "
+                        f"substitution (funded by a same-role sell; no net-new beta)"
+                    )
+                else:
+                    _reject(t, reasons + [
+                        f"deployment gate {gate or 'unknown'} — amplifier buy {sym} forbidden "
+                        "(Tier-1; an override cannot loosen the gate)"
+                    ])
+                    continue
 
         # --- V2: exemption (absolute) ------------------------------------------
         if side == "sell" and sym in exempt:
@@ -188,7 +251,12 @@ def validate_trades(
         if have_account and row is not None and px > 0:
             ref = float(row.get("reference_pct") or 0)
             w = max(residual.get(sym, 0.0), band)
-            lo = max(ref - w, floor_pct if sym in CORE_ROSTER else 0.0, 0.0)
+            # Legacy exits bypass the floor lower bound so an exit sell can reach 0
+            # (Task D — "sell-to-zero allowed ONLY for LEGACY_EXITS"). Every other core
+            # name keeps the sleeve floor.
+            floor_lb = 0.0 if sym in LEGACY_EXITS else (
+                floor_pct if sym in CORE_ROSTER else 0.0)
+            lo = max(ref - w, floor_lb, 0.0)
             hi = ref + w
             cur = cur_pct.get(sym, 0.0)
             delta_pp = qty * px / equity * 100.0
@@ -212,20 +280,46 @@ def validate_trades(
                     )
                     qty = float(new_qty)
             else:
-                if cur > hi + _EPS_PP:
-                    _reject(t, reasons + [
-                        f"buy of already-overweight sleeve ({cur:.2f}% > window ceiling "
-                        f"{hi:.2f}% = ref {ref:.2f} + {w:.1f}) — moves further from "
-                        "reference beyond the sheltered window"
-                    ])
-                    continue
-                if post > hi + _EPS_PP:
-                    new_qty = math.floor((hi - cur) / 100.0 * equity / px + 1e-6)
-                    reasons.append(
-                        f"buy clamped {int(qty)}→{new_qty}: landing {post:.2f}% would "
-                        f"exceed the window ceiling {hi:.2f}% (ref {ref:.2f} + {w:.1f})"
-                    )
-                    qty = float(new_qty)
+                # Task 2 carve-out: a literal-cash → SGOV conversion is a pure cash-
+                # SLEEVE composition swap (cash sleeve = SGOV + literal cash), so it
+                # does not change the sleeve TOTAL and must NOT be windowed against
+                # SGOV's per-name reference. Exempt the SGOV buy from the window when
+                # it is funded purely from PRE-TRADE literal cash (never same-day sell
+                # proceeds) and only down to the literal-cash buffer; clamp to that
+                # budget rather than reject. Below-budget (e.g. only sell proceeds
+                # available) → no exemption, falls through to the normal window.
+                # (2026-07-09: SGOV 28.44% vs window ceiling 28.50% rejected a
+                # $4k cash→SGOV swap, leaving ~5% of equity idle in literal cash.)
+                sgov_exempt = False
+                if sym == "SGOV":
+                    budget = max(0.0, pre_cash - literal_cash_buffer_usd)
+                    max_shares = math.floor(budget / px)
+                    if max_shares >= 1:
+                        sgov_exempt = True
+                        if qty > max_shares:
+                            reasons.append(
+                                f"SGOV buy clamped {int(qty)}→{max_shares}: funded only "
+                                f"from pre-trade literal cash above the "
+                                f"{literal_cash_buffer_pct:.1f}% buffer (${budget:,.0f} "
+                                "available; same-day sell proceeds excluded)"
+                            )
+                            qty = float(max_shares)
+                        pre_cash -= qty * px
+                if not sgov_exempt:
+                    if cur > hi + _EPS_PP:
+                        _reject(t, reasons + [
+                            f"buy of already-overweight sleeve ({cur:.2f}% > window ceiling "
+                            f"{hi:.2f}% = ref {ref:.2f} + {w:.1f}) — moves further from "
+                            "reference beyond the sheltered window"
+                        ])
+                        continue
+                    if post > hi + _EPS_PP:
+                        new_qty = math.floor((hi - cur) / 100.0 * equity / px + 1e-6)
+                        reasons.append(
+                            f"buy clamped {int(qty)}→{new_qty}: landing {post:.2f}% would "
+                            f"exceed the window ceiling {hi:.2f}% (ref {ref:.2f} + {w:.1f})"
+                        )
+                        qty = float(new_qty)
 
         # --- V4: mechanical sanity ----------------------------------------------
         if have_account and side == "sell" and row is not None:
