@@ -978,9 +978,29 @@ consumes the block for the intl roles instead of quadrant math. Original PENDING
 - **explicit gate precedence** for international (replacing the interim size-0 rule
   with a governed interaction between the gate, the rotation score, and the sleeve).
 
+### 37. Tune the sleeve-selection hysteresis + intl ladder params (LOW — data-gated)
+The roster revision v2 (`feat/quadrant-roles`, `docs/specs/roster_revision_2026-07.md`)
+ships with **initial** tunables in `sleeve-roles.json`: the selection hysteresis
+(challenger must lead by ≥ 2.0 for ≥ 10 consecutive runs) and the intl sizing ladder
+(`intl_base_pp` 2.0, leader tilts 1pp/3pp, `leader_min_excess_pp` 5.0). **Revisit these
+once Phase C has graded ≥ 10 switch/rotation decisions** (OverrideHistory layers
+`sleeve_switch` / `intl_leader_rotation`, graded vs the incumbent counterfactual at
+30/60/90d) — if switches whipsaw or the leader tilt is mis-sized, adjust the thresholds.
+Do not tune before the sample exists.
+
 ---
 
 ## Done
+- **2026-07-10** (branch `feat/quadrant-roles`) — **Roster revision v2: role-based core,
+  exempt-hold retirement, international governance (Tasks A–H).** The core moved from a
+  fixed 24-ticker list to ROLES with candidate pools (`sleeve-roles.json`); deterministic
+  `sleeve_selection` scorecards propose member switches (human config-commit disposes).
+  The AMZN/GOOGL exempt-hold doctrine is RETIRED (`EXEMPT_HOLDS=()`) → both are
+  LEGACY_EXITS (target 0, tranche-liquidated, buys rejected; QQQ retains the exposure).
+  International is now rotation/DXY-governed (`intl_governance`), leader-selective, with a
+  gate modifier that HALVES (never zeroes) the leader tilt — this **resolves FOLLOWUPS #36**
+  and deleted the interim suppress-to-zero rule. See `docs/specs/roster_revision_2026-07.md`.
+  Tuning follow-up is #37.
 - **2026-07-05** (PR #14, branch `feat/phase5-override-outcomes`) — **Brief Phase 5:
   override-outcome stamping (reference-path counterfactual) — the responsiveness
   brief is COMPLETE.** Overrides were falsifiable bet slips nobody ever collected
