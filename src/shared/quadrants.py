@@ -87,6 +87,21 @@ def intl_roles() -> tuple[str, ...]:
     return tuple(rid for rid, r in _ROLES.items() if r.get("quadrants") == "rotation")
 
 
+def roles_config() -> list[dict]:
+    """All role definitions (raw dicts) from sleeve-roles.json."""
+    return list(_ROLES_CONFIG.get("roles", []))
+
+
+def selection_config() -> dict:
+    """The sleeve_selection scorecard tunables (momentum blend, hysteresis, corr floor)."""
+    return dict(_ROLES_CONFIG.get("selection_config", {}))
+
+
+def intl_config() -> dict:
+    """The international sizing-ladder tunables (intl_governance)."""
+    return dict(_ROLES_CONFIG.get("intl_config", {}))
+
+
 # Retired single names — liquidated in tranches, never re-bought into CORE (Task D).
 # INTC/MCK/PPA/EUAD are re-enterable as FLEX theses (see flex-candidates.json).
 LEGACY_EXITS = ("AMZN", "GOOGL", "INTC", "MCK", "DBA", "TIP", "XSD", "PPA", "EUAD")

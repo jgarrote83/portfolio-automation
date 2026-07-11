@@ -36,6 +36,8 @@ from shared.quadrants import (
     intersection_names,
     is_amplifier,
     primary_quadrant,
+    roles_config,
+    selection_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -1264,6 +1266,25 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Reference weights build failed (non-fatal)")
 
+    # --- Sleeve selection scorecard (Task E) — describe-only role-member ranking. -
+    # Proposes (never disposes) core member switches; a human commits `selected`.
+    sleeve_selection: dict = {"available": False}
+    try:
+        _roles = roles_config()
+        _metrics = _sleeve_selection_metrics(fmp, _roles)
+        _streak = _load_sleeve_streak_state()
+        sleeve_selection, _new_streak = _build_sleeve_selection(
+            _roles, _metrics, _streak, selection_config()
+        )
+        _save_sleeve_streak_state(_new_streak)
+        _sig = [r["role_id"] for r in sleeve_selection.get("roles", []) if r.get("switch_signal")]
+        logger.info(
+            "Sleeve selection: %d roles scored, switch_signals=%s",
+            len(sleeve_selection.get("roles", [])), _sig or "none",
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Sleeve selection build failed (non-fatal)")
+
     # --- Flex engine state (intraday catalyst engine; echoed by the analyzer) -
     # The engine writes flex-state/{date}.json during the trading session. At
     # collector time (09:00 ET) today's run hasn't happened yet, so echo the most
@@ -1389,6 +1410,7 @@ def run() -> None:
         "policy_axis": policy_axis,
         "regime_gate": regime_gate,
         "reference_weights": reference_weights,
+        "sleeve_selection": sleeve_selection,
         "transition_watch": transition_watch,
         "divergences": divergences,
         "flex_state": flex_state,
@@ -2957,6 +2979,204 @@ def _build_transition_watch(
             "axis are UNCHANGED. Reuses the Phase-2 leading_vs_lagging_inflation divergence."
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Sleeve selection scorecard (Task E — role-based core, roster_revision_2026-07)
+#
+# Deterministic, DESCRIBE-ONLY ranking of each quadrant-governed role's candidate pool.
+# A `switch_signal` NEVER auto-trades and NEVER edits `selected` — a human disposes by
+# committing a new `selected` to sleeve-roles.json. Pure functions (no I/O) so the blend,
+# eligibility, and hysteresis are unit-testable; the collector does the FMP + Table I/O.
+# ---------------------------------------------------------------------------
+_SLEEVE_STATE_TABLE = "SleeveSelectionState"
+_SLEEVE_CORR_WINDOW = 120
+_SLEEVE_MIN_CORR_OBS = 20   # need at least this many overlapping daily returns for a corr
+
+
+def _pearson(xs: list[float], ys: list[float]) -> float | None:
+    n = len(xs)
+    if n < 2 or n != len(ys):
+        return None
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    vx = sum((x - mx) ** 2 for x in xs)
+    vy = sum((y - my) ** 2 for y in ys)
+    if vx <= 0 or vy <= 0:
+        return None
+    return cov / (vx ** 0.5 * vy ** 0.5)
+
+
+def _returns_from_closes(close_map: dict[str, float],
+                         windows: tuple[int, ...] = (60, 120, 252)) -> dict:
+    """Point-to-point % returns over N trading days from a {date: close} map. A window
+    with insufficient history yields None (skipped by the scorer)."""
+    dates = sorted(close_map)
+    closes = [close_map[d] for d in dates]
+    out: dict = {}
+    for w in windows:
+        if len(closes) > w and closes[-1 - w]:
+            out[f"r{w}"] = (closes[-1] / closes[-1 - w] - 1.0) * 100.0
+        else:
+            out[f"r{w}"] = None
+    return out
+
+
+def _corr_daily_returns(a_map: dict, b_map: dict, window: int) -> float | None:
+    """Pearson correlation of daily returns over the last `window` overlapping days."""
+    common = sorted(set(a_map) & set(b_map))
+    if len(common) < _SLEEVE_MIN_CORR_OBS + 1:
+        return None
+    common = common[-(window + 1):]
+    ra: list[float] = []
+    rb: list[float] = []
+    for i in range(1, len(common)):
+        pa, ca = a_map[common[i - 1]], a_map[common[i]]
+        pb, cb = b_map[common[i - 1]], b_map[common[i]]
+        if pa and pb:
+            ra.append(ca / pa - 1.0)
+            rb.append(cb / pb - 1.0)
+    return _pearson(ra, rb)
+
+
+def _member_momentum_score(metrics: dict, expense_ratio: float,
+                           weights: dict, er_mult: float) -> float | None:
+    """0.5·r120 + 0.3·r60 + 0.2·r252 (weights renormalized over the windows that have
+    history) minus the static expense-ratio penalty. None if no window has history."""
+    terms = 0.0
+    wsum = 0.0
+    for key, default in (("r120", 0.5), ("r60", 0.3), ("r252", 0.2)):
+        w = float(weights.get(key, default))
+        v = metrics.get(key)
+        if v is not None:
+            terms += w * float(v)
+            wsum += w
+    if wsum <= 0:
+        return None
+    return terms / wsum - er_mult * float(expense_ratio or 0.0)
+
+
+def _build_sleeve_selection(roles: list[dict], metrics_by_ticker: dict,
+                            streak_state: dict, cfg: dict) -> tuple[dict, dict]:
+    """Rank each SCORECARD role's pool. Returns (block, new_streak_state).
+
+    A member is INELIGIBLE this run if its 120d return correlation to the role
+    benchmark_proxy < min_benchmark_corr (no off-role chasing). The `switch_signal`
+    fires only under hysteresis: a challenger must lead the incumbent by >=
+    hysteresis_lead for >= hysteresis_runs consecutive runs (streak persisted, reset on
+    lead loss / challenger change). Never auto-trades; never edits `selected`.
+    """
+    weights = cfg.get("momentum_weights") or {"r120": 0.5, "r60": 0.3, "r252": 0.2}
+    er_mult = float(cfg.get("expense_penalty_mult", 1.0))
+    min_corr = float(cfg.get("min_benchmark_corr", 0.6))
+    lead_thr = float(cfg.get("hysteresis_lead", 2.0))
+    runs_thr = int(cfg.get("hysteresis_runs", 10))
+
+    out_roles: list[dict] = []
+    new_state: dict = {}
+    for r in roles:
+        if r.get("selection") != "scorecard":
+            continue
+        rid = r["role_id"]
+        incumbent = (r.get("selected") or "").upper()
+        pool = [str(m).upper() for m in r.get("pool", [])]
+        ers = {str(k).upper(): v for k, v in (r.get("expense_ratio") or {}).items()}
+        scores: dict = {}
+        ineligible: list[str] = []
+        for m in pool:
+            mt = metrics_by_ticker.get(m) or {}
+            corr = mt.get("corr_bench_120d")
+            if m != incumbent and corr is not None and corr < min_corr:
+                ineligible.append(m)
+                continue
+            s = _member_momentum_score(mt, ers.get(m, 0.0), weights, er_mult)
+            scores[m] = round(s, 2) if s is not None else None
+        inc_score = scores.get(incumbent)
+        cand = [(m, s) for m, s in scores.items() if m != incumbent and s is not None]
+        challenger: str | None = None
+        lead = 0.0
+        if cand:
+            challenger, ch_score = max(cand, key=lambda kv: kv[1])
+            if inc_score is not None:
+                lead = round(ch_score - inc_score, 2)
+        prev = streak_state.get(rid) or {}
+        if challenger and inc_score is not None and lead >= lead_thr:
+            streak = prev.get("streak", 0) + 1 if prev.get("challenger") == challenger else 1
+            new_state[rid] = {"challenger": challenger, "streak": streak}
+        else:
+            streak = 0
+            new_state[rid] = {"challenger": None, "streak": 0}
+        out_roles.append({
+            "role_id": rid,
+            "incumbent": incumbent,
+            "scores": scores,
+            "ineligible": ineligible,
+            "challenger": challenger,
+            "lead": lead,
+            "streak": streak,
+            "switch_signal": streak >= runs_thr,
+        })
+    return (
+        {
+            "available": True,
+            "roles": out_roles,
+            "_note": (
+                "Describe-only. A switch_signal NEVER auto-trades and NEVER edits "
+                "`selected` — a human commits the new selected to sleeve-roles.json."
+            ),
+        },
+        new_state,
+    )
+
+
+def _sleeve_selection_metrics(fmp: FMPClient, roles: list[dict]) -> dict:
+    """Fetch EOD closes for every scorecard-role pool member + benchmark (cached, one
+    FMP call each) and reduce to {ticker: {r60, r120, r252, corr_bench_120d}}."""
+    cache: dict[str, dict[str, float]] = {}
+
+    def _closes(t: str) -> dict[str, float]:
+        if t not in cache:
+            cache[t] = _close_by_date(fmp, t)
+        return cache[t]
+
+    metrics: dict = {}
+    for r in roles:
+        if r.get("selection") != "scorecard":
+            continue
+        bench = (r.get("benchmark_proxy") or "").upper()
+        bench_map = _closes(bench) if bench else {}
+        for m in [str(x).upper() for x in r.get("pool", [])]:
+            cm = _closes(m)
+            met = _returns_from_closes(cm)
+            met["corr_bench_120d"] = (
+                1.0 if m == bench else _corr_daily_returns(cm, bench_map, _SLEEVE_CORR_WINDOW)
+            )
+            metrics[m] = met
+    return metrics
+
+
+def _load_sleeve_streak_state() -> dict:
+    """Per-role hysteresis streak from Table Storage (best-effort → {})."""
+    state: dict = {}
+    for e in query_entities(_SLEEVE_STATE_TABLE):
+        rid = e.get("RowKey")
+        if rid:
+            state[rid] = {
+                "challenger": (e.get("challenger") or None) or None,
+                "streak": int(e.get("streak") or 0),
+            }
+    return state
+
+
+def _save_sleeve_streak_state(new_state: dict) -> None:
+    for rid, s in (new_state or {}).items():
+        upsert_entity(_SLEEVE_STATE_TABLE, {
+            "PartitionKey": "state",
+            "RowKey": rid,
+            "challenger": s.get("challenger") or "",
+            "streak": int(s.get("streak") or 0),
+        })
 
 
 def _build_reference_weights(
