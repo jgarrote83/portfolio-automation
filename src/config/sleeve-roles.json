@@ -1,0 +1,104 @@
+{
+  "_note": "Role/pool config for the role-based core (roster_revision_2026-07.md). Each role is a job the book needs done, backed by a candidate `pool` and one `selected` incumbent. The collector's `sleeve_selection` scorecard scores pool members deterministically and may raise a `switch_signal`, but it NEVER auto-trades and NEVER edits `selected` — a human disposes by committing a new `selected` here. The ONE exception is the `intl_leader` role, whose selected member follows the rotation `leader_pick` automatically (a rotation decision, not a fund-quality decision; logged to OverrideHistory). `block` drives the Amplifier/Damper resolution in quadrants.py (amplifier_us / amplifier_intl / damper / cash). `quadrants` is a list of Q1-Q4 for quadrant-governed roles, or the literal \"rotation\" for the two intl roles (sized by intl_governance, not the US quadrant). `expense_ratio` is the static ER penalty (percent) used by the selection scorecard.",
+
+  "selection_config": {
+    "_note": "Momentum blend + ER penalty for the sleeve_selection scorecard, and the hysteresis gate. A challenger must lead the incumbent by >= hysteresis_lead for >= hysteresis_runs consecutive runs before a switch_signal fires. A member is ineligible when its 120d return correlation to the role benchmark_proxy < min_benchmark_corr.",
+    "momentum_weights": {"r120": 0.5, "r60": 0.3, "r252": 0.2},
+    "expense_penalty_mult": 1.0,
+    "min_benchmark_corr": 0.6,
+    "hysteresis_lead": 2.0,
+    "hysteresis_runs": 10
+  },
+
+  "intl_config": {
+    "_note": "International sizing ladder (intl_governance). sleeve = intl_broad base + a rotation-sized intl_leader slot. See roster_revision_2026-07.md §4.",
+    "intl_base_pp": 2.0,
+    "leader_tilt_mid_pp": 1.0,
+    "leader_tilt_high_pp": 3.0,
+    "leader_min_excess_pp": 5.0,
+    "max_leaders_high": 2
+  },
+
+  "roles": [
+    {"role_id": "us_anchor", "quadrants": ["Q1"], "block": "amplifier_us",
+     "pool": ["SPY"], "selected": "SPY", "benchmark_proxy": "SPY", "selection": "scorecard",
+     "expense_ratio": {"SPY": 0.09}, "notes": "US large-cap beta anchor."},
+
+    {"role_id": "us_growth", "quadrants": ["Q1"], "block": "amplifier_us",
+     "pool": ["QQQ"], "selected": "QQQ", "benchmark_proxy": "QQQ", "selection": "scorecard",
+     "expense_ratio": {"QQQ": 0.20},
+     "notes": "US mega-cap growth. Retains the AMZN/GOOGL exposure at index weight (exempt-hold retirement)."},
+
+    {"role_id": "semis", "quadrants": ["Q1"], "block": "amplifier_us",
+     "pool": ["SMH", "XSD", "SOXX"], "selected": "SMH", "benchmark_proxy": "SMH", "selection": "scorecard",
+     "expense_ratio": {"SMH": 0.35, "XSD": 0.35, "SOXX": 0.35}, "notes": "Semiconductors — highest-beta Q1 growth."},
+
+    {"role_id": "industrials", "quadrants": ["Q2"], "block": "damper",
+     "pool": ["XLI", "PAVE"], "selected": "XLI", "benchmark_proxy": "XLI", "selection": "scorecard",
+     "expense_ratio": {"XLI": 0.09, "PAVE": 0.47}, "notes": "Reflation industrials / infrastructure."},
+
+    {"role_id": "financials", "quadrants": ["Q2"], "block": "damper",
+     "pool": ["XLF"], "selected": "XLF", "benchmark_proxy": "XLF", "selection": "scorecard",
+     "expense_ratio": {"XLF": 0.09}, "notes": "Reflation financials (added — was missing from core)."},
+
+    {"role_id": "cyclical_value", "quadrants": ["Q2", "Q3"], "block": "damper",
+     "pool": ["COWZ", "XLB"], "selected": "COWZ", "benchmark_proxy": "COWZ", "selection": "scorecard",
+     "expense_ratio": {"COWZ": 0.49, "XLB": 0.09}, "notes": "Cash-flow / value cyclical tilt (added)."},
+
+    {"role_id": "energy", "quadrants": ["Q2", "Q3"], "block": "damper",
+     "pool": ["VDE", "XLE"], "selected": "VDE", "benchmark_proxy": "VDE", "selection": "scorecard",
+     "expense_ratio": {"VDE": 0.09, "XLE": 0.09}, "notes": "Energy — reflation + stagflation real asset."},
+
+    {"role_id": "gold", "quadrants": ["Q3", "Q4"], "block": "damper",
+     "pool": ["GLD", "GLDM", "IAU"], "selected": "GLD", "benchmark_proxy": "GLD", "selection": "scorecard",
+     "expense_ratio": {"GLD": 0.40, "GLDM": 0.10, "IAU": 0.25}, "notes": "Gold — stagflation + crisis hedge."},
+
+    {"role_id": "commodities", "quadrants": ["Q2", "Q3"], "block": "damper",
+     "pool": ["PDBC"], "selected": "PDBC", "benchmark_proxy": "PDBC", "selection": "scorecard",
+     "expense_ratio": {"PDBC": 0.59}, "notes": "Broad commodities — reflation + stagflation."},
+
+    {"role_id": "staples", "quadrants": ["Q3", "Q4"], "block": "damper",
+     "pool": ["XLP"], "selected": "XLP", "benchmark_proxy": "XLP", "selection": "scorecard",
+     "expense_ratio": {"XLP": 0.09}, "notes": "Consumer staples — defensive equity."},
+
+    {"role_id": "healthcare_def", "quadrants": ["Q3", "Q4"], "block": "damper",
+     "pool": ["XLV", "IHE"], "selected": "XLV", "benchmark_proxy": "XLV", "selection": "scorecard",
+     "expense_ratio": {"XLV": 0.09, "IHE": 0.40}, "notes": "Defensive healthcare — style diversification vs staples (added)."},
+
+    {"role_id": "tips_short", "quadrants": ["Q2", "Q3"], "block": "damper",
+     "pool": ["VTIP", "STIP"], "selected": "VTIP", "benchmark_proxy": "VTIP", "selection": "scorecard",
+     "expense_ratio": {"VTIP": 0.03, "STIP": 0.03},
+     "notes": "SHORT TIPS — inflation carry without the long real-rate duration of TIP (duration fix)."},
+
+    {"role_id": "trend", "quadrants": ["Q3", "Q4"], "block": "damper",
+     "pool": ["KMLM", "DBMF", "CTA"], "selected": "KMLM", "benchmark_proxy": "KMLM", "selection": "scorecard",
+     "expense_ratio": {"KMLM": 0.90, "DBMF": 0.85, "CTA": 0.76},
+     "notes": "Managed-futures trend — cross-tail convexity (added). CTA inception 2022 — skip 252d window if no history."},
+
+    {"role_id": "duration_long", "quadrants": ["Q4"], "block": "damper",
+     "pool": ["TLT"], "selected": "TLT", "benchmark_proxy": "TLT", "selection": "scorecard",
+     "expense_ratio": {"TLT": 0.15}, "notes": "Long-duration Treasuries (barbell long leg — separate role, NOT pooled with mid)."},
+
+    {"role_id": "duration_mid", "quadrants": ["Q4"], "block": "damper",
+     "pool": ["IEF"], "selected": "IEF", "benchmark_proxy": "IEF", "selection": "scorecard",
+     "expense_ratio": {"IEF": 0.15}, "notes": "Intermediate Treasuries (barbell mid leg — separate role, NOT pooled with long)."},
+
+    {"role_id": "defensive_equity", "quadrants": ["Q4"], "block": "damper",
+     "pool": ["USMV", "SPLV"], "selected": "USMV", "benchmark_proxy": "USMV", "selection": "scorecard",
+     "expense_ratio": {"USMV": 0.15, "SPLV": 0.25}, "notes": "Low-volatility defensive equity (added)."},
+
+    {"role_id": "cash", "quadrants": "cash", "block": "cash",
+     "pool": ["SGOV"], "selected": "SGOV", "benchmark_proxy": "SGOV", "selection": "scorecard",
+     "expense_ratio": {"SGOV": 0.09}, "notes": "Cash sleeve (SGOV) — governed by the cash-sleeve band, not the quadrant."},
+
+    {"role_id": "intl_broad", "quadrants": "rotation", "block": "amplifier_intl",
+     "pool": ["VXUS", "ACWX", "IXUS"], "selected": "VXUS", "benchmark_proxy": "VXUS", "selection": "rotation",
+     "expense_ratio": {"VXUS": 0.07, "ACWX": 0.32, "IXUS": 0.07},
+     "notes": "Broad ex-US base — carries policy weight. Member switches human-gated (scorecard proposes)."},
+
+    {"role_id": "intl_leader", "quadrants": "rotation", "block": "amplifier_intl",
+     "pool": ["AIA", "EWJ", "IEMG", "IDMO", "VSS", "EWZ"], "selected": "AIA", "benchmark_proxy": "SPY", "selection": "rotation",
+     "expense_ratio": {"AIA": 0.59, "EWJ": 0.50, "IEMG": 0.09, "IDMO": 0.25, "VSS": 0.07, "EWZ": 0.59},
+     "notes": "Rotation-sized leader slot — the ONE auto-selected role: selected follows intl_governance.leader_pick (logged to OverrideHistory layer intl_leader_rotation)."}
+  ]
+}

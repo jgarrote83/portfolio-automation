@@ -26,6 +26,7 @@ from shared.quadrants import (
     CORE_ROSTER,
     DAMPER,
     EXEMPT_HOLDS,
+    LEGACY_EXITS,
     QUADRANT_BENCHMARK_ETF,
     QUADRANT_CONCENTRATE,
     active_quadrant,
@@ -35,6 +36,8 @@ from shared.quadrants import (
     intersection_names,
     is_amplifier,
     primary_quadrant,
+    roles_config,
+    selection_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,7 +53,10 @@ _RISK_LIMITS_FILE = _SRC / "config" / "risk-limits.json"
 # Single stocks in the fixed core roster (idiosyncratic risk) — the single-name soft
 # cap applies to these, not to diversified ETF sleeves (which a high-conviction quadrant
 # is meant to concentrate past the cap). Everything else in CORE_ROSTER is an ETF.
-_CORE_SINGLE_STOCKS = ("AMZN", "GOOGL", "INTC", "MCK")
+# No core single stocks remain after the roster revision (all roles are ETFs; the
+# former single names AMZN/GOOGL/INTC/MCK are LEGACY_EXITS). Kept as an empty tuple so
+# the single-name soft-cap loop is a harmless no-op.
+_CORE_SINGLE_STOCKS: tuple[str, ...] = ()
 # Literal-cash buffer kept inside the cash sleeve (rest of the sleeve is SGOV).
 _CASH_BUFFER_PCT = 1.5
 
@@ -803,6 +809,75 @@ def _stamp_override_outcomes(fmp: FMPClient) -> None:
     logger.info("Override stamping: %d row(s) stamped (of %d pending)", stamped, len(pending))
 
 
+def _stamp_switch_outcomes(fmp: FMPClient) -> None:
+    """Grade matured role switches + intl leader rotations vs the INCUMBENT
+    counterfactual (Task G / Phase C): correct if the new member outperformed the one
+    it replaced. Stamps `excess_{30,60,90}d_pp` and, at the 60d headline, `resolved_correct`
+    + `outcome_status`. Prices from perf-series closes first, FMP fallback per symbol.
+    Caller wraps in try/except — never breaks the collector.
+    """
+    today = date.today()
+    rows = query_entities("OverrideHistory")
+    pending = [
+        r for r in rows
+        if r.get("layer") in ("sleeve_switch", "intl_leader_rotation")
+        and not r.get("outcome_status")
+    ]
+    if not pending:
+        return
+
+    perf_points = sorted(
+        ((p.get("date"), p.get("closes") or {}) for p in read_perf_series() if p.get("date")),
+    )
+    fmp_cache: dict[str, dict[str, float]] = {}
+
+    def _px(sym: str, d: str) -> float | None:
+        best = None
+        for pd, closes in perf_points:
+            if pd > d:
+                break
+            c = closes.get(sym)
+            if c is not None:
+                best = float(c)
+        if best is not None:
+            return best
+        if sym not in fmp_cache:
+            fmp_cache[sym] = _close_by_date(fmp, sym)
+        return _close_on_or_before(fmp_cache[sym], d)
+
+    stamped = 0
+    for r in pending:
+        filed = str(r.get("recommended_at") or "")[:10]
+        if not filed or _max_matured_horizon(filed, today) < 30:
+            continue
+        inc, new = r.get("incumbent"), r.get("new_member")
+        base_i, base_n = _px(inc, filed), _px(new, filed)
+        entity = {"PartitionKey": r["PartitionKey"], "RowKey": r["RowKey"], "resolved_at": today.isoformat()}
+        headline = None
+        for h in _OUTCOME_HORIZONS:   # 30 / 60 / 90
+            if date.fromisoformat(filed) + timedelta(days=h) > today:
+                continue
+            tgt = (date.fromisoformat(filed) + timedelta(days=h)).isoformat()
+            ci, cn = _px(inc, tgt), _px(new, tgt)
+            ri = (ci / base_i - 1.0) * 100.0 if (ci and base_i) else None
+            rn = (cn / base_n - 1.0) * 100.0 if (cn and base_n) else None
+            grade = _grade_switch(ri, rn)
+            if grade:
+                entity[f"excess_{h}d_pp"] = grade["excess_pp"]
+                if h == _HEADLINE_HORIZON:
+                    headline = grade
+        if headline is not None:
+            entity["outcome_status"] = "closed"
+            entity["resolved_correct"] = headline["resolved_correct"]
+        if len(entity) > 3:   # something to write beyond the keys
+            try:
+                upsert_entity("OverrideHistory", entity)
+                stamped += 1
+            except Exception:  # noqa: BLE001
+                logger.exception("Switch stamping upsert failed for %s", r.get("RowKey"))
+    logger.info("Switch stamping: %d row(s) stamped (of %d pending)", stamped, len(pending))
+
+
 def _aggregate_override_record(rows: list[dict]) -> dict:
     """Brief Phase 5 §2 — roll stamped OverrideHistory rows into the compact
     `override_record` snapshot block (sibling of track_record: capture-fine /
@@ -1237,6 +1312,33 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Transition watch build failed (non-fatal)")
 
+    # --- International governance (Task F) — rotation/DXY-governed intl sleeve. ---
+    # Built BEFORE reference_weights (which consumes it for the two intl roles). Non-fatal.
+    intl_governance: dict = {"available": False}
+    _intl_prev: dict = {}
+    try:
+        _intl_leader_pool: list = []
+        _intl_broad_sel = ""
+        for _r in roles_config():
+            if _r.get("role_id") == "intl_leader":
+                _intl_leader_pool = _r.get("pool", [])
+            elif _r.get("role_id") == "intl_broad":
+                _intl_broad_sel = _r.get("selected", "")
+        _intl_prev = _load_intl_state()
+        intl_governance, _intl_new = _build_intl_governance(
+            regional_rotation, regime_gate, market_shock,
+            _intl_leader_pool, _intl_broad_sel, _intl_prev, intl_config(),
+        )
+        _save_intl_state(_intl_new)
+        logger.info(
+            "Intl governance: status=%s composite=%s leader_pick=%s sleeve=%.1fpp mods=%s",
+            intl_governance.get("status"), intl_governance.get("rotation_composite"),
+            intl_governance.get("leader_pick"), intl_governance.get("sleeve_target_pp") or 0.0,
+            intl_governance.get("modifiers"),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Intl governance build failed (non-fatal)")
+
     # --- Reference weights (strategy-spec §10: precomputed target weights the ----
     # analyzer executes toward, NOT a mandate). Consumes transition_watch (Phase 3) as a
     # bounded lean. Deterministic + echoed; non-fatal.
@@ -1245,7 +1347,7 @@ def run() -> None:
         reference_weights = _build_reference_weights(
             paper_account, growth_axis, inflation_axis, regime_gate,
             regional_rotation, bond_signals, labor_signals, market_shock,
-            _load_risk_limits(), transition_watch,
+            _load_risk_limits(), transition_watch, intl_governance,
         )
         logger.info(
             "Reference weights: quad=%s conviction=%s(%s) active_target=%s%%core tilt=%s lean=%s binding=%s",
@@ -1259,6 +1361,45 @@ def run() -> None:
         )
     except Exception:  # noqa: BLE001
         logger.exception("Reference weights build failed (non-fatal)")
+
+    # --- Sleeve selection scorecard (Task E) — describe-only role-member ranking. -
+    # Proposes (never disposes) core member switches; a human commits `selected`.
+    sleeve_selection: dict = {"available": False}
+    _prev_streak: dict = {}
+    _new_streak: dict = {}
+    try:
+        _roles = roles_config()
+        _metrics = _sleeve_selection_metrics(fmp, _roles)
+        _prev_streak = _load_sleeve_streak_state()
+        sleeve_selection, _new_streak = _build_sleeve_selection(
+            _roles, _metrics, _prev_streak, selection_config()
+        )
+        _save_sleeve_streak_state(_new_streak)
+        _sig = [r["role_id"] for r in sleeve_selection.get("roles", []) if r.get("switch_signal")]
+        logger.info(
+            "Sleeve selection: %d roles scored, switch_signals=%s",
+            len(sleeve_selection.get("roles", [])), _sig or "none",
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Sleeve selection build failed (non-fatal)")
+
+    # --- Phase C: record APPLIED role switches + intl leader rotations to ----------
+    # OverrideHistory (Task G) — graded later vs the incumbent counterfactual. Non-fatal.
+    try:
+        _sw_records = _build_sleeve_switch_records(
+            _prev_streak, _new_streak,
+            (_intl_prev or {}).get("leader"), (intl_governance or {}).get("leader_pick"),
+            today,
+        )
+        for _rec in _sw_records:
+            upsert_entity("OverrideHistory", _rec)
+        if _sw_records:
+            logger.info(
+                "Recorded %d sleeve switch/rotation record(s): %s",
+                len(_sw_records), [r["RowKey"] for r in _sw_records],
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Sleeve switch recording failed (non-fatal)")
 
     # --- Flex engine state (intraday catalyst engine; echoed by the analyzer) -
     # The engine writes flex-state/{date}.json during the trading session. At
@@ -1385,6 +1526,8 @@ def run() -> None:
         "policy_axis": policy_axis,
         "regime_gate": regime_gate,
         "reference_weights": reference_weights,
+        "intl_governance": intl_governance,
+        "sleeve_selection": sleeve_selection,
         "transition_watch": transition_watch,
         "divergences": divergences,
         "flex_state": flex_state,
@@ -1417,6 +1560,12 @@ def run() -> None:
         _stamp_override_outcomes(fmp)
     except Exception:  # noqa: BLE001
         logger.exception("Override stamping failed (non-fatal)")
+
+    # --- Task G: grade matured role switches + intl leader rotations (non-fatal) -
+    try:
+        _stamp_switch_outcomes(fmp)
+    except Exception:  # noqa: BLE001
+        logger.exception("Switch stamping failed (non-fatal)")
 
     logger.info("=== Collector completed for %s ===", today)
 
@@ -1568,7 +1717,7 @@ def _aggregate_by_quadrant(target_weights_pct: dict, literal_cash_pct: float) ->
     target plus the literal-cash buffer form the `cash_sleeve` bucket. The analyzer
     echoes this verbatim rather than re-deriving quadrant totals freehand. Sums to
     ~100 within rounding (sub-0.05% floors already dropped from target_weights_pct)."""
-    buckets = {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "cash_sleeve": 0.0}
+    buckets = {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "intl": 0.0, "cash_sleeve": 0.0}
     for tkr, w in (target_weights_pct or {}).items():
         q = primary_quadrant(tkr)
         buckets[q] = buckets.get(q, 0.0) + float(w or 0.0)
@@ -2955,6 +3104,410 @@ def _build_transition_watch(
     }
 
 
+# ---------------------------------------------------------------------------
+# Sleeve selection scorecard (Task E — role-based core, roster_revision_2026-07)
+#
+# Deterministic, DESCRIBE-ONLY ranking of each quadrant-governed role's candidate pool.
+# A `switch_signal` NEVER auto-trades and NEVER edits `selected` — a human disposes by
+# committing a new `selected` to sleeve-roles.json. Pure functions (no I/O) so the blend,
+# eligibility, and hysteresis are unit-testable; the collector does the FMP + Table I/O.
+# ---------------------------------------------------------------------------
+_SLEEVE_STATE_TABLE = "SleeveSelectionState"
+_SLEEVE_CORR_WINDOW = 120
+_SLEEVE_MIN_CORR_OBS = 20   # need at least this many overlapping daily returns for a corr
+
+
+def _pearson(xs: list[float], ys: list[float]) -> float | None:
+    n = len(xs)
+    if n < 2 or n != len(ys):
+        return None
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    vx = sum((x - mx) ** 2 for x in xs)
+    vy = sum((y - my) ** 2 for y in ys)
+    if vx <= 0 or vy <= 0:
+        return None
+    return cov / (vx ** 0.5 * vy ** 0.5)
+
+
+def _returns_from_closes(close_map: dict[str, float],
+                         windows: tuple[int, ...] = (60, 120, 252)) -> dict:
+    """Point-to-point % returns over N trading days from a {date: close} map. A window
+    with insufficient history yields None (skipped by the scorer)."""
+    dates = sorted(close_map)
+    closes = [close_map[d] for d in dates]
+    out: dict = {}
+    for w in windows:
+        if len(closes) > w and closes[-1 - w]:
+            out[f"r{w}"] = (closes[-1] / closes[-1 - w] - 1.0) * 100.0
+        else:
+            out[f"r{w}"] = None
+    return out
+
+
+def _corr_daily_returns(a_map: dict, b_map: dict, window: int) -> float | None:
+    """Pearson correlation of daily returns over the last `window` overlapping days."""
+    common = sorted(set(a_map) & set(b_map))
+    if len(common) < _SLEEVE_MIN_CORR_OBS + 1:
+        return None
+    common = common[-(window + 1):]
+    ra: list[float] = []
+    rb: list[float] = []
+    for i in range(1, len(common)):
+        pa, ca = a_map[common[i - 1]], a_map[common[i]]
+        pb, cb = b_map[common[i - 1]], b_map[common[i]]
+        if pa and pb:
+            ra.append(ca / pa - 1.0)
+            rb.append(cb / pb - 1.0)
+    return _pearson(ra, rb)
+
+
+def _member_momentum_score(metrics: dict, expense_ratio: float,
+                           weights: dict, er_mult: float) -> float | None:
+    """0.5·r120 + 0.3·r60 + 0.2·r252 (weights renormalized over the windows that have
+    history) minus the static expense-ratio penalty. None if no window has history."""
+    terms = 0.0
+    wsum = 0.0
+    for key, default in (("r120", 0.5), ("r60", 0.3), ("r252", 0.2)):
+        w = float(weights.get(key, default))
+        v = metrics.get(key)
+        if v is not None:
+            terms += w * float(v)
+            wsum += w
+    if wsum <= 0:
+        return None
+    return terms / wsum - er_mult * float(expense_ratio or 0.0)
+
+
+def _build_sleeve_selection(roles: list[dict], metrics_by_ticker: dict,
+                            streak_state: dict, cfg: dict) -> tuple[dict, dict]:
+    """Rank each SCORECARD role's pool. Returns (block, new_streak_state).
+
+    A member is INELIGIBLE this run if its 120d return correlation to the role
+    benchmark_proxy < min_benchmark_corr (no off-role chasing). The `switch_signal`
+    fires only under hysteresis: a challenger must lead the incumbent by >=
+    hysteresis_lead for >= hysteresis_runs consecutive runs (streak persisted, reset on
+    lead loss / challenger change). Never auto-trades; never edits `selected`.
+    """
+    weights = cfg.get("momentum_weights") or {"r120": 0.5, "r60": 0.3, "r252": 0.2}
+    er_mult = float(cfg.get("expense_penalty_mult", 1.0))
+    min_corr = float(cfg.get("min_benchmark_corr", 0.6))
+    lead_thr = float(cfg.get("hysteresis_lead", 2.0))
+    runs_thr = int(cfg.get("hysteresis_runs", 10))
+
+    out_roles: list[dict] = []
+    new_state: dict = {}
+    for r in roles:
+        if r.get("selection") != "scorecard":
+            continue
+        rid = r["role_id"]
+        incumbent = (r.get("selected") or "").upper()
+        pool = [str(m).upper() for m in r.get("pool", [])]
+        ers = {str(k).upper(): v for k, v in (r.get("expense_ratio") or {}).items()}
+        scores: dict = {}
+        ineligible: list[str] = []
+        for m in pool:
+            mt = metrics_by_ticker.get(m) or {}
+            corr = mt.get("corr_bench_120d")
+            if m != incumbent and corr is not None and corr < min_corr:
+                ineligible.append(m)
+                continue
+            s = _member_momentum_score(mt, ers.get(m, 0.0), weights, er_mult)
+            scores[m] = round(s, 2) if s is not None else None
+        inc_score = scores.get(incumbent)
+        cand = [(m, s) for m, s in scores.items() if m != incumbent and s is not None]
+        challenger: str | None = None
+        lead = 0.0
+        if cand:
+            challenger, ch_score = max(cand, key=lambda kv: kv[1])
+            if inc_score is not None:
+                lead = round(ch_score - inc_score, 2)
+        prev = streak_state.get(rid) or {}
+        if challenger and inc_score is not None and lead >= lead_thr:
+            streak = prev.get("streak", 0) + 1 if prev.get("challenger") == challenger else 1
+            new_state[rid] = {"challenger": challenger, "streak": streak, "selected": incumbent}
+        else:
+            streak = 0
+            new_state[rid] = {"challenger": None, "streak": 0, "selected": incumbent}
+        out_roles.append({
+            "role_id": rid,
+            "incumbent": incumbent,
+            "scores": scores,
+            "ineligible": ineligible,
+            "challenger": challenger,
+            "lead": lead,
+            "streak": streak,
+            "switch_signal": streak >= runs_thr,
+        })
+    return (
+        {
+            "available": True,
+            "roles": out_roles,
+            "_note": (
+                "Describe-only. A switch_signal NEVER auto-trades and NEVER edits "
+                "`selected` — a human commits the new selected to sleeve-roles.json."
+            ),
+        },
+        new_state,
+    )
+
+
+def _sleeve_selection_metrics(fmp: FMPClient, roles: list[dict]) -> dict:
+    """Fetch EOD closes for every scorecard-role pool member + benchmark (cached, one
+    FMP call each) and reduce to {ticker: {r60, r120, r252, corr_bench_120d}}."""
+    cache: dict[str, dict[str, float]] = {}
+
+    def _closes(t: str) -> dict[str, float]:
+        if t not in cache:
+            cache[t] = _close_by_date(fmp, t)
+        return cache[t]
+
+    metrics: dict = {}
+    for r in roles:
+        if r.get("selection") != "scorecard":
+            continue
+        bench = (r.get("benchmark_proxy") or "").upper()
+        bench_map = _closes(bench) if bench else {}
+        for m in [str(x).upper() for x in r.get("pool", [])]:
+            cm = _closes(m)
+            met = _returns_from_closes(cm)
+            met["corr_bench_120d"] = (
+                1.0 if m == bench else _corr_daily_returns(cm, bench_map, _SLEEVE_CORR_WINDOW)
+            )
+            metrics[m] = met
+    return metrics
+
+
+def _load_sleeve_streak_state() -> dict:
+    """Per-role hysteresis streak + last-seen selected from Table Storage (→ {})."""
+    state: dict = {}
+    for e in query_entities(_SLEEVE_STATE_TABLE):
+        rid = e.get("RowKey")
+        if rid and rid != _INTL_STATE_KEY:
+            state[rid] = {
+                "challenger": (e.get("challenger") or None) or None,
+                "streak": int(e.get("streak") or 0),
+                "selected": (e.get("selected") or None) or None,
+            }
+    return state
+
+
+def _save_sleeve_streak_state(new_state: dict) -> None:
+    for rid, s in (new_state or {}).items():
+        upsert_entity(_SLEEVE_STATE_TABLE, {
+            "PartitionKey": "state",
+            "RowKey": rid,
+            "challenger": s.get("challenger") or "",
+            "streak": int(s.get("streak") or 0),
+            "selected": s.get("selected") or "",
+        })
+
+
+# ---------------------------------------------------------------------------
+# International governance (Task F — FOLLOWUPS #36; roster_revision_2026-07 §4)
+#
+# The intl sleeve is governed by the ROTATION score + the DXY switch, NOT the US
+# quadrant. Leader-selective: a small broad base (intl_broad) carries policy weight and
+# a rotation-sized leader slot (intl_leader) concentrates into the actual leader. This
+# REPLACES the 2026-07 INTERIM "closed gate → suppress rotation tilt to zero" rule (a
+# closed gate now HALVES the leader tilt, never zeroes it). Pure + echoed.
+# ---------------------------------------------------------------------------
+_INTL_STATE_TABLE = "SleeveSelectionState"
+_INTL_STATE_KEY = "intl_governance"
+_MA_RANK = {"bullish_intl": 0, "mixed": 1, "bearish_intl": 2}
+
+
+def _rotation_macross_signal(regional_rotation: dict, ticker: str) -> str | None:
+    row = (regional_rotation.get("ratio_ma_cross") or {}).get(f"{ticker.upper()}/SPY")
+    return (row or {}).get("signal") if isinstance(row, dict) else None
+
+
+def _build_intl_governance(regional_rotation: dict, regime_gate: dict, market_shock: dict,
+                           intl_leader_pool: list[str], broad_selected: str,
+                           prev_state: dict, cfg: dict) -> tuple[dict, dict]:
+    """Rotation/DXY-governed international sleeve sizing (roster_revision_2026-07 §4).
+
+    Returns (block, new_state). The leader slot follows `leader_pick` (restricted to the
+    intl_leader pool, excess >= leader_min_excess_pp, MA cross not bearish_intl; tie-broken
+    bullish_intl > mixed). Sizing ladder off the rotation composite, modified by the DXY
+    anti-chase (headwind → 0, neutral → halve) then the gate (closed → halve again, never
+    zero). De-rotation unwinds the leader slot to floor when the pick loses leader status
+    or its MA cross turns bearish, or the composite fades from >=7 to <=5.
+    """
+    base_pp = float(cfg.get("intl_base_pp", 2.0))
+    tilt_mid = float(cfg.get("leader_tilt_mid_pp", 1.0))
+    tilt_high = float(cfg.get("leader_tilt_high_pp", 3.0))
+    min_excess = float(cfg.get("leader_min_excess_pp", 5.0))
+    max_leaders = int(cfg.get("max_leaders_high", 2))
+
+    rr = regional_rotation or {}
+    composite = (rr.get("rotation_score") or {}).get("composite")
+    category = (rr.get("rotation_score") or {}).get("category")
+    dxy = rr.get("dxy_tailwind_for_intl")
+    gate = str((regime_gate or {}).get("status") or "").lower()
+    shock = (market_shock or {}).get("shock_level")
+    pool = {str(t).upper() for t in intl_leader_pool}
+    broad_selected = (broad_selected or "").upper()
+
+    # Eligible leaders: in pool, excess >= min, MA cross not bearish.
+    elig: list[tuple[str, float, str]] = []
+    for row in rr.get("leaders_vs_spy") or []:
+        t = str(row.get("ticker") or "").upper()
+        ex = row.get("excess_pp")
+        sig = _rotation_macross_signal(rr, t) or "mixed"
+        if t in pool and ex is not None and float(ex) >= min_excess and sig != "bearish_intl":
+            elig.append((t, float(ex), sig))
+    elig.sort(key=lambda x: (_MA_RANK.get(x[2], 1), -x[1]))
+    leaders = [t for t, _, _ in elig]
+    leader_pick = leaders[0] if leaders else None
+
+    prev_leader = (prev_state or {}).get("leader") or None
+    prev_comp = (prev_state or {}).get("composite")
+
+    if composite is None:
+        block = {
+            "available": True, "status": "indeterminate", "rotation_composite": None,
+            "category": category, "dxy": dxy, "gate": gate,
+            "leaders_in_pool": [], "leader_pick": None, "leader_picks": [],
+            "broad_target": broad_selected, "broad_pp": round(base_pp, 2),
+            "leader_pp": 0.0, "sleeve_target_pp": round(base_pp, 2),
+            "intl_targets_pct": {broad_selected: round(base_pp, 2)} if broad_selected else {},
+            "modifiers": ["rotation_composite_indeterminate"],
+            "de_rotation": {"triggered": False, "trigger": None, "prior_leader": prev_leader},
+            "shock_level": shock,
+            "_note": "Rotation composite unavailable — hold the broad base only, no leader tilt.",
+        }
+        return block, {"leader": None, "composite": None}
+
+    if composite <= 3:
+        leader_tilt = 0.0
+    elif composite <= 6:
+        leader_tilt = tilt_mid
+    else:
+        leader_tilt = tilt_high
+
+    modifiers: list[str] = []
+    if dxy == "headwind":
+        leader_tilt = 0.0
+        modifiers.append("dxy_headwind_zeroed")
+    elif dxy == "neutral":
+        leader_tilt /= 2.0
+        modifiers.append("dxy_neutral_halved")
+    if gate == "closed":
+        leader_tilt /= 2.0
+        modifiers.append("gate_closed_halved")   # REPLACES the interim suppress-to-zero
+    if shock in (2, 3):
+        modifiers.append(f"shock_level_{shock}_tilt_limits_lifted")
+
+    # De-rotation echo.
+    de_rot = {"triggered": False, "trigger": None, "prior_leader": prev_leader}
+    if prev_leader and prev_leader not in leaders:
+        trig = "ma_bearish" if _rotation_macross_signal(rr, prev_leader) == "bearish_intl" \
+            else "leader_lost_status"
+        de_rot = {"triggered": True, "trigger": trig, "prior_leader": prev_leader}
+        leader_tilt = 0.0
+    elif prev_comp is not None and float(prev_comp) >= 7 and composite <= 5:
+        de_rot = {"triggered": True, "trigger": "composite_fade", "prior_leader": prev_leader}
+
+    if not leader_pick:
+        leader_tilt = 0.0
+
+    leader_pp = round(leader_tilt, 2)
+    broad_pp = round(base_pp, 2)
+    sleeve_target_pp = round(broad_pp + leader_pp, 2)
+
+    # Up to 2 leaders only at high composite with a positive tilt.
+    picks = (leaders[:max_leaders] if (composite >= 7 and leader_pp > 0)
+             else ([leader_pick] if (leader_pick and leader_pp > 0) else []))
+    intl_targets: dict[str, float] = {}
+    if broad_selected:
+        intl_targets[broad_selected] = broad_pp
+    if picks and leader_pp > 0:
+        per = round(leader_pp / len(picks), 3)
+        for p in picks:
+            intl_targets[p] = intl_targets.get(p, 0.0) + per
+
+    block = {
+        "available": True, "status": "active", "rotation_composite": composite,
+        "category": category, "dxy": dxy, "gate": gate,
+        "leaders_in_pool": [{"ticker": t, "excess_pp": ex, "ma_signal": sig} for t, ex, sig in elig],
+        "leader_pick": leader_pick, "leader_picks": picks,
+        "broad_target": broad_selected, "broad_pp": broad_pp, "leader_pp": leader_pp,
+        "sleeve_target_pp": sleeve_target_pp, "intl_targets_pct": intl_targets,
+        "modifiers": modifiers, "de_rotation": de_rot, "shock_level": shock,
+        "_note": (
+            "Rotation/DXY-governed intl sleeve. The leader slot follows leader_pick "
+            "(sell-old/buy-new at the sleeve target); logged to OverrideHistory "
+            "(intl_leader_rotation) for Phase C grading."
+        ),
+    }
+    return block, {"leader": leader_pick, "composite": composite}
+
+
+def _load_intl_state() -> dict:
+    for e in query_entities(_INTL_STATE_TABLE):
+        if e.get("RowKey") == _INTL_STATE_KEY:
+            comp = e.get("composite")
+            return {
+                "leader": (e.get("leader") or None) or None,
+                "composite": float(comp) if comp not in (None, "") else None,
+            }
+    return {}
+
+
+def _save_intl_state(new_state: dict) -> None:
+    comp = (new_state or {}).get("composite")
+    upsert_entity(_INTL_STATE_TABLE, {
+        "PartitionKey": "state",
+        "RowKey": _INTL_STATE_KEY,
+        "leader": (new_state or {}).get("leader") or "",
+        "composite": "" if comp is None else float(comp),
+    })
+
+
+def _build_sleeve_switch_records(prev_streak: dict, new_streak: dict,
+                                 prev_leader: str | None, leader_pick: str | None,
+                                 date: str) -> list[dict]:
+    """OverrideHistory-shaped records for APPLIED role changes (Task G / Phase C).
+
+    A `sleeve_switch` row per role whose `selected` changed since the last run (a human
+    committed a new incumbent), and an `intl_leader_rotation` row when the intl leader
+    pick rotated. Each is later graded vs the INCUMBENT counterfactual (did the new
+    member beat the one it replaced) at 30/60/90d. Write-once; outcome hooks null.
+    """
+    ym = date[:7]
+    tag = date.replace("-", "")
+    records: list[dict] = []
+    for rid, ns in (new_streak or {}).items():
+        prev_sel = (prev_streak.get(rid) or {}).get("selected")
+        cur_sel = ns.get("selected")
+        if prev_sel and cur_sel and prev_sel != cur_sel:
+            records.append({
+                "PartitionKey": ym, "RowKey": f"SW-{tag}-{rid}",
+                "recommended_at": date, "layer": "sleeve_switch", "role_id": rid,
+                "sleeve": rid.upper(), "incumbent": prev_sel, "new_member": cur_sel,
+                "outcome_status": "", "resolved_correct": None,
+            })
+    if leader_pick and prev_leader and prev_leader != leader_pick:
+        records.append({
+            "PartitionKey": ym, "RowKey": f"ILR-{tag}",
+            "recommended_at": date, "layer": "intl_leader_rotation", "role_id": "intl_leader",
+            "sleeve": "INTL_LEADER", "incumbent": prev_leader, "new_member": leader_pick,
+            "outcome_status": "", "resolved_correct": None,
+        })
+    return records
+
+
+def _grade_switch(incumbent_ret_pct: float | None, new_ret_pct: float | None) -> dict | None:
+    """Grade a switch/rotation vs the incumbent counterfactual: correct if the new member
+    outperformed the one it replaced. None when either return is unavailable."""
+    if incumbent_ret_pct is None or new_ret_pct is None:
+        return None
+    excess = float(new_ret_pct) - float(incumbent_ret_pct)
+    return {"resolved_correct": excess > 0, "excess_pp": round(excess, 3)}
+
+
 def _build_reference_weights(
     paper_account: dict,
     growth_axis: dict,
@@ -2966,6 +3519,7 @@ def _build_reference_weights(
     market_shock: dict,
     cfg: dict,
     transition_watch: dict | None = None,
+    intl_governance: dict | None = None,
 ) -> dict:
     """Deterministic per-ticker REFERENCE allocation the analyzer executes toward.
 
@@ -3006,6 +3560,18 @@ def _build_reference_weights(
     cash_band = cfg["cash_sleeve_band_pct"]
     soft_cap = float(cfg["single_name_cap_pct"]["any_name_soft"])
     exempt = set(cfg.get("exempt_holds", EXEMPT_HOLDS))
+
+    # International sleeve (Task F) — sized in %-of-EQUITY by intl_governance (rotation +
+    # DXY), a SEPARATE sleeve carved out of the core room like cash. Its pool members are
+    # excluded from the quadrant core math (they carry no US-quadrant label).
+    ig = intl_governance or {}
+    intl_targets = {str(t).upper(): float(v) for t, v in (ig.get("intl_targets_pct") or {}).items()}
+    intl_total_pct = float(ig.get("sleeve_target_pp") or 0.0) if ig.get("available") else 0.0
+    intl_pool: set[str] = set()
+    for _r in roles_config():
+        if _r.get("quadrants") == "rotation":
+            for _m in _r.get("pool", ()):
+                intl_pool.add(str(_m).upper())
 
     # --- 1. conviction proxy → active-quadrant target (% of core) ---------------
     proxy = _conviction_proxy(
@@ -3061,8 +3627,8 @@ def _build_reference_weights(
             amp = [t for t in concentrate if is_amplifier(t)]
             non_amp = [t for t in concentrate if not is_amplifier(t)]
             if amp and (quad in ("Q1", "Q2")):
-                us = [t for t in amp if t in ("SPY", "QQQ", "XSD", "AMZN", "GOOGL", "INTC")]
-                intl = [t for t in amp if t not in us]
+                intl = [t for t in amp if t in set(AMPLIFIER_INTL)]
+                us = [t for t in amp if t not in set(AMPLIFIER_INTL)]
                 # 65/35 lean toward the favored leg; 50/50 if a leg is empty.
                 us_share, intl_share = (0.35, 0.65) if intl_lean else (0.65, 0.35)
                 if not intl:
@@ -3125,6 +3691,19 @@ def _build_reference_weights(
         if t in core_target:
             core_target[t] = max(floor, w)
 
+    # Legacy exits get a reference target of 0 (liquidate, never re-buy into core). They
+    # stay in CORE_ROSTER so a HELD legacy name still produces a gap row (reference 0)
+    # the validator can size an exit sell against — but they are never floored.
+    for t in LEGACY_EXITS:
+        if t in core_target:
+            core_target[t] = 0.0
+
+    # International pool members carry no US-quadrant label — zero them in the core math;
+    # the intl sleeve is added back below from intl_governance (% of equity).
+    for t in intl_pool:
+        if t in core_target:
+            core_target[t] = 0.0
+
     # Soft single-name cap applies only to SINGLE STOCKS (idiosyncratic risk), NOT to
     # diversified ETF sleeves — a high-conviction quadrant is *meant* to push one ETF
     # past 15% (capping it here would defeat the concentration this feature enables).
@@ -3143,7 +3722,7 @@ def _build_reference_weights(
     # Reference cash sleeve: stay in band; if currently above the ceiling hold at the
     # ceiling (deploy the surplus into core), if below the floor lift to the floor.
     cash_sleeve_target = max(cash_floor, min(cash_ceiling, cur_sleeve))
-    core_room = max(0.0, 100.0 - cash_sleeve_target)
+    core_room = max(0.0, 100.0 - cash_sleeve_target - intl_total_pct)
 
     # AMZN/GOOGL are permanent holds: pin them at their CURRENT weight and carve that out
     # of the core room as a FIXED slice — do NOT let the renormalize scale them up. (Before
@@ -3166,6 +3745,12 @@ def _build_reference_weights(
     sgov_w = max(0.0, cash_sleeve_target - _CASH_BUFFER_PCT)
     weights["SGOV"] = round(sgov_w, 3)
     weights["__cash__"] = round(cash_sleeve_target - sgov_w, 3)
+
+    # International sleeve (Task F): add the rotation/DXY-governed intl targets (% of
+    # equity) that intl_governance sized. These REPLACE any quadrant math for intl names.
+    for t, v in intl_targets.items():
+        if v > 0:
+            weights[t] = round(float(v), 3)
 
     # Deterministic per-quadrant aggregation (Task 5) — the analyzer echoes this
     # verbatim in the Quadrant Allocation table's Reference column instead of summing

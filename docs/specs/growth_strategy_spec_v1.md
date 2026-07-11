@@ -1,5 +1,13 @@
 # Growth Portfolio — Strategy Specification (v1)
 
+> **⚠️ SUPERSEDED IN PART (2026-07) by [`roster_revision_2026-07.md`](roster_revision_2026-07.md).**
+> The fixed 24-ticker core roster (§2–§3) and the AMZN/GOOGL exempt-hold doctrine (§8)
+> are superseded: the core is now ROLE-BASED (candidate pools + a human-gated `selected`
+> incumbent), AMZN/GOOGL are retired to legacy exits (QQQ retains the exposure), and the
+> international sleeve is rotation/DXY-governed, not quadrant-governed. The rest of this
+> spec (the regime machine, the deployment gate, conviction-scaled concentration, the
+> reference/override protocol) stands. This document keeps its original text for history.
+
 *North-star for this project. This document is the source of truth for the strategy;
 the GitHub automation (collector precomputes + system prompt + gate) is downstream of it
 and should be refined to implement it. Written from the conclusions reached over the

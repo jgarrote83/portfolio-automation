@@ -17,24 +17,29 @@ from shared.quadrants import CORE_ROSTER, primary_quadrant  # noqa: E402
 
 
 def test_every_core_ticker_lands_in_exactly_one_bucket():
-    valid = {"Q1", "Q2", "Q3", "Q4", "cash_sleeve"}
+    valid = {"Q1", "Q2", "Q3", "Q4", "intl", "cash_sleeve", "unclassified"}
     for t in CORE_ROSTER:
         assert primary_quadrant(t) in valid, t
-    # SGOV is the cash sleeve, not a quadrant; unknown names never silently drop.
+    # SGOV is the cash sleeve; intl roles map to the intl bucket; unknowns never drop.
     assert primary_quadrant("SGOV") == "cash_sleeve"
+    assert primary_quadrant("VXUS") == "intl"
+    assert primary_quadrant("AIA") == "intl"
     assert primary_quadrant("MU") == "unclassified"
+    # Legacy-exit single names carry no quadrant label (being liquidated).
+    assert primary_quadrant("AMZN") == "unclassified"
 
 
 def test_documented_primaries_hold():
-    # Matches the prompt's "Notes on the multi-quadrant tickers" primaries.
+    # Selected members resolve to their role's quadrant (roster_revision_2026-07).
     assert primary_quadrant("SPY") == "Q1"
-    assert primary_quadrant("AMZN") == "Q1"
-    assert primary_quadrant("GOOGL") == "Q1"
-    assert primary_quadrant("EWZ") == "Q2"
-    assert primary_quadrant("TIP") == "Q2"
+    assert primary_quadrant("QQQ") == "Q1"
+    assert primary_quadrant("SMH") == "Q1"
+    assert primary_quadrant("XLI") == "Q2"
+    assert primary_quadrant("VDE") == "Q2"    # Q2+Q3 role, first-match Q2
     assert primary_quadrant("GLD") == "Q3"
-    assert primary_quadrant("MCK") == "Q3"
+    assert primary_quadrant("XLP") == "Q3"    # Q3+Q4 role, first-match Q3
     assert primary_quadrant("TLT") == "Q4"
+    assert primary_quadrant("IEF") == "Q4"
 
 
 def test_aggregation_sums_to_100_within_rounding():

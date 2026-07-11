@@ -26,7 +26,7 @@ CFG = {
     },
     "sleeve_floor_pct_of_core": 0.1,
     "active_quadrant_ceiling_pct_of_core": 90.0,
-    "exempt_holds": ["AMZN", "GOOGL"],
+    "exempt_holds": [],
 }
 
 
@@ -36,7 +36,7 @@ def _ctx(**kw):
         "equity_usd": 100_000.0,
         "cash_usd": 20_000.0,
         "date": "2026-07-06",
-        "exempt_holds": ["AMZN", "GOOGL"],
+        "exempt_holds": [],
     }
     base.update(kw)
     return base
@@ -101,8 +101,11 @@ def test_off_roster_buy_rejected_even_gate_open():
 # --- V2: exemption ----------------------------------------------------------------
 
 def test_exempt_amzn_sell_rejected():
+    """V2 machinery is retained (exempt-hold doctrine is retired, so exempt_holds is
+    empty in production) — it still rejects a sell when a hold IS explicitly designated."""
     gaps = [_gap("AMZN", 5.0, 3.0)]
-    res = validate_trades(gaps, [_t("AMZN", "sell", 5)], [], CFG, _ctx())
+    res = validate_trades(gaps, [_t("AMZN", "sell", 5)], [], CFG,
+                          _ctx(exempt_holds=["AMZN"]))
     assert len(res["rejected"]) == 1
     assert any("exempt" in s for s in res["rejected"][0]["validation"]["reasons"])
 
@@ -247,12 +250,13 @@ def test_band_enforcement_trades_pass_untouched():
 
 
 def test_malicious_file_yields_zero_submittable_violations():
-    """The #28 acceptance replay: gate-closed QQQ buy, exempt AMZN sell, off-roster
-    MEME buy all stripped; the SPY floor-breach sell clamped — nothing violating
-    survives to the executor."""
+    """The #28 acceptance replay (post roster-revision): gate-closed QQQ buy and
+    off-roster MEME buy are stripped; the SPY floor-breach sell is clamped; and the
+    AMZN sell is now a LEGITIMATE legacy-exit sell (exempt-hold doctrine retired), so it
+    survives — nothing violating reaches the executor."""
     gaps = [
         _gap("QQQ", 1.0, 10.0),
-        _gap("AMZN", 5.0, 5.0, held=50),
+        _gap("AMZN", 5.0, 0.0, held=50),   # legacy exit → target 0, sellable to zero
         _gap("SPY", 20.0, 2.0, held=200),
     ]
     trades = [
@@ -262,10 +266,11 @@ def test_malicious_file_yields_zero_submittable_violations():
         _t("SPY", "sell", 200),   # sell-to-zero through the floor
     ]
     res = validate_trades(gaps, trades, [], CFG, _ctx(deployment_gate="closed"))
-    assert {r["symbol"] for r in res["rejected"]} == {"QQQ", "AMZN", "MEME"}
-    assert len(res["trades"]) == 1
-    spy = res["trades"][0]
-    assert spy["symbol"] == "SPY" and spy["quantity"] == 199   # floor-protected
+    assert {r["symbol"] for r in res["rejected"]} == {"QQQ", "MEME"}
+    amzn = next(t for t in res["trades"] if t["symbol"] == "AMZN")
+    assert amzn["validation"]["status"] == "passed" and amzn["quantity"] == 50
+    spy = next(t for t in res["trades"] if t["symbol"] == "SPY")
+    assert spy["quantity"] == 199   # floor-protected
     assert all(isinstance(t.get("validation"), dict) for t in res["trades"])
 
 
@@ -370,3 +375,55 @@ def test_sgov_sell_still_windowed_normally():
     assert t["validation"]["status"] == "clamped"
     assert t["quantity"] == 99   # (28.44−18.5)pp of $100K at $100
     assert res["rejected"] == []
+
+
+# --- Task D: legacy-exit migration ------------------------------------------------
+
+def test_legacy_sell_to_zero_passes_floor_bypassed():
+    """A legacy exit (AMZN) sells all the way to zero — the sleeve floor is bypassed."""
+    gaps = [_gap("AMZN", 8.6, 0.0, price=100.0)]   # held auto = 86 shares
+    res = validate_trades(gaps, [_t("AMZN", "sell", 86)], [], CFG, _ctx())
+    assert res["rejected"] == []
+    t = res["trades"][0]
+    assert t["validation"]["status"] == "passed"
+    assert t["quantity"] == 86
+
+
+def test_non_legacy_sell_still_floor_clamped():
+    """A normal (non-legacy) core name still clamps at the floor — contrast to legacy."""
+    gaps = [_gap("GLD", 5.0, 0.1, price=100.0)]   # held auto = 50 shares
+    res = validate_trades(gaps, [_t("GLD", "sell", 50)], [], CFG, _ctx())
+    t = res["trades"][0]
+    assert t["validation"]["status"] == "clamped"
+    assert t["quantity"] == 49   # leaves the ~0.1% floor
+    assert res["rejected"] == []
+
+
+def test_legacy_buy_rejected():
+    """ANY buy of a legacy-exit name is rejected — core re-entry is closed."""
+    res = validate_trades([], [_t("AMZN", "buy", 10)], [], CFG, _ctx(deployment_gate="open"))
+    assert len(res["rejected"]) == 1
+    assert any("legacy exit" in s for s in res["rejected"][0]["validation"]["reasons"])
+
+
+def test_equal_weight_substitution_allowed_under_closed_gate():
+    """Buying the selected semis (SMH) funded by selling a same-role member (SOXX) is a
+    regime-neutral substitution — allowed even while the gate is CLOSED."""
+    gaps = [_gap("SMH", 1.0, 10.0, price=100.0),
+            _gap("SOXX", 5.0, 0.0, price=100.0, held=50)]
+    res = validate_trades(
+        gaps, [_t("SOXX", "sell", 40), _t("SMH", "buy", 30)], [], CFG,
+        _ctx(deployment_gate="closed"),
+    )
+    assert "SMH" not in [r["symbol"] for r in res["rejected"]]
+    smh = next(t for t in res["trades"] if t["symbol"] == "SMH")
+    assert any("substitution" in r for r in smh["validation"]["reasons"])
+
+
+def test_amplifier_buy_without_same_role_sell_still_gated():
+    """Control: the same SMH buy with no same-role sell is a normal gated amplifier buy."""
+    gaps = [_gap("SMH", 1.0, 10.0, price=100.0)]
+    res = validate_trades(gaps, [_t("SMH", "buy", 30)], [], CFG,
+                          _ctx(deployment_gate="closed"))
+    assert "SMH" in [r["symbol"] for r in res["rejected"]]
+    assert any("gate" in s for s in res["rejected"][0]["validation"]["reasons"])

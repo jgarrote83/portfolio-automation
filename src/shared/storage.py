@@ -15,6 +15,7 @@ _TABLES = [
     "SentimentHistory",
     "TradeHistory",
     "OverrideHistory",
+    "SleeveSelectionState",
 ]
 
 

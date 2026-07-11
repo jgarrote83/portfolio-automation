@@ -958,14 +958,18 @@ can confirm an oil spike with a print dated on/after the event; unit test on a f
 where FMP is present vs absent. Independent track; FMP-tier verification is the gating
 unknown (park with a note if commodity quotes aren't on the current tier).
 
-### 36. International governance redesign (dollar/rotation-governed intl sleeve, flex migration, gate precedence) — ⏸ PENDING HUMAN DECISION
-**Do not implement without an explicit human design decision.** The 2026-07-09 audit
-exposed that the international sleeve has no first-class governance: rotation signals,
-the DXY dollar switch, the deployment gate, and the flex sleeve interact ad-hoc, and
-the analyzer improvised a gate-vs-rotation precedence on the fly. The interim patch
-(Task 8 #5) codifies only the stop-gap — **a CLOSED `regime_gate` suppresses rotation
-tilts into international to size 0** — so the book cannot add intl beta through a gate.
-The real redesign is a separate, human-reviewed change spanning:
+### 36. International governance redesign (dollar/rotation-governed intl sleeve, flex migration, gate precedence) — ✅ RESOLVED 2026-07-10 (`feat/quadrant-roles`)
+**Resolved by the roster revision v2** — see `docs/specs/roster_revision_2026-07.md`.
+The international sleeve is now governed by `intl_governance` (collector, deterministic):
+a leader-selective sizing ladder driven by the rotation composite + the DXY dollar
+switch, with a gate modifier that **halves** (never zeroes) the leader tilt — this
+REPLACES the Task-8 INTERIM suppress-to-zero rule (now deleted). The design is
+leader-selective (small `intl_broad` base + a rotation-sized `intl_leader` slot) on the
+2026-07-09 evidence that intl outperformance is narrow (AIA +11pp vs SPY while the bloc
+average is −7.5pp). Flex migration: intl single-name exposure stays in flex; the two
+intl ETF roles (`intl_broad`/`intl_leader`) are the core sleeve. `reference_weights`
+consumes the block for the intl roles instead of quadrant math. Original PENDING scope
+(kept for history):
 - a **dollar/rotation-governed intl sleeve** — a deterministic target for the
   international allocation driven by the DXY switch + rotation score, folded into
   `reference_weights` (not an LLM freehand tilt);
@@ -973,13 +977,30 @@ The real redesign is a separate, human-reviewed change spanning:
   (which names live in core vs flex);
 - **explicit gate precedence** for international (replacing the interim size-0 rule
   with a governed interaction between the gate, the rotation score, and the sleeve).
-This touches strategy semantics (the reference math + the gate), so it must be
-specced and decided by the account holder first — the audit branch deliberately does
-NOT implement it.
+
+### 37. Tune the sleeve-selection hysteresis + intl ladder params (LOW — data-gated)
+The roster revision v2 (`feat/quadrant-roles`, `docs/specs/roster_revision_2026-07.md`)
+ships with **initial** tunables in `sleeve-roles.json`: the selection hysteresis
+(challenger must lead by ≥ 2.0 for ≥ 10 consecutive runs) and the intl sizing ladder
+(`intl_base_pp` 2.0, leader tilts 1pp/3pp, `leader_min_excess_pp` 5.0). **Revisit these
+once Phase C has graded ≥ 10 switch/rotation decisions** (OverrideHistory layers
+`sleeve_switch` / `intl_leader_rotation`, graded vs the incumbent counterfactual at
+30/60/90d) — if switches whipsaw or the leader tilt is mis-sized, adjust the thresholds.
+Do not tune before the sample exists.
 
 ---
 
 ## Done
+- **2026-07-10** (branch `feat/quadrant-roles`) — **Roster revision v2: role-based core,
+  exempt-hold retirement, international governance (Tasks A–H).** The core moved from a
+  fixed 24-ticker list to ROLES with candidate pools (`sleeve-roles.json`); deterministic
+  `sleeve_selection` scorecards propose member switches (human config-commit disposes).
+  The AMZN/GOOGL exempt-hold doctrine is RETIRED (`EXEMPT_HOLDS=()`) → both are
+  LEGACY_EXITS (target 0, tranche-liquidated, buys rejected; QQQ retains the exposure).
+  International is now rotation/DXY-governed (`intl_governance`), leader-selective, with a
+  gate modifier that HALVES (never zeroes) the leader tilt — this **resolves FOLLOWUPS #36**
+  and deleted the interim suppress-to-zero rule. See `docs/specs/roster_revision_2026-07.md`.
+  Tuning follow-up is #37.
 - **2026-07-05** (PR #14, branch `feat/phase5-override-outcomes`) — **Brief Phase 5:
   override-outcome stamping (reference-path counterfactual) — the responsiveness
   brief is COMPLETE.** Overrides were falsifiable bet slips nobody ever collected
