@@ -250,6 +250,7 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
         vctx = dict(ctx) if ctx else {
             "deployment_gate": (snapshot.get("regime_gate") or {}).get("status"),
             "exempt_holds": rex_cfg["exempt_holds"],
+            "intl_leader_pick": (snapshot.get("intl_governance") or {}).get("leader_pick"),
         }
         tv = validate_trades(
             gaps, trades_obj.get("trades", []), result.get("decisions", []),
@@ -433,6 +434,10 @@ def _build_reference_gaps(snapshot: dict) -> tuple[list[dict], dict]:
         "cash_usd": float(pa.get("cash") or 0),
         # Task 2: the literal-cash buffer for the Tier-1 SGOV cash-swap carve-out.
         "literal_cash_target_pct": float(ref.get("literal_cash_target_pct") or 1.5),
+        # V1.5: the intl_leader role's auto-rotation exception — a buy of the CURRENT
+        # leader_pick passes even before sleeve-roles.json's `selected` is committed to
+        # match (Task F, intl_governance).
+        "intl_leader_pick": (snapshot.get("intl_governance") or {}).get("leader_pick"),
     }
     return gaps, ctx
 

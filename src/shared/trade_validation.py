@@ -20,11 +20,29 @@ V1 — Gate rule (absolute; overrides cannot cross): `deployment_gate` not "open
     core re-entry closed (flex only)") — `trades[]` is core-only and legacy names are
     wind-down-only; flex goes through `flex_nominations[]`.
 
+V1.5 — Selected-member-only buys (role-based roster seam): a BUY of a name that
+    belongs to a role's `pool` but is not that role's `selected` incumbent ⇒ REJECT
+    ("non-selected pool member — selection changes go through sleeve-roles.json").
+    Every other pool member reads as a normal CORE_ROSTER name to V1/V3, so without
+    this check a BUY of e.g. SOXX (pool member, semis.selected = SMH) would pass
+    straight through — a gap row at/near 0 lands inside the ± band window, and with
+    NO gap row V3 used to skip the window entirely. The one exception is the
+    `intl_leader` role, whose `selected` follows `intl_governance.leader_pick`
+    automatically (Task F) — a buy of the CURRENT `leader_pick` (passed in via
+    `quadrant_ctx["intl_leader_pick"]`) passes even before `sleeve-roles.json` is
+    committed to match. A name off every role's pool (e.g. a LEGACY_EXITS name,
+    already rejected above) is unaffected.
+
 V2 — Exemption rule (absolute): SELL of an EXEMPT_HOLDS name ⇒ REJECT. Retired in the
     roster revision (EXEMPT_HOLDS is now empty, so this is a no-op) but kept so the
     machinery survives for any future designated hold.
 
-V3 — Window rule (the core; D1's mirror image): the post-trade weight must land inside
+V3 — Window rule (the core; D1's mirror image): a BUY with no matching gap row is
+    REJECTED ("no reference row — cannot window the buy") rather than silently
+    skipping the window below — a name the reference doesn't cover must not be
+    buyable just because there is nothing to check it against (a SELL of a held name
+    without a row keeps its prior behavior: V3/V4 skip, the trade still passes).
+    Otherwise the post-trade weight must land inside
     `[max(reference − W, sleeve_floor), reference + W]` where
     `W = max(allowed_residual_for_sleeve, gap_band_pp)` and the residual comes from the
     SAME `validate_overrides()["decisions"]` that `reconcile` consumes (shared
@@ -78,6 +96,7 @@ from shared.quadrants import (
     EXEMPT_HOLDS,
     LEGACY_EXITS,
     role_of,
+    selected_for_role,
 )
 from shared.reference_execution import REFERENCE_EXECUTION_DEFAULTS, allowed_residuals
 
@@ -110,11 +129,14 @@ def validate_trades(
     """Validate the final trades list against the Tier-1 bounds (V1–V4 above).
 
     Args mirror ``reconcile``; ``gaps`` rows additionally carry ``held_qty``.
+    ``quadrant_ctx`` may carry ``intl_leader_pick`` (the current
+    ``intl_governance.leader_pick``) for the V1.5 intl_leader auto-rotation exception.
     Returns ``{"trades": [stamped, possibly clamped, sells-first], "rejected":
     [records with reasons], "summary": {"passed", "clamped", "rejected"}}``.
     With no ``gaps``/equity (reference or account unavailable) the weight-based rules
-    are skipped but the absolute rules (V1 gate/roster, V2 exemption, integer shares)
-    still apply — trades are always stamped.
+    (V3/V4, including the no-gap-row buy rejection) are skipped but the absolute rules
+    (V1 gate/roster, V1.5 selected-member, V2 exemption, integer shares) still apply —
+    trades are always stamped.
     """
     ov_cfg = (cfg or {}).get("override_protocol") or {}
     rex_cfg = {**REFERENCE_EXECUTION_DEFAULTS, **((cfg or {}).get("reference_execution") or {})}
@@ -128,6 +150,7 @@ def validate_trades(
     equity = float(ctx.get("equity_usd") or 0)
     gate = str(ctx.get("deployment_gate") or "").lower()
     exempt = {str(t).upper() for t in (ctx.get("exempt_holds") or EXEMPT_HOLDS)}
+    intl_leader_pick = str(ctx.get("intl_leader_pick") or "").upper() or None
     # Task 2: the literal-cash buffer (SGOV carve-out) — reference_weights.
     # literal_cash_target_pct, defaulting to the 1.5% cash buffer if absent.
     literal_cash_buffer_pct = float(ctx.get("literal_cash_target_pct") or 1.5)
@@ -233,6 +256,19 @@ def validate_trades(
                     ])
                     continue
 
+        # --- V1.5: selected-member-only buys (role-based roster seam) ----------
+        if side == "buy":
+            brole = role_of(sym)
+            if brole is not None:
+                sel = selected_for_role(brole)
+                if sym != sel and not (brole == "intl_leader"
+                                        and intl_leader_pick and sym == intl_leader_pick):
+                    _reject(t, reasons + [
+                        f"non-selected pool member of role {brole!r} (selected={sel!r}) — "
+                        "selection changes go through sleeve-roles.json"
+                    ])
+                    continue
+
         # --- V2: exemption (absolute) ------------------------------------------
         if side == "sell" and sym in exempt:
             _reject(t, reasons + [
@@ -242,6 +278,11 @@ def validate_trades(
             continue
 
         row = rows.get(sym)
+        if side == "buy" and have_account and row is None:
+            _reject(t, reasons + [
+                "no reference row — cannot window the buy"
+            ])
+            continue
         try:
             px = float((row or {}).get("price") or 0)
         except (TypeError, ValueError):
