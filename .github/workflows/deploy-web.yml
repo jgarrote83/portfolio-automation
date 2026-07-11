@@ -6,6 +6,7 @@ on:
     paths:
       - 'web/**'
       - '.github/workflows/deploy-web.yml'
+      - '!web/**/__pycache__/**'
   workflow_dispatch:
 
 permissions:

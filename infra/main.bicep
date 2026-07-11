@@ -91,10 +91,21 @@ module eventgrid 'modules/eventgrid.bicep' = {
 }
 
 
+// ── Key Vault reference for deploy-time secret resolution (SWA hardening) ────
+// `getSecret()` can only be used in a module's `params` block, against an
+// `existing` Microsoft.KeyVault/vaults resource — see modules/keyvault.bicep's
+// `enabledForTemplateDeployment` note (FOLLOWUPS #2).
+resource keyVaultRef 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
+  name: keyVaultName
+}
+
 // ── Static Web App (single pane of glass: report + trade approval) ────────
-// Free tier: no managed identity (SWA Free rejects MI assignment). Secrets
-// (STORAGE_CONNECTION_STRING, FUNC_MASTER_KEY, AAD_CLIENT_ID/SECRET) are
-// set as plain app settings via az CLI post-deploy.
+// Free tier: no managed identity — Azure Static Web Apps managed functions
+// support neither Key Vault app-setting references nor managed identity on
+// ANY plan (verified 2026-07-11; see modules/staticwebapp.bicep). Secrets are
+// resolved from Key Vault at DEPLOY TIME instead (getSecret() below), so
+// `az deployment group create` sets them fresh every time rather than wiping
+// them — the fix for FOLLOWUPS #2.
 module swa 'modules/staticwebapp.bicep' = {
   name: 'swa'
   params: {
@@ -102,7 +113,10 @@ module swa 'modules/staticwebapp.bicep' = {
     staticWebAppName: staticWebAppName
     appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
     storageAccountName: storageAccountName
+    storageConnectionStringSecret: keyVaultRef.getSecret('swa-storage-connection-string')
+    funcMasterKeySecret: keyVaultRef.getSecret('swa-func-master-key')
   }
+  dependsOn: [keyvault]
 }
 
 // ── Outputs ───────────────────────────────────────────────────────────────────

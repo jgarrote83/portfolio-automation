@@ -299,38 +299,83 @@ closed when the fix landed. On the next weekday, confirm without intervening:
 Telemetry now flows to App Insights (`appi-pfauto-prod`, `cloud_RoleName ==
 'func-pfauto'`) — watch `traces`/`exceptions` there if anything is missing.
 
-### 2. SWA secret app settings are wiped by every infra deploy (HIGH)
-`web/api` reads blob storage via `STORAGE_CONNECTION_STRING` and calls the
-func-pfauto executor via `FUNC_MASTER_KEY`. These (plus `AAD_CLIENT_ID` /
-`AAD_CLIENT_SECRET`) are **post-deploy-only** secrets — see the note in
-`infra/modules/staticwebapp.bicep`. Because `az deployment group create` replaces
-the SWA's app-setting set wholesale, any `infra/**` deploy wipes them and the
-`/today` page breaks (`/api/dates → 500`, table stuck on "Loading…").
-- Observed + restored live on 2026-06-09, again 2026-06-15, and a **3rd time
-  2026-06-29** (the 2026-06-28 infra deploy was the trigger). Still not permanently
-  fixed — escalating recurrence; do Open #4 next.
-- **Fix:** move these to **Key Vault references** in `staticwebapp.bicep` (mirror
-  how `functionapp.bicep` handles secrets), so deploys set rather than wipe them.
-  Requires the secret values to live in `kv-pfauto-prod` first.
-- **Until then:** after any infra deploy, re-apply:
-  `az staticwebapp appsettings set --name swa-pfauto -g rg-portfolio-automation-prod --setting-names STORAGE_CONNECTION_STRING=<conn> FUNC_MASTER_KEY=<masterkey>`
+### 2. SWA secret app settings are wiped by every infra deploy ✅ KILLED 2026-07-11 (`fix/swa-hardening`)
+Recurred **4 times** (2026-06-09, 06-15, 06-29, 07-10) before this fix. Root
+cause was as documented: `az deployment group create` replaces the SWA's
+app-setting set wholesale, and the secrets (`STORAGE_CONNECTION_STRING`,
+`FUNC_MASTER_KEY`) were only ever applied post-deploy via `az staticwebapp
+appsettings set`.
+- **The originally-proposed fix ("Key Vault references, mirror
+  functionapp.bicep") turned out not to be buildable** — verified against
+  Microsoft Learn (2026-07-11): Azure Static Web Apps *managed functions*
+  (what `web/api` is) support **neither Key Vault app-setting references nor
+  managed identity, on any plan** (Standard included) — both are explicitly
+  listed as unavailable; only Bring-Your-Own-Functions gets them. Separately,
+  `functionapp.bicep` doesn't even use that pattern itself — it reads secrets
+  via the SDK + managed identity at runtime (`KEY_VAULT_URI` +
+  `shared/keyvault.py`), a different mechanism than a native `@Microsoft.KeyVault(...)`
+  app-setting reference.
+- **Actual fix:** bicep's `getSecret()` function, which resolves a Key Vault
+  secret at DEPLOY TIME (via the deploying principal, not the app's runtime
+  identity) and bakes it into a plain app-setting value. `keyvault.bicep` sets
+  `enabledForTemplateDeployment: true`; `main.bicep` calls
+  `keyVaultRef.getSecret('swa-storage-connection-string' | 'swa-func-master-key')`
+  and passes the results as `@secure()` params into `staticwebapp.bicep`'s
+  `swaSettings` resource. Every infra deploy now SETS the current secret value
+  instead of wiping it. Secrets seeded via `scripts/seed-swa-secrets.sh`.
+- **Verified live:** ran a real `az deployment group create` against
+  `rg-portfolio-automation-prod` (after a clean `az bicep build` + a what-if
+  showing only pre-existing unrelated drift); `az staticwebapp appsettings
+  list` showed both secrets correctly set from Key Vault, and
+  `curl https://kind-sea-07d4d1b0f.7.azurestaticapps.net/api/dates` → 200.
+- No more manual post-deploy `az staticwebapp appsettings set` runbook step —
+  rotate a secret in Key Vault and redeploy infra to pick up the new value.
 
-### 3. Entra ID auth is currently OFF on the SWA (MEDIUM — security)
-`web/staticwebapp.config.json` has `allowedRoles: ["anonymous"]` on `/api/*` and
-`/*`, so the site is **publicly reachable** — this deviates from the documented
-"Entra ID Easy Auth, owner role" design. (Pre-existing in the committed config,
-not changed this session.) Note: `AAD_CLIENT_ID/SECRET` were wiped by the infra
-deploy and the client **secret is not recoverable**.
-- **If re-enabling:** mint a new client secret on the app registration, restore
-  `AAD_CLIENT_ID` / `AAD_CLIENT_SECRET` (via KV ref per #2), and set
-  `allowedRoles` back to the authenticated/owner role in `staticwebapp.config.json`.
+### 3. Entra ID auth is currently OFF on the SWA ✅ FIXED 2026-07-11 (`fix/swa-hardening`)
+Was `allowedRoles: ["anonymous"]` on `/api/*` and `/*` — publicly reachable.
+- **Did NOT revive the old custom AAD app registration** (that path requires
+  the Standard plan and a client secret to manage/rotate/lose again — it's
+  what broke in the first place). Instead: SWA's **preconfigured** Microsoft
+  Entra ID provider (available on every plan, no app registration, no client
+  secret, ever) + the built-in invitation system's custom `owner` role
+  (also available on Free, up to 25 users). `/*` and `/api/*` now require
+  `allowedRoles: ["owner"]`; `401` redirects to `/.auth/login/aad` with
+  `post_login_redirect_uri=.referrer`; `/.auth/*` stays anonymous so the login
+  flow itself is reachable. This matches CLAUDE.md's own documented design
+  ("Free SKU, Entra ID Easy Auth") more closely than the original registration
+  ever did.
+- Also added `/login` / `/logout` friendly-route redirects — `web/app.js`
+  already hardcoded links to both, but neither existed in the config;
+  `/logout` in particular would have silently done nothing (SPA fallback
+  instead of `/.auth/logout`) once auth was enforced. Found by grepping
+  `web/*.js` before assuming nothing would break.
+- **Rollout note:** the config change ships in this branch, but production
+  deploy is gated on an operator accepting an `owner` role invitation first
+  (`az staticwebapp users invite ... --roles owner`) — otherwise nobody
+  satisfies `allowedRoles:["owner"]` and `/today` locks out everyone,
+  including the operator, the moment it deploys.
 
-### 4. Migrate the SWA API off the storage connection string (LOW)
-CLAUDE.md mandates "Managed Identity only — no connection strings." `web/api`
-still uses `STORAGE_CONNECTION_STRING` (account key). Switching it to
-`DefaultAzureCredential` + the already-present `STORAGE_ACCOUNT_NAME` would align
-with the rule and **eliminate the secret entirely** — which also resolves the
-storage half of #2.
+### 4. Migrate the SWA API off the storage connection string — CONSTRAINT VERIFIED 2026-07-11, not currently actionable (`fix/swa-hardening`)
+CLAUDE.md mandates "Managed Identity only — no connection strings." Verified
+against Microsoft Learn (2026-07-11) rather than attempting the migration:
+Azure Static Web Apps **managed functions do not support managed identity at
+all**, on any plan — the platform's own API-support matrix lists it as
+unavailable for managed functions (available only for Bring-Your-Own
+Functions). So `DefaultAzureCredential` in `web/api/function_app.py` has
+nothing to authenticate with; forcing it would just fail at runtime.
+- **Not fixed, by design** (per the task: verify the constraint, don't force a
+  broken migration). `STORAGE_CONNECTION_STRING` stays — but #2's fix means it
+  is now sourced from Key Vault at deploy time rather than a manually-applied
+  secret, so the operational pain this item was chasing is already resolved.
+- **The real future fix** is migrating `web/api` to a **Bring-Your-Own
+  Functions** backend (a separate Azure Functions app, like `func-pfauto`,
+  linked to the SWA) — that unlocks managed identity, Key Vault references,
+  and the full Azure Functions trigger/binding surface. This is a real
+  platform migration (new Function App resource, linking config, a second
+  deploy pipeline), out of scope for this hardening batch; revisit only if
+  the connection-string secret itself becomes a live problem again (it
+  shouldn't, now that #2 is fixed) or the Learning tab needs a capability
+  managed functions can't provide.
 
 ### 5. Verify the first report under the v1.1 prompt ✅ DONE 2026-06-13 (PASS)
 Verified against the `2026-06-12` report+trades blobs. Parser intact (valid JSON,

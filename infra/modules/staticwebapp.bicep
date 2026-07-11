@@ -10,10 +10,22 @@ param appInsightsConnectionString string
 @description('Storage account name (exposed to managed API as env var)')
 param storageAccountName string
 
+@description('Storage account connection string, resolved from Key Vault at DEPLOY TIME by main.bicep (keyVault.getSecret(...)) — see the note on swaSettings below.')
+@secure()
+param storageConnectionStringSecret string
+
+@description('func-pfauto master key, resolved from Key Vault at DEPLOY TIME by main.bicep — same rationale as storageConnectionStringSecret.')
+@secure()
+param funcMasterKeySecret string
+
 // SWA Free — managed Functions in /api are included.
-// No system-assigned identity: SWA Free rejects identity assignment with
-// SkuCode 'Free' is invalid (Standard tier required for MI / KV references).
-// Secrets are placed as plain app settings post-deploy (single-user system).
+// No system-assigned identity: verified against Microsoft Learn (2026-07-11)
+// that Azure Static Web Apps *managed functions* support neither Key Vault
+// app-setting references NOR managed identity, on ANY plan (Standard
+// included) — both are explicitly listed as unavailable; only Bring-Your-Own
+// Functions gets them. So an identity here would do nothing for the /api app
+// settings below — FOLLOWUPS #2 is fixed at the bicep/deploy-time layer
+// instead (see swaSettings).
 // API pinned to 2022-03-01: 2024-04-01 rejects Free with or without explicit sku.
 resource swa 'Microsoft.Web/staticSites@2022-03-01' = {
   name: staticWebAppName
@@ -31,9 +43,17 @@ resource swa 'Microsoft.Web/staticSites@2022-03-01' = {
 }
 
 // App settings — exposed to managed API as env vars.
-// Secret values (STORAGE_CONNECTION_STRING, FUNC_MASTER_KEY, AAD_CLIENT_ID,
-// AAD_CLIENT_SECRET) are set post-deploy via:
-//   az staticwebapp appsettings set --name swa-pfauto --setting-names <k>=<v>
+// STORAGE_CONNECTION_STRING / FUNC_MASTER_KEY are resolved from Key Vault at
+// DEPLOY TIME (main.bicep's `keyVault.getSecret(...)` calls, fed in via the
+// two @secure() params above) and baked in as plain app settings on EVERY
+// infra deploy. This is the fix for FOLLOWUPS #2 ("any infra deploy wipes
+// these settings") — because the correct current value now comes from this
+// template every time, `az deployment group create` SETS it instead of
+// wiping it. It is deliberately NOT a live runtime Key Vault reference
+// (`@Microsoft.KeyVault(SecretUri=...)`) — verified that managed-functions
+// SWAs cannot resolve those (see the note on `swa` above). To rotate either
+// secret: update it in Key Vault (scripts/seed-swa-secrets.sh) and redeploy
+// infra to pick up the new value.
 resource swaSettings 'Microsoft.Web/staticSites/config@2022-03-01' = {
   parent: swa
   name: 'appsettings'
@@ -41,6 +61,8 @@ resource swaSettings 'Microsoft.Web/staticSites/config@2022-03-01' = {
     APPLICATIONINSIGHTS_CONNECTION_STRING: appInsightsConnectionString
     STORAGE_ACCOUNT_NAME: storageAccountName
     FUNCTION_APP_NAME: 'func-pfauto'
+    STORAGE_CONNECTION_STRING: storageConnectionStringSecret
+    FUNC_MASTER_KEY: funcMasterKeySecret
   }
 }
 
