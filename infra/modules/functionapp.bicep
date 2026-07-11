@@ -93,10 +93,13 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         //   "Phase 1 clean 30+ days before Phase 2" gate — auto-trading is on.
         { name: 'AUTO_EXECUTE_ENABLED',                      value: 'true' }
         //   Intraday catalyst Flex engine (flex_intraday, every 15 min, is_open-gated).
-        //   Ships OFF — places live (paper) broker orders. Flip to 'true' to enable
-        //   after dry-run validation (POST /api/flex {"dry_run":true}). FLEX_* knobs
-        //   default in src/flex/config.py; override here only if tuning.
-        { name: 'FLEX_ENABLED',                              value: 'false' }
+        //   Places live (paper) broker orders. Enabled 2026-07-07 (FOLLOWUPS #33
+        //   residual (iv) — MU flex position unmanaged) after dry-run validation
+        //   (POST /api/flex {"dry_run":true}). NOTE: the engine only manages symbols
+        //   in flex-ledger/ledger.json — pre-engine positions (MU) need a ledger row
+        //   before it will manage them. FLEX_* knobs default in src/flex/config.py;
+        //   override here only if tuning.
+        { name: 'FLEX_ENABLED',                              value: 'true' }
         //   DayTrade Lab (daytrade_manage, every 1 min, clock/window-gated).
         //   Ships OFF — places live (paper) broker orders. Flip to 'true' only
         //   after dry-run validation (POST /api/daytrade {"dry_run":true}) AND

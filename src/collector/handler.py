@@ -36,6 +36,7 @@ from shared.quadrants import (
     intersection_names,
     is_amplifier,
     primary_quadrant,
+    intl_config,
     roles_config,
     selection_config,
 )
