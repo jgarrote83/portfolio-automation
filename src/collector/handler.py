@@ -108,6 +108,9 @@ _RISK_LIMITS_DEFAULTS = {
         "dgs2_delta_20d_bp_dovish": 20.0,
         "manual_fresh_days": 45,
     },
+    "quadrant_performance": {
+        "suspect_after_sessions": 10,
+    },
 }
 
 # Conviction-sleeve flex-review defaults (overridable via config/flex-review.json).
@@ -530,6 +533,178 @@ def _build_performance(series: list[dict]) -> dict:
         "note": (
             f"12-month rolling not yet available (only {days_live} days live)"
             if days_live < 365 else None
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# FOLLOWUPS #12 — quadrant_performance (regime-call accountability)
+# ---------------------------------------------------------------------------
+
+def _quadrant_perf_series(points: list[dict], quadrant_map: dict) -> list[dict]:
+    """Equal-weight buy-and-hold index (window start = 100) per quadrant basket.
+
+    This is a DELIBERATE PURE COPY of `web/api/function_app.py::_quadrant_series`
+    (the SWA API deploys standalone and cannot import `shared/quadrants.py` or this
+    module, so the two are kept in lock-step by hand — cross-reference both sides
+    if you change the semantics). A member's base is its first close INSIDE the
+    points passed in (so callers control the window by slicing `points` before
+    calling); a day's quadrant index is the mean of member normalized closes
+    available that day. A member with no base yet contributes nothing (a
+    late-appearing ticker — e.g. the 2026-07-10 roster-revision additions — can't
+    distort the index retroactively); a quadrant with no members priced that day
+    is None.
+    """
+    bases: dict[str, float] = {}
+    out: list[dict] = []
+    for p in points:
+        closes = p.get("closes") or {}
+        for t, c in closes.items():
+            if c and t not in bases:
+                bases[t] = float(c)
+        row: dict = {}
+        for q, members in (quadrant_map or {}).items():
+            vals = [
+                float(closes[t]) / bases[t] * 100.0
+                for t in members
+                if closes.get(t) and bases.get(t)
+            ]
+            row[q] = round(sum(vals) / len(vals), 3) if vals else None
+        out.append(row)
+    return out
+
+
+def _build_quadrant_performance(
+    series: list[dict], quadrant_map: dict[str, tuple[str, ...]], cfg: dict | None = None,
+) -> dict:
+    """Regime-call accountability (FOLLOWUPS #12): per-bucket basket-vs-SPY
+    performance + a hysteresis `suspect` flag for a FAVORED bucket that keeps
+    losing to SPY.
+
+    Pure over the SAME compact perf series `_build_performance` already consumed
+    (reused, not re-downloaded — see the collector call site) + the CURRENT
+    `QUADRANT_CONCENTRATE` membership. Describe-only: it informs the analyzer's
+    prose and never touches `reference_weights` or any deterministic gate.
+
+    Window returns (`ret_Nd_pct` / `excess_Nd_pp`) mirror `_quadrant_perf_series`
+    semantics: for each window the base is the first close INSIDE that window
+    slice, so a late-joining roster member never retroactively distorts earlier
+    history (same caveat as the `/performance` web chart — see `roster_note`).
+
+    The streak/lagging scan is a single forward pass per bucket (O(len(series))):
+    `favored_streak` counts consecutive sessions (ending today) the bucket has
+    appeared in that day's `favored_bucket`; `streak_excess_pp` is the basket's
+    cumulative excess vs SPY over that streak, based at the session BEFORE the
+    streak began (falls back to day 0 if the streak covers the whole series);
+    `lagging_sessions` is the current run (ending today) of sessions where that
+    AS-OF-THAT-SESSION streak excess was negative — recomputed at each session,
+    not just read off today's number, so a bucket that flips favored on/off
+    doesn't inherit a stale run. `suspect` fires when the bucket is favored today
+    AND `lagging_sessions >= suspect_after_sessions` (config, default 10).
+    """
+    if not series:
+        return {"available": False, "note": "no perf series yet"}
+    cfg = cfg or {}
+    suspect_after = int(cfg.get("suspect_after_sessions", 10))
+    dates = [p["date"] for p in series]
+    today = dates[-1]
+    spy_map = {p["date"]: p.get("spy_close") for p in series}
+
+    def _cutoff(days: int) -> str | None:
+        target = (date.fromisoformat(today) - timedelta(days=days)).isoformat()
+        earlier = [d for d in dates if d <= target]
+        return max(earlier) if earlier else None
+
+    buckets: dict[str, dict] = {}
+    for q, members in (quadrant_map or {}).items():
+        row: dict = {}
+        for n in (30, 60, 90):
+            cutoff = _cutoff(n)
+            ret = excess = None
+            if cutoff is not None:
+                window_pts = [p for p in series if p["date"] >= cutoff]
+                idx_rows = _quadrant_perf_series(window_pts, {q: members})
+                last_val = idx_rows[-1].get(q) if idx_rows else None
+                if last_val is not None:
+                    ret = round(last_val - 100.0, 3)
+                    spy0 = spy_map.get(window_pts[0]["date"])
+                    spyN = spy_map.get(window_pts[-1]["date"])
+                    if spy0 and spyN:
+                        excess = round(ret - ((spyN / spy0 - 1.0) * 100.0), 3)
+            row[f"ret_{n}d_pct"] = ret
+            row[f"excess_{n}d_pp"] = excess
+
+        # --- streak / lagging-run scan (single forward pass) --------------------
+        run_start: int | None = None
+        bases: dict[str, float] = {}
+        streak_len = 0
+        streak_excess: float | None = None
+        lagging = 0
+        for i, p in enumerate(series):
+            fav = q in (p.get("favored_bucket") or [])
+            if not fav:
+                run_start = None
+                bases = {}
+                streak_len = 0
+                streak_excess = None
+                lagging = 0
+                continue
+            if run_start is None:
+                run_start = i
+                anchor_idx = max(i - 1, 0)
+                bases = {}
+                anchor_closes = series[anchor_idx].get("closes") or {}
+                for t in members:
+                    c = anchor_closes.get(t)
+                    if c:
+                        bases[t] = float(c)
+            closes = p.get("closes") or {}
+            for t in members:
+                c = closes.get(t)
+                if c and t not in bases:
+                    bases[t] = float(c)
+            vals = [
+                float(closes[t]) / bases[t] * 100.0
+                for t in members if closes.get(t) and bases.get(t)
+            ]
+            streak_len = i - run_start + 1
+            if vals:
+                basket_chg = sum(vals) / len(vals) - 100.0
+                anchor_date = series[max(run_start - 1, 0)]["date"]
+                spy0, spyN = spy_map.get(anchor_date), spy_map.get(p["date"])
+                streak_excess = (
+                    round(basket_chg - (spyN / spy0 - 1.0) * 100.0, 3)
+                    if (spy0 and spyN) else None
+                )
+            else:
+                streak_excess = None
+            lagging = lagging + 1 if (streak_excess is not None and streak_excess < 0) else 0
+
+        favored_today_q = q in (series[-1].get("favored_bucket") or [])
+        row["favored_streak"] = streak_len
+        row["streak_excess_pp"] = streak_excess
+        row["lagging_sessions"] = lagging
+        row["suspect"] = bool(favored_today_q and lagging >= suspect_after)
+        buckets[q] = row
+
+    spy_ret_30 = None
+    cutoff30 = _cutoff(30)
+    if cutoff30 is not None:
+        spy0, spyN = spy_map.get(cutoff30), spy_map.get(today)
+        if spy0 and spyN:
+            spy_ret_30 = round((spyN / spy0 - 1.0) * 100.0, 3)
+
+    return {
+        "available": True,
+        "as_of": today,
+        "spy_ret_30d_pct": spy_ret_30,
+        "buckets": buckets,
+        "favored_today": list(series[-1].get("favored_bucket") or []),
+        "roster_note": (
+            "Basket composition is as-of the CURRENT roster (roster_revision_2026-07); "
+            "new members (SMH, XLF, COWZ, XLV, VTIP, KMLM, IEF, USMV) have bases starting "
+            "~2026-07-10, so early-window basket history under-represents them — the same "
+            "caveat as the /performance web chart."
         ),
     }
 
@@ -1465,6 +1640,29 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Performance scoreboard build failed (non-fatal)")
 
+    # --- FOLLOWUPS #12: quadrant_performance (regime-call accountability) -----
+    # Non-fatal. Reuses the SAME `series` the performance scoreboard just built —
+    # do not re-download the perf-series cache.
+    quadrant_performance: dict = {"available": False}
+    try:
+        qp_cfg = _load_risk_limits().get("quadrant_performance") \
+            or _RISK_LIMITS_DEFAULTS["quadrant_performance"]
+        quadrant_performance = _build_quadrant_performance(series, QUADRANT_CONCENTRATE, qp_cfg)
+        suspects = [q for q, b in (quadrant_performance.get("buckets") or {}).items() if b.get("suspect")]
+        if suspects:
+            logger.warning(
+                "Quadrant performance: SUSPECT favored bucket(s) %s (lagging_sessions >= %s)",
+                suspects, qp_cfg.get("suspect_after_sessions"),
+            )
+        else:
+            logger.info(
+                "Quadrant performance: favored_today=%s spy_ret_30d=%s%%",
+                quadrant_performance.get("favored_today"),
+                quadrant_performance.get("spy_ret_30d_pct"),
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Quadrant performance build failed (non-fatal)")
+
     # --- Phase C §6: track_record (learning signal from stamped outcomes) ----
     # Non-fatal. Reads TradeHistory (stamped by _stamp_trade_outcomes on prior
     # runs); compact aggregates only — never raw trade logs in the snapshot.
@@ -1533,6 +1731,7 @@ def run() -> None:
         "divergences": divergences,
         "flex_state": flex_state,
         "performance": performance,
+        "quadrant_performance": quadrant_performance,
         "track_record": track_record,
         "override_record": override_record,
         "news": {

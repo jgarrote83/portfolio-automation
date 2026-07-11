@@ -483,20 +483,33 @@ is the current source of truth** and is maintained; these companion specs need a
 (or a deprecation header pointing at CLAUDE.md). Pre-existing doc debt, not caused by
 today's work — flagged 2026-06-25 while updating storage docs for Phase C.
 
-### 12. `quadrant_performance` snapshot block — regime-call accountability (MEDIUM, ~Jul 10+)
-Feed the quadrant-vs-SPY data (built for the web chart, PR #8) back to the **analyzer**:
-a compact block with each basket's 30/60/90d return vs SPY **plus** "favored-bucket
-performance while favored" (did the quadrant the system favored actually win during the
-favored window?). One prompt rule: if the favored bucket has lagged SPY for N consecutive
-sessions while favored, the regime read is suspect — the report must confront it and the
-bar for concentrating further into it rises. Data already accrues daily in
-`performance/equity-series.json` (closes + favored_bucket per point); this is a small
-collector aggregation + prompt section. Motivating live example (2026-07-02): the model
-is rotating into Q3/Q4 while the Q3 basket is the worst performer since inception
-(−7.1%, GLD −10.5%) — currently nothing forces it to engage with that tension.
-**Deliberately deferred ~1 week** (decided with the account holder 2026-07-02): let the
-streaming fix + quadrant chart + Phase 4 prove out unattended first, and let
-shading/history accrue. Do after Finding 2.
+### 12. `quadrant_performance` snapshot block — regime-call accountability ✅ DONE 2026-07-11 (`feat/quadrant-performance`)
+Fed the quadrant-vs-SPY data (built for the web chart, PR #8) back to the **analyzer**.
+New non-fatal, describe-only `quadrant_performance` block (`collector._build_quadrant_performance`,
+built right after the `performance` scoreboard so it reuses the same in-run perf
+series): per Q1-Q4 bucket, 30/60/90d basket return + excess vs SPY (mirrors the web
+chart's `_quadrant_series` window-return semantics via a deliberate pure copy,
+`_quadrant_perf_series`, since the SWA API can't import this module), plus a
+`favored_streak`/`streak_excess_pp`/`lagging_sessions` hysteresis scan (recomputed
+AS-OF each session, not just read off today) and a `suspect` flag — true when a
+FAVORED bucket has lagged SPY every session it's been checked for
+`suspect_after_sessions` (config, default 10) consecutive sessions. The prompt
+(Section 1 echo + a new "Regime-call accountability" section near Track record + a
+Dashboard "Regime P&L" row) mandates one explicit paragraph confronting a `suspect`
+favored bucket and raises the evidentiary bar for INCREASING (never
+reducing/holding) that bucket's weight — a **prose/judgment gate only**, never a
+validator rule or a `reference_weights` change. A `regime_suspect` OverrideHistory
+row is written per suspect bucket per report day (`analyzer._write_regime_suspect_history`)
+for #13's monthly review, though **no stamper grades it yet** — verified (not
+rebuilt, per the task) that `_stamp_override_outcomes` requires override-shaped
+`falsifier_date`/`sleeve`/`direction` fields and `_stamp_switch_outcomes` hardcodes
+an allow-list of `layer` values that excludes `regime_suspect`; a future grading
+pass needs a third stamping path mirroring `_grade_switch`'s shape (bucket forward
+return vs SPY from the flagged date). 12 new pure-builder tests (462 total green,
+ruff clean). Motivating live example the block now surfaces (2026-07-02 real
+snapshot): Q3 was the favored bucket while being the worst performer since
+inception (−7.1%, GLD −10.5%) — this is exactly the case `suspect` is built to
+catch. Details in the PR description.
 
 ### 13. Monthly self-initiated strategy review + amendment channel (HIGH value, spec first)
 The LLM currently calibrates *trades* (track_record) but has no channel to rethink the
@@ -514,6 +527,13 @@ adopted under ~n=30; every adopted amendment gets its own outcome stamp. Include
 — membership stays deterministic, the LLM gets *proposal* rights, never direct edit.
 **Prereqs: Finding 2 fix → brief Phase 5 (override-outcome stamping) → #12.** Spec
 before building.
+**#12 update (2026-07-11):** the `regime_suspect` OverrideHistory layer now exists
+(one row per suspect favored bucket per report day: bucket, `favored_streak`,
+`streak_excess_pp`, and whether that session's trades increased/held/reduced it) —
+this is a ready-made input for the "favored-vs-realized quadrant divergence"
+retrospective above. It is not yet graded by any stamper (see #12's Done entry);
+the monthly review's design should account for whether it needs graded rows or can
+work from the raw action/streak log directly.
 **Model decision (account holder, 2026-07-02): the review runs on a stronger model than
 the daily analyzer** — two-tier design: daily stays claude-sonnet-4-6 (80K ITPM fits the
 ~72K prompt; guarded execution doesn't need frontier reasoning), review uses the best
@@ -832,6 +852,9 @@ the monthly #13 review — Loop 3 made visible.
   override falsified, a divergence that resolved against the classifier, a quadrant
   call graded late/wrong by #12, a #23 lag measurement, a data-integrity incident. No
   trigger, no entry. **The daily analyzer emits NOTHING to this ledger.**
+  (**#12 update 2026-07-11:** the concrete plumbing for the "quadrant call graded
+  late/wrong" trigger is the `regime_suspect` OverrideHistory layer — see #12's
+  Done entry and the #13 note above; it is not yet graded by a stamper.)
 - **Schema (IMPROVEMENT_SCHEMA_V1, sibling of the OVERRIDE_SCHEMA record discipline):**
   per entry: `observation` (dated, from the system's own record), `hypothesis` (what
   change improves forecasting), `proposed_instrument` (concrete signal/config/rule),

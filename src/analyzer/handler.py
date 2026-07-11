@@ -25,7 +25,13 @@ from shared.storage import (
 )
 from shared.clients.foundry import FoundryClient
 from shared.overrides import OVERRIDE_DEFAULTS, validate_overrides
-from shared.quadrants import CORE_ROSTER, EXEMPT_HOLDS, active_quadrant, benchmark_etf_for
+from shared.quadrants import (
+    CORE_ROSTER,
+    EXEMPT_HOLDS,
+    QUADRANT_CONCENTRATE,
+    active_quadrant,
+    benchmark_etf_for,
+)
 from shared.reference_execution import REFERENCE_EXECUTION_DEFAULTS, reconcile
 from shared.trade_validation import validate_trades
 
@@ -280,6 +286,7 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
     write_trades(date_str, trades_obj)
     _write_trade_history(date_str, trades_obj, snapshot)
     _write_override_history(date_str, result.get("decisions", []), snapshot)
+    _write_regime_suspect_history(date_str, snapshot, trades_obj)
 
     logger.info(
         "=== Analyzer completed for %s — %d trades recommended ===",
@@ -747,6 +754,76 @@ def _write_override_history(date_str: str, decisions: list[dict], snapshot: dict
             upsert_entity("OverrideHistory", entity)
         except Exception as e:  # noqa: BLE001
             logger.error("OverrideHistory upsert failed for %s: %s", row_key, e)
+
+
+def _write_regime_suspect_history(date_str: str, snapshot: dict, trades_obj: dict) -> None:
+    """FOLLOWUPS #12 Task C: one OverrideHistory row per SUSPECT favored bucket per
+    report day — the dataset #13's monthly review needs ("what did we do when the
+    market disagreed, and who was right"). Reuses the OverrideHistory write-once
+    shape (mirrors `_write_override_history` / the collector's
+    `_build_sleeve_switch_records`), tagged `layer: "regime_suspect"`.
+
+    NOT YET GRADED by any stamper (verified, not rebuilt — per the task): the
+    collector's `_stamp_override_outcomes` only selects rows carrying a
+    `falsifier_date` and grades via `_grade_override`, which assumes an
+    override-shaped `sleeve`/`direction` (de_risk/re_risk) pair — neither concept
+    applies here. `_stamp_switch_outcomes` hardcodes an allow-list of `layer`
+    values (`sleeve_switch`, `intl_leader_rotation`) that excludes
+    `regime_suspect`, so these rows are simply never selected by either existing
+    path (harmless — not mis-graded, just ungraded). A future stamper would need a
+    THIRD grading function mirroring `_grade_switch`'s shape (forward return of the
+    favored bucket vs SPY from `recommended_at`, "the market was right" if the
+    excess stays negative through the horizon) rather than `_grade_override`'s.
+    """
+    qp = snapshot.get("quadrant_performance") or {}
+    buckets = qp.get("buckets") or {}
+    suspects = [q for q, b in buckets.items() if b.get("suspect")]
+    if not suspects:
+        return
+
+    prices = snapshot.get("prices") or {}
+    trades = trades_obj.get("trades") or []
+    year_month = date_str[:7]
+
+    for q in suspects:
+        members = set(QUADRANT_CONCENTRATE.get(q, ()))
+        delta_usd = 0.0
+        for t in trades:
+            sym = str(t.get("symbol") or t.get("ticker") or "").upper()
+            if sym not in members:
+                continue
+            side = str(t.get("side") or t.get("action") or "").lower()
+            try:
+                qty = float(t.get("quantity") or t.get("qty") or 0)
+                px = float((prices.get(sym) or {}).get("c"))
+            except (TypeError, ValueError):
+                continue
+            if side == "buy":
+                delta_usd += qty * px
+            elif side == "sell":
+                delta_usd -= qty * px
+        action = "increased" if delta_usd > 1e-6 else (
+            "reduced" if delta_usd < -1e-6 else "held")
+
+        b = buckets[q]
+        row_key = f"RS-{date_str.replace('-', '')}-{q}"
+        try:
+            entity = {
+                "PartitionKey":       year_month,
+                "RowKey":             row_key,
+                "recommended_at":     date_str,
+                "layer":              "regime_suspect",
+                "sleeve":             q,
+                "favored_streak":     b.get("favored_streak"),
+                "streak_excess_pp":   b.get("streak_excess_pp"),
+                "action":             action,
+                # Grading hooks (left null — no stamper reads this layer yet).
+                "outcome_status":     "",
+                "resolved_correct":   None,
+            }
+            upsert_entity("OverrideHistory", entity)
+        except Exception as e:  # noqa: BLE001
+            logger.error("OverrideHistory (regime_suspect) upsert failed for %s: %s", row_key, e)
 
 
 def _date_from_blob_name(blob_name: str) -> str | None:
