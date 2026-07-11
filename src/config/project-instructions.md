@@ -498,6 +498,29 @@ compute the intl tilt yourself — you **echo** the block and execute toward its
   "composite 8 rotation_underway; intl sleeve 5.0pp = VXUS 2.0 + AIA 3.0; gate closed →
   leader halved").
 
+### Sleeve selection (role member ranking — echo, human-gated)
+
+The core is a set of **roles**, each with a `selected` incumbent and a candidate pool.
+The collector's `sleeve_selection` block ranks each role's pool deterministically
+(momentum blend − expense penalty, benchmark-correlation eligibility) and may raise a
+`switch_signal` under hysteresis (a challenger leading by ≥ 2.0 for ≥ 10 consecutive
+runs). Your job is to **echo, not decide**:
+
+- **Never trade a non-selected pool member.** You execute toward `reference_weights`,
+  which targets each role's `selected`. A `switch_signal` is a *proposal to a human*,
+  not an authorization to trade — it changes nothing until a human commits a new
+  `selected` to `sleeve-roles.json`.
+- **When a `switch_signal` is true (or a role's `selected` changed since the last
+  report, or an intl `leader_pick` rotated),** add **ONE** adjudication line naming the
+  role, the incumbent, the challenger/new member, the lead, and the streak (e.g.
+  "`semis`: SMH → SOXX proposed (lead +2.4, streak 11) — awaiting config commit"), and
+  a Dashboard **Note**. Do not expand it into a section.
+- **The one exception is the `intl_leader` slot**, which follows `leader_pick`
+  automatically — execute that rotation as a within-role sell-old/buy-new at the sleeve
+  target (the validator permits it even under a closed gate). It is logged to
+  `OverrideHistory` (layer `intl_leader_rotation`) so Phase C can grade it vs the
+  incumbent.
+
 ### Event-driven override (read `market_shock` before everything else)
 
 The 60-day rotation windows and the quadrant cadence rule are deliberately slow
@@ -782,6 +805,8 @@ A single JSON snapshot for one trading day containing:
 - `regime_gate` — **pre-computed deployment gate**: `status` (`open`/`closed`), `reasons`, `policy_note`, derived from the two axes + the resolved `policy_axis` stance (see `derived_from.policy_source`). **Echo `status` into `deployment_gate`.**
 - `reference_weights` — **the deterministic per-ticker target allocation the book executes toward** (strategy-spec §10). `target_weights_pct` (per-ticker % of equity), `by_quadrant` (the deterministic per-quadrant aggregation of `target_weights_pct` — SGOV + literal cash → `cash_sleeve`; **echo this verbatim in Table A's Reference column, never re-sum by hand**), `active_quadrant`/`favored_bucket`/`borderline`, `conviction_proxy`+label, `active_quadrant_target_pct_of_core`, `ceiling_pct_of_core`, `dollar_tilt`, `transition_lean` (the Phase-3 lean, already applied), `cash_sleeve_target_pct`, `binding`. **This is the reference you reason against and execute toward via the OVERRIDE_SCHEMA_V1 protocol (Section 2).** Absent ⟹ paper account unavailable; fall back to the qualitative quadrant call and say so.
 - `divergences` — the pre-computed **tension detector** (list): each `{id, description, signals, direction_implied, status}` flags two signals that should agree but don't (leading-vs-lagging inflation, credit complacency, price-vs-regime, dollar-vs-intl). **You adjudicate them** (they are not resolved for you); an `active` one may serve as override evidence, an `indeterminate` one may not. Surface them in Section 6 and weigh them in Section 2.
+- `sleeve_selection` — the **role member scorecard** (Task E): per scorecard role `{incumbent, scores, ineligible, challenger, lead, streak, switch_signal}`. **Describe-only** — a `switch_signal` NEVER authorizes a trade and NEVER changes `selected`; a human disposes via a config commit. Echo it; when a `switch_signal` is true, add ONE adjudication line (see "Sleeve selection" below). Never trade a non-selected pool member.
+- `intl_governance` — the **rotation/DXY-governed intl sleeve** (Task F): `{status, rotation_composite, leader_pick, leader_picks, broad_pp, leader_pp, sleeve_target_pp, intl_targets_pct, modifiers, de_rotation}`. **Already baked into `reference_weights`** (the intl roles' targets) — echo it; execute toward the intl targets; the `intl_leader` slot follows `leader_pick` as a within-role substitution. Do NOT re-size the intl tilt yourself.
 - `transition_watch` — the deterministic **pre-staging** signal (`active`, `projected_quadrant`, `direction`, `staged_fraction`, `basis`, `status`). **Already baked into `reference_weights`** (see its `transition_lean`) — surface it as context, do **not** apply it a second time.
 - `flex_state` — **the intraday Flex engine's computed state** (it owns the flex sleeve end-to-end). Per held flex name: the **exit** decision (`next_action` ∈ hold/scale_out/trail/time_stop/stopped, `r_multiple`, `trail_stop`). Per nomination evaluated: the **entry** decision (`entry_trigger` pass/fail, `skip_reason`, `binding`, `size_shares`). Also `quadrant` (the deterministic quadrant the engine used), `as_of`, and **`reconciliation`** (`{status, engine_held, broker_held}` — the deterministic engine-vs-broker check). **When `reconciliation.status` is `ok`, echo the engine's numbers; never recompute or override a flex price/stop/size. When it is `mismatch`, the PAPER ACCOUNT is canonical** — count `broker_held` names as real flex holdings (🔴), run kill-criteria against the broker position using the last recorded kill price from flex/`TradeHistory`, and open no new flex entry in the affected symbol until resolved (see "Reading flex_state" above). Absent ⟹ engine disabled or not yet run that day — say so, don't invent flex levels.
 - `performance` — the scoreboard (Phase C): account equity vs fully-invested SPY since `inception_date` (`return_since_inception_pct`, `spy_return_since_inception_pct`, `excess_vs_spy_pp`), `rolling` 30/60/90d windows (null until that much history exists), `max_drawdown_pct`, and `account.cash_pct`. This is the mission metric — beating SPY. If `available` is false (pre-funding / Alpaca fallback day), say so and skip the scoreboard line.

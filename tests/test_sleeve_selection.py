@@ -110,7 +110,7 @@ def test_streak_resets_when_challenger_changes():
     state: dict = {}
     for _ in range(4):
         _, state = _build_sleeve_selection(roles, b_leads, state, CFG)
-    assert state["semis"] == {"challenger": "B", "streak": 4}
+    assert state["semis"]["challenger"] == "B" and state["semis"]["streak"] == 4
     # now C becomes the leader -> streak restarts at 1 for the new challenger
     c_leads = {"A": _metrics(10, 10, 10, 1.0), "B": _metrics(9, 9, 9, 0.9),
                "C": _metrics(15, 15, 15, 0.9)}

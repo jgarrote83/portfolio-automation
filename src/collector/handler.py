@@ -809,6 +809,75 @@ def _stamp_override_outcomes(fmp: FMPClient) -> None:
     logger.info("Override stamping: %d row(s) stamped (of %d pending)", stamped, len(pending))
 
 
+def _stamp_switch_outcomes(fmp: FMPClient) -> None:
+    """Grade matured role switches + intl leader rotations vs the INCUMBENT
+    counterfactual (Task G / Phase C): correct if the new member outperformed the one
+    it replaced. Stamps `excess_{30,60,90}d_pp` and, at the 60d headline, `resolved_correct`
+    + `outcome_status`. Prices from perf-series closes first, FMP fallback per symbol.
+    Caller wraps in try/except — never breaks the collector.
+    """
+    today = date.today()
+    rows = query_entities("OverrideHistory")
+    pending = [
+        r for r in rows
+        if r.get("layer") in ("sleeve_switch", "intl_leader_rotation")
+        and not r.get("outcome_status")
+    ]
+    if not pending:
+        return
+
+    perf_points = sorted(
+        ((p.get("date"), p.get("closes") or {}) for p in read_perf_series() if p.get("date")),
+    )
+    fmp_cache: dict[str, dict[str, float]] = {}
+
+    def _px(sym: str, d: str) -> float | None:
+        best = None
+        for pd, closes in perf_points:
+            if pd > d:
+                break
+            c = closes.get(sym)
+            if c is not None:
+                best = float(c)
+        if best is not None:
+            return best
+        if sym not in fmp_cache:
+            fmp_cache[sym] = _close_by_date(fmp, sym)
+        return _close_on_or_before(fmp_cache[sym], d)
+
+    stamped = 0
+    for r in pending:
+        filed = str(r.get("recommended_at") or "")[:10]
+        if not filed or _max_matured_horizon(filed, today) < 30:
+            continue
+        inc, new = r.get("incumbent"), r.get("new_member")
+        base_i, base_n = _px(inc, filed), _px(new, filed)
+        entity = {"PartitionKey": r["PartitionKey"], "RowKey": r["RowKey"], "resolved_at": today.isoformat()}
+        headline = None
+        for h in _OUTCOME_HORIZONS:   # 30 / 60 / 90
+            if date.fromisoformat(filed) + timedelta(days=h) > today:
+                continue
+            tgt = (date.fromisoformat(filed) + timedelta(days=h)).isoformat()
+            ci, cn = _px(inc, tgt), _px(new, tgt)
+            ri = (ci / base_i - 1.0) * 100.0 if (ci and base_i) else None
+            rn = (cn / base_n - 1.0) * 100.0 if (cn and base_n) else None
+            grade = _grade_switch(ri, rn)
+            if grade:
+                entity[f"excess_{h}d_pp"] = grade["excess_pp"]
+                if h == _HEADLINE_HORIZON:
+                    headline = grade
+        if headline is not None:
+            entity["outcome_status"] = "closed"
+            entity["resolved_correct"] = headline["resolved_correct"]
+        if len(entity) > 3:   # something to write beyond the keys
+            try:
+                upsert_entity("OverrideHistory", entity)
+                stamped += 1
+            except Exception:  # noqa: BLE001
+                logger.exception("Switch stamping upsert failed for %s", r.get("RowKey"))
+    logger.info("Switch stamping: %d row(s) stamped (of %d pending)", stamped, len(pending))
+
+
 def _aggregate_override_record(rows: list[dict]) -> dict:
     """Brief Phase 5 §2 — roll stamped OverrideHistory rows into the compact
     `override_record` snapshot block (sibling of track_record: capture-fine /
@@ -1246,6 +1315,7 @@ def run() -> None:
     # --- International governance (Task F) — rotation/DXY-governed intl sleeve. ---
     # Built BEFORE reference_weights (which consumes it for the two intl roles). Non-fatal.
     intl_governance: dict = {"available": False}
+    _intl_prev: dict = {}
     try:
         _intl_leader_pool: list = []
         _intl_broad_sel = ""
@@ -1295,12 +1365,14 @@ def run() -> None:
     # --- Sleeve selection scorecard (Task E) — describe-only role-member ranking. -
     # Proposes (never disposes) core member switches; a human commits `selected`.
     sleeve_selection: dict = {"available": False}
+    _prev_streak: dict = {}
+    _new_streak: dict = {}
     try:
         _roles = roles_config()
         _metrics = _sleeve_selection_metrics(fmp, _roles)
-        _streak = _load_sleeve_streak_state()
+        _prev_streak = _load_sleeve_streak_state()
         sleeve_selection, _new_streak = _build_sleeve_selection(
-            _roles, _metrics, _streak, selection_config()
+            _roles, _metrics, _prev_streak, selection_config()
         )
         _save_sleeve_streak_state(_new_streak)
         _sig = [r["role_id"] for r in sleeve_selection.get("roles", []) if r.get("switch_signal")]
@@ -1310,6 +1382,24 @@ def run() -> None:
         )
     except Exception:  # noqa: BLE001
         logger.exception("Sleeve selection build failed (non-fatal)")
+
+    # --- Phase C: record APPLIED role switches + intl leader rotations to ----------
+    # OverrideHistory (Task G) — graded later vs the incumbent counterfactual. Non-fatal.
+    try:
+        _sw_records = _build_sleeve_switch_records(
+            _prev_streak, _new_streak,
+            (_intl_prev or {}).get("leader"), (intl_governance or {}).get("leader_pick"),
+            today,
+        )
+        for _rec in _sw_records:
+            upsert_entity("OverrideHistory", _rec)
+        if _sw_records:
+            logger.info(
+                "Recorded %d sleeve switch/rotation record(s): %s",
+                len(_sw_records), [r["RowKey"] for r in _sw_records],
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Sleeve switch recording failed (non-fatal)")
 
     # --- Flex engine state (intraday catalyst engine; echoed by the analyzer) -
     # The engine writes flex-state/{date}.json during the trading session. At
@@ -1470,6 +1560,12 @@ def run() -> None:
         _stamp_override_outcomes(fmp)
     except Exception:  # noqa: BLE001
         logger.exception("Override stamping failed (non-fatal)")
+
+    # --- Task G: grade matured role switches + intl leader rotations (non-fatal) -
+    try:
+        _stamp_switch_outcomes(fmp)
+    except Exception:  # noqa: BLE001
+        logger.exception("Switch stamping failed (non-fatal)")
 
     logger.info("=== Collector completed for %s ===", today)
 
@@ -3130,10 +3226,10 @@ def _build_sleeve_selection(roles: list[dict], metrics_by_ticker: dict,
         prev = streak_state.get(rid) or {}
         if challenger and inc_score is not None and lead >= lead_thr:
             streak = prev.get("streak", 0) + 1 if prev.get("challenger") == challenger else 1
-            new_state[rid] = {"challenger": challenger, "streak": streak}
+            new_state[rid] = {"challenger": challenger, "streak": streak, "selected": incumbent}
         else:
             streak = 0
-            new_state[rid] = {"challenger": None, "streak": 0}
+            new_state[rid] = {"challenger": None, "streak": 0, "selected": incumbent}
         out_roles.append({
             "role_id": rid,
             "incumbent": incumbent,
@@ -3184,14 +3280,15 @@ def _sleeve_selection_metrics(fmp: FMPClient, roles: list[dict]) -> dict:
 
 
 def _load_sleeve_streak_state() -> dict:
-    """Per-role hysteresis streak from Table Storage (best-effort → {})."""
+    """Per-role hysteresis streak + last-seen selected from Table Storage (→ {})."""
     state: dict = {}
     for e in query_entities(_SLEEVE_STATE_TABLE):
         rid = e.get("RowKey")
-        if rid:
+        if rid and rid != _INTL_STATE_KEY:
             state[rid] = {
                 "challenger": (e.get("challenger") or None) or None,
                 "streak": int(e.get("streak") or 0),
+                "selected": (e.get("selected") or None) or None,
             }
     return state
 
@@ -3203,6 +3300,7 @@ def _save_sleeve_streak_state(new_state: dict) -> None:
             "RowKey": rid,
             "challenger": s.get("challenger") or "",
             "streak": int(s.get("streak") or 0),
+            "selected": s.get("selected") or "",
         })
 
 
@@ -3366,6 +3464,48 @@ def _save_intl_state(new_state: dict) -> None:
         "leader": (new_state or {}).get("leader") or "",
         "composite": "" if comp is None else float(comp),
     })
+
+
+def _build_sleeve_switch_records(prev_streak: dict, new_streak: dict,
+                                 prev_leader: str | None, leader_pick: str | None,
+                                 date: str) -> list[dict]:
+    """OverrideHistory-shaped records for APPLIED role changes (Task G / Phase C).
+
+    A `sleeve_switch` row per role whose `selected` changed since the last run (a human
+    committed a new incumbent), and an `intl_leader_rotation` row when the intl leader
+    pick rotated. Each is later graded vs the INCUMBENT counterfactual (did the new
+    member beat the one it replaced) at 30/60/90d. Write-once; outcome hooks null.
+    """
+    ym = date[:7]
+    tag = date.replace("-", "")
+    records: list[dict] = []
+    for rid, ns in (new_streak or {}).items():
+        prev_sel = (prev_streak.get(rid) or {}).get("selected")
+        cur_sel = ns.get("selected")
+        if prev_sel and cur_sel and prev_sel != cur_sel:
+            records.append({
+                "PartitionKey": ym, "RowKey": f"SW-{tag}-{rid}",
+                "recommended_at": date, "layer": "sleeve_switch", "role_id": rid,
+                "sleeve": rid.upper(), "incumbent": prev_sel, "new_member": cur_sel,
+                "outcome_status": "", "resolved_correct": None,
+            })
+    if leader_pick and prev_leader and prev_leader != leader_pick:
+        records.append({
+            "PartitionKey": ym, "RowKey": f"ILR-{tag}",
+            "recommended_at": date, "layer": "intl_leader_rotation", "role_id": "intl_leader",
+            "sleeve": "INTL_LEADER", "incumbent": prev_leader, "new_member": leader_pick,
+            "outcome_status": "", "resolved_correct": None,
+        })
+    return records
+
+
+def _grade_switch(incumbent_ret_pct: float | None, new_ret_pct: float | None) -> dict | None:
+    """Grade a switch/rotation vs the incumbent counterfactual: correct if the new member
+    outperformed the one it replaced. None when either return is unavailable."""
+    if incumbent_ret_pct is None or new_ret_pct is None:
+        return None
+    excess = float(new_ret_pct) - float(incumbent_ret_pct)
+    return {"resolved_correct": excess > 0, "excess_pp": round(excess, 3)}
 
 
 def _build_reference_weights(
