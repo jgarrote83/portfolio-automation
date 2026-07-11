@@ -1243,6 +1243,32 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Transition watch build failed (non-fatal)")
 
+    # --- International governance (Task F) — rotation/DXY-governed intl sleeve. ---
+    # Built BEFORE reference_weights (which consumes it for the two intl roles). Non-fatal.
+    intl_governance: dict = {"available": False}
+    try:
+        _intl_leader_pool: list = []
+        _intl_broad_sel = ""
+        for _r in roles_config():
+            if _r.get("role_id") == "intl_leader":
+                _intl_leader_pool = _r.get("pool", [])
+            elif _r.get("role_id") == "intl_broad":
+                _intl_broad_sel = _r.get("selected", "")
+        _intl_prev = _load_intl_state()
+        intl_governance, _intl_new = _build_intl_governance(
+            regional_rotation, regime_gate, market_shock,
+            _intl_leader_pool, _intl_broad_sel, _intl_prev, intl_config(),
+        )
+        _save_intl_state(_intl_new)
+        logger.info(
+            "Intl governance: status=%s composite=%s leader_pick=%s sleeve=%.1fpp mods=%s",
+            intl_governance.get("status"), intl_governance.get("rotation_composite"),
+            intl_governance.get("leader_pick"), intl_governance.get("sleeve_target_pp") or 0.0,
+            intl_governance.get("modifiers"),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Intl governance build failed (non-fatal)")
+
     # --- Reference weights (strategy-spec §10: precomputed target weights the ----
     # analyzer executes toward, NOT a mandate). Consumes transition_watch (Phase 3) as a
     # bounded lean. Deterministic + echoed; non-fatal.
@@ -1251,7 +1277,7 @@ def run() -> None:
         reference_weights = _build_reference_weights(
             paper_account, growth_axis, inflation_axis, regime_gate,
             regional_rotation, bond_signals, labor_signals, market_shock,
-            _load_risk_limits(), transition_watch,
+            _load_risk_limits(), transition_watch, intl_governance,
         )
         logger.info(
             "Reference weights: quad=%s conviction=%s(%s) active_target=%s%%core tilt=%s lean=%s binding=%s",
@@ -1410,6 +1436,7 @@ def run() -> None:
         "policy_axis": policy_axis,
         "regime_gate": regime_gate,
         "reference_weights": reference_weights,
+        "intl_governance": intl_governance,
         "sleeve_selection": sleeve_selection,
         "transition_watch": transition_watch,
         "divergences": divergences,
@@ -1594,7 +1621,7 @@ def _aggregate_by_quadrant(target_weights_pct: dict, literal_cash_pct: float) ->
     target plus the literal-cash buffer form the `cash_sleeve` bucket. The analyzer
     echoes this verbatim rather than re-deriving quadrant totals freehand. Sums to
     ~100 within rounding (sub-0.05% floors already dropped from target_weights_pct)."""
-    buckets = {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "cash_sleeve": 0.0}
+    buckets = {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "intl": 0.0, "cash_sleeve": 0.0}
     for tkr, w in (target_weights_pct or {}).items():
         q = primary_quadrant(tkr)
         buckets[q] = buckets.get(q, 0.0) + float(w or 0.0)
@@ -3179,6 +3206,168 @@ def _save_sleeve_streak_state(new_state: dict) -> None:
         })
 
 
+# ---------------------------------------------------------------------------
+# International governance (Task F — FOLLOWUPS #36; roster_revision_2026-07 §4)
+#
+# The intl sleeve is governed by the ROTATION score + the DXY switch, NOT the US
+# quadrant. Leader-selective: a small broad base (intl_broad) carries policy weight and
+# a rotation-sized leader slot (intl_leader) concentrates into the actual leader. This
+# REPLACES the 2026-07 INTERIM "closed gate → suppress rotation tilt to zero" rule (a
+# closed gate now HALVES the leader tilt, never zeroes it). Pure + echoed.
+# ---------------------------------------------------------------------------
+_INTL_STATE_TABLE = "SleeveSelectionState"
+_INTL_STATE_KEY = "intl_governance"
+_MA_RANK = {"bullish_intl": 0, "mixed": 1, "bearish_intl": 2}
+
+
+def _rotation_macross_signal(regional_rotation: dict, ticker: str) -> str | None:
+    row = (regional_rotation.get("ratio_ma_cross") or {}).get(f"{ticker.upper()}/SPY")
+    return (row or {}).get("signal") if isinstance(row, dict) else None
+
+
+def _build_intl_governance(regional_rotation: dict, regime_gate: dict, market_shock: dict,
+                           intl_leader_pool: list[str], broad_selected: str,
+                           prev_state: dict, cfg: dict) -> tuple[dict, dict]:
+    """Rotation/DXY-governed international sleeve sizing (roster_revision_2026-07 §4).
+
+    Returns (block, new_state). The leader slot follows `leader_pick` (restricted to the
+    intl_leader pool, excess >= leader_min_excess_pp, MA cross not bearish_intl; tie-broken
+    bullish_intl > mixed). Sizing ladder off the rotation composite, modified by the DXY
+    anti-chase (headwind → 0, neutral → halve) then the gate (closed → halve again, never
+    zero). De-rotation unwinds the leader slot to floor when the pick loses leader status
+    or its MA cross turns bearish, or the composite fades from >=7 to <=5.
+    """
+    base_pp = float(cfg.get("intl_base_pp", 2.0))
+    tilt_mid = float(cfg.get("leader_tilt_mid_pp", 1.0))
+    tilt_high = float(cfg.get("leader_tilt_high_pp", 3.0))
+    min_excess = float(cfg.get("leader_min_excess_pp", 5.0))
+    max_leaders = int(cfg.get("max_leaders_high", 2))
+
+    rr = regional_rotation or {}
+    composite = (rr.get("rotation_score") or {}).get("composite")
+    category = (rr.get("rotation_score") or {}).get("category")
+    dxy = rr.get("dxy_tailwind_for_intl")
+    gate = str((regime_gate or {}).get("status") or "").lower()
+    shock = (market_shock or {}).get("shock_level")
+    pool = {str(t).upper() for t in intl_leader_pool}
+    broad_selected = (broad_selected or "").upper()
+
+    # Eligible leaders: in pool, excess >= min, MA cross not bearish.
+    elig: list[tuple[str, float, str]] = []
+    for row in rr.get("leaders_vs_spy") or []:
+        t = str(row.get("ticker") or "").upper()
+        ex = row.get("excess_pp")
+        sig = _rotation_macross_signal(rr, t) or "mixed"
+        if t in pool and ex is not None and float(ex) >= min_excess and sig != "bearish_intl":
+            elig.append((t, float(ex), sig))
+    elig.sort(key=lambda x: (_MA_RANK.get(x[2], 1), -x[1]))
+    leaders = [t for t, _, _ in elig]
+    leader_pick = leaders[0] if leaders else None
+
+    prev_leader = (prev_state or {}).get("leader") or None
+    prev_comp = (prev_state or {}).get("composite")
+
+    if composite is None:
+        block = {
+            "available": True, "status": "indeterminate", "rotation_composite": None,
+            "category": category, "dxy": dxy, "gate": gate,
+            "leaders_in_pool": [], "leader_pick": None, "leader_picks": [],
+            "broad_target": broad_selected, "broad_pp": round(base_pp, 2),
+            "leader_pp": 0.0, "sleeve_target_pp": round(base_pp, 2),
+            "intl_targets_pct": {broad_selected: round(base_pp, 2)} if broad_selected else {},
+            "modifiers": ["rotation_composite_indeterminate"],
+            "de_rotation": {"triggered": False, "trigger": None, "prior_leader": prev_leader},
+            "shock_level": shock,
+            "_note": "Rotation composite unavailable — hold the broad base only, no leader tilt.",
+        }
+        return block, {"leader": None, "composite": None}
+
+    if composite <= 3:
+        leader_tilt = 0.0
+    elif composite <= 6:
+        leader_tilt = tilt_mid
+    else:
+        leader_tilt = tilt_high
+
+    modifiers: list[str] = []
+    if dxy == "headwind":
+        leader_tilt = 0.0
+        modifiers.append("dxy_headwind_zeroed")
+    elif dxy == "neutral":
+        leader_tilt /= 2.0
+        modifiers.append("dxy_neutral_halved")
+    if gate == "closed":
+        leader_tilt /= 2.0
+        modifiers.append("gate_closed_halved")   # REPLACES the interim suppress-to-zero
+    if shock in (2, 3):
+        modifiers.append(f"shock_level_{shock}_tilt_limits_lifted")
+
+    # De-rotation echo.
+    de_rot = {"triggered": False, "trigger": None, "prior_leader": prev_leader}
+    if prev_leader and prev_leader not in leaders:
+        trig = "ma_bearish" if _rotation_macross_signal(rr, prev_leader) == "bearish_intl" \
+            else "leader_lost_status"
+        de_rot = {"triggered": True, "trigger": trig, "prior_leader": prev_leader}
+        leader_tilt = 0.0
+    elif prev_comp is not None and float(prev_comp) >= 7 and composite <= 5:
+        de_rot = {"triggered": True, "trigger": "composite_fade", "prior_leader": prev_leader}
+
+    if not leader_pick:
+        leader_tilt = 0.0
+
+    leader_pp = round(leader_tilt, 2)
+    broad_pp = round(base_pp, 2)
+    sleeve_target_pp = round(broad_pp + leader_pp, 2)
+
+    # Up to 2 leaders only at high composite with a positive tilt.
+    picks = (leaders[:max_leaders] if (composite >= 7 and leader_pp > 0)
+             else ([leader_pick] if (leader_pick and leader_pp > 0) else []))
+    intl_targets: dict[str, float] = {}
+    if broad_selected:
+        intl_targets[broad_selected] = broad_pp
+    if picks and leader_pp > 0:
+        per = round(leader_pp / len(picks), 3)
+        for p in picks:
+            intl_targets[p] = intl_targets.get(p, 0.0) + per
+
+    block = {
+        "available": True, "status": "active", "rotation_composite": composite,
+        "category": category, "dxy": dxy, "gate": gate,
+        "leaders_in_pool": [{"ticker": t, "excess_pp": ex, "ma_signal": sig} for t, ex, sig in elig],
+        "leader_pick": leader_pick, "leader_picks": picks,
+        "broad_target": broad_selected, "broad_pp": broad_pp, "leader_pp": leader_pp,
+        "sleeve_target_pp": sleeve_target_pp, "intl_targets_pct": intl_targets,
+        "modifiers": modifiers, "de_rotation": de_rot, "shock_level": shock,
+        "_note": (
+            "Rotation/DXY-governed intl sleeve. The leader slot follows leader_pick "
+            "(sell-old/buy-new at the sleeve target); logged to OverrideHistory "
+            "(intl_leader_rotation) for Phase C grading."
+        ),
+    }
+    return block, {"leader": leader_pick, "composite": composite}
+
+
+def _load_intl_state() -> dict:
+    for e in query_entities(_INTL_STATE_TABLE):
+        if e.get("RowKey") == _INTL_STATE_KEY:
+            comp = e.get("composite")
+            return {
+                "leader": (e.get("leader") or None) or None,
+                "composite": float(comp) if comp not in (None, "") else None,
+            }
+    return {}
+
+
+def _save_intl_state(new_state: dict) -> None:
+    comp = (new_state or {}).get("composite")
+    upsert_entity(_INTL_STATE_TABLE, {
+        "PartitionKey": "state",
+        "RowKey": _INTL_STATE_KEY,
+        "leader": (new_state or {}).get("leader") or "",
+        "composite": "" if comp is None else float(comp),
+    })
+
+
 def _build_reference_weights(
     paper_account: dict,
     growth_axis: dict,
@@ -3190,6 +3379,7 @@ def _build_reference_weights(
     market_shock: dict,
     cfg: dict,
     transition_watch: dict | None = None,
+    intl_governance: dict | None = None,
 ) -> dict:
     """Deterministic per-ticker REFERENCE allocation the analyzer executes toward.
 
@@ -3230,6 +3420,18 @@ def _build_reference_weights(
     cash_band = cfg["cash_sleeve_band_pct"]
     soft_cap = float(cfg["single_name_cap_pct"]["any_name_soft"])
     exempt = set(cfg.get("exempt_holds", EXEMPT_HOLDS))
+
+    # International sleeve (Task F) — sized in %-of-EQUITY by intl_governance (rotation +
+    # DXY), a SEPARATE sleeve carved out of the core room like cash. Its pool members are
+    # excluded from the quadrant core math (they carry no US-quadrant label).
+    ig = intl_governance or {}
+    intl_targets = {str(t).upper(): float(v) for t, v in (ig.get("intl_targets_pct") or {}).items()}
+    intl_total_pct = float(ig.get("sleeve_target_pp") or 0.0) if ig.get("available") else 0.0
+    intl_pool: set[str] = set()
+    for _r in roles_config():
+        if _r.get("quadrants") == "rotation":
+            for _m in _r.get("pool", ()):
+                intl_pool.add(str(_m).upper())
 
     # --- 1. conviction proxy → active-quadrant target (% of core) ---------------
     proxy = _conviction_proxy(
@@ -3356,6 +3558,12 @@ def _build_reference_weights(
         if t in core_target:
             core_target[t] = 0.0
 
+    # International pool members carry no US-quadrant label — zero them in the core math;
+    # the intl sleeve is added back below from intl_governance (% of equity).
+    for t in intl_pool:
+        if t in core_target:
+            core_target[t] = 0.0
+
     # Soft single-name cap applies only to SINGLE STOCKS (idiosyncratic risk), NOT to
     # diversified ETF sleeves — a high-conviction quadrant is *meant* to push one ETF
     # past 15% (capping it here would defeat the concentration this feature enables).
@@ -3374,7 +3582,7 @@ def _build_reference_weights(
     # Reference cash sleeve: stay in band; if currently above the ceiling hold at the
     # ceiling (deploy the surplus into core), if below the floor lift to the floor.
     cash_sleeve_target = max(cash_floor, min(cash_ceiling, cur_sleeve))
-    core_room = max(0.0, 100.0 - cash_sleeve_target)
+    core_room = max(0.0, 100.0 - cash_sleeve_target - intl_total_pct)
 
     # AMZN/GOOGL are permanent holds: pin them at their CURRENT weight and carve that out
     # of the core room as a FIXED slice — do NOT let the renormalize scale them up. (Before
@@ -3397,6 +3605,12 @@ def _build_reference_weights(
     sgov_w = max(0.0, cash_sleeve_target - _CASH_BUFFER_PCT)
     weights["SGOV"] = round(sgov_w, 3)
     weights["__cash__"] = round(cash_sleeve_target - sgov_w, 3)
+
+    # International sleeve (Task F): add the rotation/DXY-governed intl targets (% of
+    # equity) that intl_governance sized. These REPLACE any quadrant math for intl names.
+    for t, v in intl_targets.items():
+        if v > 0:
+            weights[t] = round(float(v), 3)
 
     # Deterministic per-quadrant aggregation (Task 5) — the analyzer echoes this
     # verbatim in the Quadrant Allocation table's Reference column instead of summing

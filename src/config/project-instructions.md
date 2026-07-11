@@ -469,16 +469,34 @@ Fields you will receive:
 - `policy.us_2y_60d_bp_change` and `policy.stance_for_intl` (`supportive` / `neutral` / `adverse`).
 - `rotation_score.composite` 0–10 with category `us_leadership_intact` (0–3) / `transition_window` (4–6) / `rotation_underway` (7–10). Component breakdown in `rotation_score.components` with weights: dollar 30 / RS 30 / policy 20 / valuation 20. Note `rotation_score.components_missing` — valuation gap is always flagged because we cannot aggregate ETF forward P/E on the current data tier; treat missing components as neutral, not bullish.
 
-**How to act on it:**
+**How to act on it — echo `intl_governance` (deterministic; do NOT re-derive the tilt).**
 
-- `composite ≤ 3`: US leadership intact. Keep international at policy weight; no rotation trade.
-- `composite 4–6`: Transition window. Begin tilting +1pp into the strongest international leader(s) per `leaders_vs_spy`. Cite the score and the specific leader.
-- `composite ≥ 7`: Rotation underway. Tilt +2 to +3pp from SPY/QQQ into the top 1–2 international leaders. If a specific region is the leader (e.g. EWJ leads), name the region. If `ratio_ma_cross` for that region is `bullish_intl`, confidence is higher.
-- **De-rotation:** if `composite` falls back from ≥7 to ≤5 across two consecutive reports, unwind the tilt symmetrically.
-- Always state the score, the category, and which component drove the call (e.g. "score 7.2 driven by dollar momentum 8.5 + RS 7.0"). If a major component is missing, say so.
-- **INTERIM — the deployment gate outranks a rotation tilt (pending the international-governance redesign).** When `regime_gate.status` is **CLOSED**, any rotation tilt INTO international beta is **size 0** — a rotation signal is not a deployment authorization, and a closed gate forbids adding Q1/Q2 amplifier beta (intl included). Echo the conflict in **one line** ("rotation says +Npp {leader}; gate closed; tilt suppressed") and file **no** trade for it. This codifies what the analyzer improvised on 2026-07-09; the dollar/rotation-governed intl redesign is a **separate, human-reviewed change** (see FOLLOWUPS — do not improvise it here).
+The international sleeve is **rotation/DXY-governed**, sized deterministically by the
+collector's **`intl_governance`** block (roster_revision_2026-07 §4). You do **not**
+compute the intl tilt yourself — you **echo** the block and execute toward its targets:
 
-When the rotation call disagrees with the quadrant call (e.g. Q1 says SPY/QQQ but rotation score is 7), **the rotation call wins on the international vs domestic split** — **subject to the INTERIM gate rule above: a CLOSED gate suppresses the international tilt to size 0**; the quadrant call still drives the sector mix inside each region.
+- **`intl_governance.sleeve_target_pp`** = the TOTAL intl sleeve (broad + leader), in
+  % of equity. **`broad_pp`** goes to the `intl_broad` selected (VXUS); **`leader_pp`**
+  goes to **`leader_pick`** (the `intl_leader` slot). `reference_weights` already carries
+  these as the intl targets — execute toward them like any sleeve.
+- The ladder (composite ≤3 → base only; 4–6 → base +1pp leader; ≥7 → base +3pp, up to 2
+  leaders) is **already applied** in the block, as are the **DXY anti-chase** (headwind →
+  leader 0; neutral → halved) and the **gate modifier** (a CLOSED gate **halves** the
+  leader tilt — it does **not** suppress it to zero). Echo `intl_governance.modifiers`
+  so the reader sees which fired.
+- **`leader_pick`** is the strongest `leaders_vs_spy` name **in the `intl_leader` pool**
+  (≥ +5pp, MA cross not `bearish_intl`, tie-broken bullish > mixed); `null` when none
+  qualify. When it is null, the leader slot sits at 0 — say so.
+- **De-rotation** is echoed in `intl_governance.de_rotation` (`trigger` ∈
+  `composite_fade` / `leader_lost_status` / `ma_bearish`). When triggered, the leader
+  slot unwinds to 0 — state which trigger fired.
+- **The `intl_leader` slot follows `leader_pick` automatically** (the one auto-selected
+  role). Execute a leader change as a **sell-old / buy-new at the sleeve target** — a
+  within-role substitution the validator allows even under a closed gate. All OTHER
+  role member switches remain human-gated (`sleeve_selection`).
+- Always state `rotation_score.composite`, the category, and the sleeve target (e.g.
+  "composite 8 rotation_underway; intl sleeve 5.0pp = VXUS 2.0 + AIA 3.0; gate closed →
+  leader halved").
 
 ### Event-driven override (read `market_shock` before everything else)
 
@@ -861,16 +879,22 @@ Then the numbered sections, in this order:
    | Q2 Reflation | … | … | … |
    | Q3 Stagflation | … | … | … |
    | Q4 Deflation | … | … | … |
+   | Intl (rotation-governed) | … | … | … |
    | Cash sleeve (cash + SGOV) | … | … | … |
 
    - **Reference** = `reference_weights.by_quadrant[<quadrant>]` echoed **verbatim**
      (the collector already aggregated `target_weights_pct` by primary quadrant, with
-     SGOV + literal cash → the `cash_sleeve` row). **Do NOT re-sum the per-name targets
+     SGOV + literal cash → the `cash_sleeve` row and the two intl roles → the `intl` row).
+     **Do NOT re-sum the per-name targets
      yourself** — the 2026-07-09 report did and produced a Q3 total (42.9%) that
      disagreed with its own per-name footnote (~58%) and a Reference column that summed
      to ~89.5% instead of 100%. **Recommended = Reference ± your logged overrides**
      (see below) — it is NOT a free-hand number. If Recommended differs from Reference
      for any row, an override record must justify the difference.
+
+   - The **Intl** row is the rotation-governed sleeve (`intl_governance.sleeve_target_pp`
+     = VXUS broad + the leader slot) — NOT a US quadrant. Do not fold intl names into
+     Q1/Q2.
 
    - Assign each held name to its **primary** quadrant only so the rows sum to
      ~100% without double-counting; put cash + SGOV in the Cash sleeve row. This is
@@ -893,6 +917,7 @@ Then the numbered sections, in this order:
    | Q2 Reflation | … | … |
    | Q3 Stagflation | … | … |
    | Q4 Deflation | … | … |
+   | Intl (rotation) | … | … |
 
    - Count each held name in every quadrant it serves, e.g. GLD → Q3+Q4; SGOV → Q4
      (primary) + Q3 (secondary); XLP/MCK → Q3+Q4; TIP/DBA/PDBC/VDE → Q2+Q3. **SGOV is
