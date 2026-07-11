@@ -1,9 +1,18 @@
 {
   "$schema": "https://json.schemas.azure.com/staticwebapp.config.json",
   "routes": [
-    { "route": "/api/*", "allowedRoles": ["anonymous"] },
-    { "route": "/*",     "allowedRoles": ["anonymous"] }
+    { "route": "/.auth/*", "allowedRoles": ["anonymous"] },
+    { "route": "/login",   "redirect": "/.auth/login/aad" },
+    { "route": "/logout",  "redirect": "/.auth/logout" },
+    { "route": "/api/*",   "allowedRoles": ["owner"] },
+    { "route": "/*",       "allowedRoles": ["owner"] }
   ],
+  "responseOverrides": {
+    "401": {
+      "statusCode": 302,
+      "redirect": "/.auth/login/aad?post_login_redirect_uri=.referrer"
+    }
+  },
   "globalHeaders": {
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
