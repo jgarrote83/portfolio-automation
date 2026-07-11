@@ -110,6 +110,41 @@ class FMPClient:
             return result["historical"] or []
         return result if isinstance(result, list) else []
 
+    # ---- DayTrade Lab (all verified on Starter 2026-07-07 — spec §2) --------
+    def get_shares_float(self, ticker: str) -> dict | None:
+        """``{floatShares, outstandingShares, freeFloat, date, ...}`` or None."""
+        result = self._get("/shares-float", {"symbol": ticker})
+        if isinstance(result, list) and result:
+            return result[0]
+        return None
+
+    def get_sec_filings(self, ticker: str, from_date: str, to_date: str,
+                        limit: int = 100) -> list[dict] | None:
+        """SEC filings ``{formType, filingDate, ...}`` for a symbol in [from, to].
+
+        Returns None (NOT []) when the endpoint itself fails, so callers can
+        distinguish "no filings" from "cannot measure" — the lab fails closed on
+        the latter for sub-$2B names (spec §3 gate 4).
+        """
+        result = self._get("/sec-filings-search/symbol", {
+            "symbol": ticker, "from": from_date, "to": to_date,
+            "page": 0, "limit": limit,
+        })
+        return result if isinstance(result, list) else None
+
+    def get_aftermarket_quote(self, ticker: str) -> dict | None:
+        """Extended-hours quote ``{bidPrice, askPrice, volume, timestamp}``.
+
+        Candidate consolidated pre-market volume source (spec §2 DECISION 0):
+        endpoint returns 200 on Starter, but the ``volume`` field's session
+        semantics at 09:20 ET are UNVERIFIED — do not gate on it until
+        ``consolidated_source`` is flipped to "fmp" after a live-morning check.
+        """
+        result = self._get("/aftermarket-quote", {"symbol": ticker})
+        if isinstance(result, list) and result:
+            return result[0]
+        return None
+
     # ---- calendars ---------------------------------------------------------
     def get_earnings_calendar(self, from_date: str, to_date: str) -> list[dict]:
         result = self._get("/earnings-calendar", {"from": from_date, "to": to_date})
