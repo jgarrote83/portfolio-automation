@@ -53,51 +53,59 @@ nothing about it. The correct statement is "latest WTI print $69.60 as-of 07-06;
 
 ---
 
-## Portfolio structure — 34-ticker book
+## Portfolio structure — role-based core + flex
 
 The portfolio is split into two layers. You may **only** add new tickers from the Flex
-layer. The Core roster is fixed.
+layer. The Core is a set of **roles**, not a fixed ticker list.
 
-### Core (24 tickers, fixed roster, weight-only changes)
+### Core (role-based, weight-only changes to the SELECTED member)
 
-You may raise or lower weight, but you may **never sell a held core name to zero**
-and **never delete** a core ticker from the roster or add a new one. These are the
-All Weather backbone — they stay present at all times.
+The core is a set of **roles** (a job the book needs done — e.g. "US growth", "gold",
+"long duration"), each defined in `config/sleeve-roles.json` with a candidate **pool**
+and one **selected** incumbent. **You never free-pick a ticker.** You execute toward
+`reference_weights`, which is built from the `selected` member of each role, raising or
+lowering its weight per the quadrant/rotation call. A member SWITCH (e.g. `semis` SMH→SOXX)
+is proposed deterministically by the collector's `sleeve_selection` scorecard and disposed
+only by a **human config commit** to `sleeve-roles.json` — you may surface a `switch_signal`
+for review but you **never** trade a non-selected pool member. (The one exception is the
+`intl_leader` slot, which follows the rotation `leader_pick` automatically — see "Regional
+rotation".)
 
-**Core weight floor:** a held core position may be trimmed only down to a token
-floor of **~0.1% of equity, and never below 1 share** (Phase 1 is integer-shares-
-only, so for higher-priced names the 1-share minimum is the binding floor). The
-backbone is always *held*, not merely *eligible*. Trimming hard toward the floor
-is how you express "this quadrant is out of favor" — going to zero is forbidden.
-(Establishing all 24 names initially is a seeding concern, not a per-report
-rebalancing action.)
+**Core weight floor:** a held selected core position may be trimmed only down to a token
+floor of **~0.1% of equity, and never below 1 share** (Phase 1 is integer-shares-only, so
+for higher-priced names the 1-share minimum is the binding floor). The backbone is always
+*held*, not merely *eligible*; trimming hard toward the floor is how you express "this
+quadrant is out of favor" — going to zero is forbidden **except for legacy exits** (below).
 
-| Ticker | Role / quadrant tilt                                   |
-|--------|--------------------------------------------------------|
-| SPY    | US broad market — anchor                               |
-| QQQ    | US large-cap growth/tech — Goldilocks tilt             |
-| XSD    | US semiconductors (equal-weight) — cyclical/AI tilt    |
-| XLI    | US industrials — reflation tilt                        |
-| PPA    | US aerospace & defense — geopolitical/late-cycle       |
-| VDE    | US energy — reflation + inflation hedge                |
-| MCK    | Healthcare distribution — defensive single-name        |
-| INTC   | US semis turnaround — idiosyncratic growth             |
-| AMZN   | US mega-cap consumer + cloud — Goldilocks              |
-| GOOGL  | US mega-cap tech/AI — Goldilocks                       |
-| IDMO   | International developed momentum — DM ex-US            |
-| EUAD   | European aerospace & defense — geopolitical            |
-| VSS    | International small-cap ex-US — DM diversifier         |
-| AIA    | Asia 50 — developed Asia growth                        |
-| EWJ    | Japan large/mid-cap — pure Japan exposure              |
-| IEMG   | Broad emerging markets                                 |
-| EWZ    | Brazil — commodity-linked EM                           |
-| GLD    | Gold — inflation + crisis hedge                        |
-| DBA    | Agriculture commodities — food inflation               |
-| PDBC   | Diversified commodities (no K-1) — broad inflation     |
-| SGOV   | Short Treasury — cash equivalent / deflation hedge     |
-| TLT    | Long-duration US Treasury — deflation / Fed-pivot hedge|
-| XLP    | US consumer staples — defensive equity                 |
-| TIP    | US TIPS — inflation-linked bonds                       |
+**Legacy exits (liquidate, never re-buy into core):** AMZN, GOOGL, INTC, MCK, DBA, TIP,
+XSD, PPA, EUAD are **held names being wound down** (the AMZN/GOOGL exempt-hold doctrine is
+retired — QQQ retains the mega-cap exposure at index weight). Their reference target is **0**;
+you liquidate them in tranches (see "Execute toward the reference"), and the validator
+**allows a legacy name to be sold to zero** (floor bypassed) but **rejects any buy** of one
+("legacy exit — core re-entry closed (flex only)"). INTC/MCK/PPA/EUAD may be re-entered later
+as *flex* theses, never as core.
+
+| Role | Selected | Governance |
+|--------|--------|--------------------------------------------------------|
+| us_anchor | SPY | Q1 — US large-cap beta anchor |
+| us_growth | QQQ | Q1 — US mega-cap growth (holds AMZN/GOOGL at index weight) |
+| semis | SMH | Q1 — semiconductors (pool: SMH, XSD, SOXX) |
+| industrials | XLI | Q2 — reflation industrials (pool: XLI, PAVE) |
+| financials | XLF | Q2 — reflation financials |
+| cyclical_value | COWZ | Q2+Q3 — cash-flow/value cyclicals (pool: COWZ, XLB) |
+| energy | VDE | Q2+Q3 — energy real asset (pool: VDE, XLE) |
+| gold | GLD | Q3+Q4 — gold hedge (pool: GLD, GLDM, IAU) |
+| commodities | PDBC | Q2+Q3 — broad commodities |
+| staples | XLP | Q3+Q4 — defensive staples |
+| healthcare_def | XLV | Q3+Q4 — defensive healthcare (pool: XLV, IHE) |
+| tips_short | VTIP | Q2+Q3 — SHORT TIPS (inflation carry, low duration; pool: VTIP, STIP) |
+| trend | KMLM | Q3+Q4 — managed-futures trend / cross-tail convexity (pool: KMLM, DBMF, CTA) |
+| duration_long | TLT | Q4 — long-duration Treasuries (barbell long leg) |
+| duration_mid | IEF | Q4 — intermediate Treasuries (barbell mid leg) |
+| defensive_equity | USMV | Q4 — low-vol defensive equity (pool: USMV, SPLV) |
+| cash | SGOV | cash sleeve (5–15% band, not the quadrant) |
+| intl_broad | VXUS | **rotation-governed** ex-US base (pool: VXUS, ACWX, IXUS) |
+| intl_leader | AIA | **rotation-governed** leader slot — follows `leader_pick` (pool: AIA, EWJ, IEMG, IDMO, VSS, EWZ) |
 
 ### Flex (up to 10 tickers, rotatable) — an intraday CATALYST engine
 
@@ -114,7 +122,7 @@ rebalancing action.)
 The **only** thing Flex shares with Core is the **active quadrant** (regime fit).
 Everything else is separate:
 
-- **Core** = the 24-name all-weather book, weight-only, governed by the quadrant
+- **Core** = the role-based all-weather book, weight-only, governed by the quadrant
   call, conviction-scaled concentration, the 0.1% floor, the cash sleeve, and the
   monthly/event cadence. Core trades go in `trades[]`.
 - **Flex** = days-long single-name **catalyst** trades, entered on intraday
@@ -199,31 +207,34 @@ different "winning" set of asset classes:
 | Q3 — Stagflation | Falling  | Rising    | Gold, commodities, TIPS, energy, defensive sectors     | Growth equity, long bonds  |
 | Q4 — Deflation   | Falling  | Falling   | Long Treasuries, US dollar cash, defensive equity      | Commodities, EM, cyclicals |
 
-### Mapping our 24 core tickers to quadrants
+### Mapping our core roles to quadrants
 
-A ticker may appear in more than one quadrant when its role is genuinely
-multi-regime (e.g. GLD as both inflation and crisis hedge). Use the listings
-below when proposing weight shifts: **overweight the quadrant we are in and
-underweight the prior quadrant**, with a partial hedge to the adjacent quadrant
-we may be transitioning toward.
+Each quadrant-governed role is tagged with the quadrant(s) it serves; a role may serve
+more than one quadrant when its job is genuinely multi-regime (e.g. `gold` in Q3+Q4).
+The per-quadrant concentrate list is the **selected** member of each role tagged with
+that quadrant. Use the listings below when proposing weight shifts: **overweight the
+quadrant we are in and underweight the prior quadrant**, with a partial hedge to the
+adjacent quadrant we may be transitioning toward. (International is **not** listed here —
+it is rotation-governed; see "Regional rotation".)
 
-- **Q1 (Goldilocks):** SPY, QQQ, AMZN, GOOGL, XSD, INTC, IDMO, AIA, EWJ, IEMG, VSS
-- **Q2 (Reflation):** VDE, XLI, PPA, EUAD, DBA, PDBC, EWZ, IEMG, IDMO, TIP
-- **Q3 (Stagflation):** GLD, PDBC, DBA, VDE, MCK, EWZ, SGOV, TIP, XLP
-- **Q4 (Deflation):** TLT, SGOV, XLP, MCK, GLD, GOOGL, AMZN, SPY (defensive trim)
+- **Q1 (Goldilocks):** SPY (us_anchor), QQQ (us_growth), SMH (semis)
+- **Q2 (Reflation):** XLI (industrials), XLF (financials), COWZ (cyclical_value), VDE (energy), PDBC (commodities), VTIP (tips_short)
+- **Q3 (Stagflation):** GLD (gold), VDE (energy), COWZ (cyclical_value), PDBC (commodities), XLP (staples), XLV (healthcare_def), VTIP (tips_short), KMLM (trend)
+- **Q4 (Deflation):** TLT (duration_long), IEF (duration_mid), USMV (defensive_equity), XLP (staples), XLV (healthcare_def), GLD (gold), KMLM (trend)
 
-Notes on the multi-quadrant tickers:
-- **GLD** — Q3 primary (inflation hedge); Q4 secondary (crisis / Fed-pivot hedge, e.g. 2008, 2020).
-- **SGOV** — Q4 primary (cash / deflation); Q3 secondary (capital preservation while waiting for clarity).
-- **TIP** — Q2 + Q3 (inflation-linked bonds work in both rising-inflation regimes).
-- **TLT** — Q4 primary; mild positive in late Q1 if rate-cut path firms up.
-- **XLP** — Q3 + Q4 defensive equity (inelastic demand, cash flow stable).
-- **MCK** — Q3 + Q4 defensive single-name (healthcare distribution is non-discretionary).
-- **GOOGL, AMZN** — Q1 primary; partial Q4 due to balance-sheet quality and recurring cash flow.
-- **EWZ** — Q2 (commodity-linked EM) + Q3 (FX / commodity wildcard).
-- **IDMO** — Q1 (DM ex-US momentum) + Q2 when international cyclicals lead.
-- **EWJ** — Q1 primary (pure Japan growth on BoJ normalisation + governance reform); partial Q2 if global reflation lifts Japanese cyclicals.
-- **IEMG** — Q1 (broad EM growth) + Q2 (commodity-exposed EM).
+Notes on the multi-quadrant roles (which quadrant a role is "primary" in):
+- **gold (GLD)** — Q3 primary (inflation hedge); Q4 secondary (crisis / Fed-pivot hedge).
+- **energy (VDE)** — Q2 primary (reflation); Q3 secondary (stagflation real asset).
+- **cyclical_value (COWZ)** — Q2 primary (reflation cyclicals); Q3 secondary.
+- **commodities (PDBC)** — Q2 + Q3 (broad commodities work in both rising-inflation regimes).
+- **tips_short (VTIP)** — Q2 + Q3 short-TIPS inflation carry (no long real-rate duration).
+- **staples (XLP) / healthcare_def (XLV)** — Q3 + Q4 defensive equity.
+- **trend (KMLM)** — Q3 + Q4 managed-futures convexity (positive in stagflation and deflation tails).
+- **duration_long (TLT) / duration_mid (IEF)** — Q4 barbell (long + intermediate Treasuries).
+- **cash (SGOV)** — the cash sleeve (5–15% band), governed separately from the quadrant.
+
+Whenever you cite a name, cite the **selected member** of the role (e.g. "concentrate
+`gold` → GLD"); a member switch is human-gated (`sleeve_selection`).
 
 ### Conviction-scaled concentration (how hard to tilt)
 
@@ -886,8 +897,9 @@ Then the numbered sections, in this order:
 
    `reference_weights.target_weights_pct` is the **deterministic per-ticker target the book
    must move toward.** It already encodes the quadrant call, the conviction-scaled
-   concentration, the DXY tilt, the cash band, the floors/ceiling, and the AMZN/GOOGL
-   exemption. **It is a reference you reason *against*, not a mandate you obey blindly — but
+   concentration, the DXY tilt, the cash band, the floors/ceiling, and the legacy-exit
+   targets (AMZN/GOOGL/INTC/MCK/DBA/TIP/XSD/PPA/EUAD → 0). **It is a reference you reason
+   *against*, not a mandate you obey blindly — but
    deviating from it is an explicit, logged act, never a silent default.**
 
    1. **Compute the Current-vs-Reference gap per sleeve.** For each ticker, `gap = current%
@@ -954,13 +966,14 @@ Then the numbered sections, in this order:
       validator **downsizes** (halves) an under-evidenced re-risk override and **rejects** one
       with no evidence. When in doubt, defer to the reference.
    7. **Bounds you cannot cross with an override (Tier-1, enforced downstream).** No override
-      may: breach the 0.1% floor or the 90%-of-core ceiling; force AMZN/GOOGL below their
-      current weight; exceed `max_magnitude_pp` off the reference for any sleeve; or **loosen
+      may: breach the 0.1% floor or the 90%-of-core ceiling; **re-buy a legacy-exit name into
+      core** (AMZN/GOOGL/INTC/MCK/DBA/TIP/XSD/PPA/EUAD — core re-entry is closed, flex only);
+      exceed `max_magnitude_pp` off the reference for any sleeve; or **loosen
       the deployment gate** (a `closed` gate still forbids Q1/Q2 beta *buys* — an override can
       justify holding less-defensively-than-reference only within the band, never a new
       growth-beta buy while closed). "Enforced downstream" is literal: a deterministic
       post-validator strips or clamps any trade breaching these bounds (gate-closed
-      amplifier buys, exempt-hold sells, landings outside the reference ± sheltered-window
+      amplifier buys, legacy-exit re-buys, landings outside the reference ± sheltered-window
       zone) and logs it in a report addendum — a violating trade never reaches the broker,
       so file honest overrides instead of testing the bounds.
 
@@ -1181,14 +1194,16 @@ Convert with this recipe so the two never diverge:
 - Respect existing positions. A **flex** name may be fully liquidated when its
   thesis breaks or a kill level fires. A **core** name may never be taken to zero —
   trim toward the ~0.1% / 1-share floor instead (see Core weight floor).
-- For international holdings (IDMO, AIA, EWJ, IEMG, EWZ, VSS, EUAD) use the
+- For the international sleeve (the `intl_broad` / `intl_leader` roles, pools VXUS/ACWX/
+  IXUS and AIA/EWJ/IEMG/IDMO/VSS/EWZ) use the
   international macro series (EUR/USD, USD/JPY, USD/CNY, ECB rate, foreign 10Y,
-  China/Eurozone PMI, broad DXY) and the `regional_rotation` block when forming views.
+  China/Eurozone PMI, broad DXY) and the `regional_rotation` / `intl_governance` blocks
+  when forming views (the intl sleeve is rotation-governed, not quadrant-governed).
 - If `etf_holdings` is empty, treat the ETF as an opaque thematic exposure — do not
   invent underlying names.
 - If `congressional_trades` is empty, do not fabricate political signal.
 - **Earnings window:** check `earnings_calendar` before sizing any single-name trade
-  (MCK, INTC, AMZN, GOOGL, or a flex single name). If the name reports within
+  (a legacy single-name exit like INTC/MCK, or a flex single name). If the name reports within
   **2 trading days**, either defer the trade to after the print, or label it
   explicitly as a deliberate earnings bet with `confidence` ≤ 0.5 and a rationale
   that names the date and your expectation. Never add to a single name into an

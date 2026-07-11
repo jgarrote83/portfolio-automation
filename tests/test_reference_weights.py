@@ -122,13 +122,15 @@ def test_ceiling_respected_active_quadrant_target_capped():
     assert rw["active_quadrant_target_pct_of_core"] <= CFG["active_quadrant_ceiling_pct_of_core"]
 
 
-def test_amzn_googl_never_forced_below_current():
-    """Exempt holds keep at least their current weight even in an out-of-favor (Q3) regime."""
-    g, i = _axes("falling", "rising")  # Q3 — AMZN/GOOGL are Q1, would otherwise floor
+def test_legacy_amzn_googl_not_pinned_after_exempt_retirement():
+    """Exempt-hold doctrine RETIRED (roster_revision_2026-07) — AMZN/GOOGL are no
+    longer pinned; in an out-of-favor Q3 regime they trim toward the floor like any
+    non-concentrate name."""
+    g, i = _axes("falling", "rising")  # Q3 — AMZN/GOOGL carry no quadrant role now
     paper = _paper({"AMZN": 6.0, "GOOGL": 7.0, "GLD": 10, "SGOV": 10})
     rw = _build(paper, g, i, _gate("closed", "neutral"))
-    assert rw["target_weights_pct"]["AMZN"] >= 6.0 - 0.5
-    assert rw["target_weights_pct"]["GOOGL"] >= 7.0 - 0.5
+    assert rw["target_weights_pct"].get("AMZN", 0) < 1.0
+    assert rw["target_weights_pct"].get("GOOGL", 0) < 1.0
 
 
 def test_q3_trims_spy_qqq_to_floor():
@@ -156,18 +158,16 @@ def test_conviction_scaling_low_score_concentrates_harder():
             > low_conv["active_quadrant_target_pct_of_core"])
 
 
-def test_dollar_tilt_falling_dxy_favors_international():
-    """Falling dollar (tailwind) tilts the Q1 amplifier toward intl vs US growth."""
+def test_dollar_tilt_label_reflects_dxy():
+    """The dollar-switch LABEL still resolves from DXY. Intl SIZING moved out of the
+    quadrant math to intl_governance (roster_revision_2026-07) — the intl sleeve is no
+    longer sized inside reference_weights' quadrant concentrate."""
     g, i = _axes("rising", "falling")  # Q1
-    paper = _paper({"SPY": 10, "QQQ": 10, "AIA": 5, "EWJ": 5, "SGOV": 10})
+    paper = _paper({"SPY": 10, "QQQ": 10, "SGOV": 10})
     intl = _build(paper, g, i, _gate("open", "dovish"), rot=_rot("tailwind"))
     us = _build(paper, g, i, _gate("open", "dovish"), rot=_rot("headwind"))
     assert intl["dollar_tilt"] == "international"
     assert us["dollar_tilt"] == "us_growth"
-    # intl leg (AIA+EWJ) should get a bigger share under a tailwind than under a headwind
-    intl_share = intl["target_weights_pct"].get("AIA", 0) + intl["target_weights_pct"].get("EWJ", 0)
-    us_share = us["target_weights_pct"].get("AIA", 0) + us["target_weights_pct"].get("EWJ", 0)
-    assert intl_share > us_share
 
 
 def test_borderline_blend_is_specific_not_degenerate():
@@ -252,13 +252,13 @@ def test_no_read_routes_to_ballast_not_megacaps():
     assert tw["SPY"] < 1 and tw["QQQ"] < 1
 
 
-def test_no_read_exempt_pinned_at_current_not_scaled_up():
+def test_no_read_legacy_names_not_pinned_after_exempt_retirement():
     paper = _paper({"AMZN": 3.2, "GOOGL": 5.4, "GLD": 1.9, "TLT": 1.9, "SGOV": 23.8}, cash_pct=2.0)
     rw = _no_read_rw(paper)
     tw = rw["target_weights_pct"]
-    # pinned at current weight (within rounding), never inflated by the renormalize
-    assert abs(tw["GOOGL"] - 5.4) < 0.6
-    assert abs(tw["AMZN"] - 3.2) < 0.6
+    # exempt retired -> AMZN/GOOGL are no longer pinned; they trim toward the floor.
+    assert tw.get("GOOGL", 0) < 1.0
+    assert tw.get("AMZN", 0) < 1.0
 
 
 def test_no_read_sums_to_about_100():

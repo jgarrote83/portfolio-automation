@@ -26,8 +26,8 @@
   },
   "_flex_sleeve_note": "Flex aggregate <= ~15% until it clears its hurdle in paper, hard cap <= 25% (spec §7). Enforced by the flex engine; a SEPARATE sleeve outside the core block.",
 
-  "exempt_holds": ["AMZN", "GOOGL"],
-  "_exempt_holds_note": "Permanent conviction holds — never trimmed below current weight / never forced down by the reference-weight math (balance-sheet quality + recurring cash flow give them a partial defensive role across the cycle).",
+  "exempt_holds": [],
+  "_exempt_holds_note": "RETIRED (roster_revision_2026-07). The permanent AMZN/GOOGL exempt hold is gone — both are LEGACY_EXITS now (liquidated in tranches, never re-bought into core; QQQ retains the mega-cap exposure at index weight). Kept as an empty list so the validator V2 rule and the reference-weight pinning become NO-OPS rather than being deleted — the machinery survives for any future designated hold.",
 
   "conviction_ladder_pct_of_core": [
     {"risk_score_max": 2, "conviction": "very_high", "active_quadrant_target": 90.0},
