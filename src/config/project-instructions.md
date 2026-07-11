@@ -751,6 +751,48 @@ Never quote individual past trades from this block in the report — it contains
 aggregates by design. Summarize the calibration takeaway in one or two lines in the
 Recommendations or Themes section when `sample_size` is meaningful.
 
+### Regime-call accountability — read `quadrant_performance` (FOLLOWUPS #12)
+
+The 2026-07-02 report rotated into Q3/Q4 while the Q3 basket was the worst
+performer since inception, and nothing forced the analyzer to engage with that
+tension. `quadrant_performance` closes that gap: a per-bucket (Q1–Q4) scorecard of
+basket-vs-SPY performance, computed by the collector from the SAME roster the
+book actually holds — **describe-only, like `divergences` and `transition_watch`
+before Phase 4 wired them in: it never alters `reference_weights` or any
+deterministic gate.** Your job is to read it honestly, not to defend the regime
+call at all costs.
+
+- **Echo the numbers, never recompute them.** For each bucket in
+  `quadrant_performance.favored_today`, its `favored_streak` (consecutive sessions
+  favored), `streak_excess_pp` (the basket's cumulative excess vs SPY over that
+  streak), and `lagging_sessions` (the current run of sessions where that
+  as-of-the-day streak excess was negative) are pre-computed — cite them verbatim
+  in the Summary (see above) and the Dashboard's **Regime P&L** row.
+- **When `suspect` is true for a favored bucket, write ONE explicit paragraph
+  confronting it** (in Section 2, alongside the quadrant call): the regime read
+  says favor that bucket; the market has disagreed for `lagging_sessions` sessions
+  at `streak_excess_pp`; state plainly which is more likely wrong and why. This is
+  a **prose/judgment gate, not a validator rule** — nothing downstream blocks a
+  trade over it.
+- **The evidentiary bar rises, it does not close.** Any trade that INCREASES a
+  suspect bucket's aggregate weight requires you to either (a) defend it in that
+  paragraph with evidence beyond the axes themselves — `transition_watch`, an
+  active `market_implied`-style divergence, bond/labor confluence — or (b) hold
+  the increase and say so explicitly. A trade that reduces or merely maintains the
+  bucket's weight is unaffected (de-risking a suspect bucket needs no extra
+  defense — same asymmetry as the override protocol's de-risk/re-risk doctrine).
+  You may still increase a suspect bucket — this never overrides your judgment —
+  but you must show your work.
+- **Data integrity.** If `quadrant_performance.available` is false or a bucket is
+  absent from `buckets`, say so in one line and move on — **do not** reconstruct
+  streaks or returns from raw `prices`/`closes` yourself; the block is the only
+  source of truth for this metric.
+- **Roster seam.** `quadrant_performance.roster_note` explains that basket
+  composition is as-of the CURRENT roster; new members' bases start
+  ~2026-07-10, so early-window (30d) returns under-represent them — the same
+  caveat as the `/performance` web chart. Do not treat a thin 30d read for a
+  recently-reconstituted bucket as a strong signal either way.
+
 ---
 
 ## Inputs you will receive (every run)
@@ -810,6 +852,7 @@ A single JSON snapshot for one trading day containing:
 - `transition_watch` — the deterministic **pre-staging** signal (`active`, `projected_quadrant`, `direction`, `staged_fraction`, `basis`, `status`). **Already baked into `reference_weights`** (see its `transition_lean`) — surface it as context, do **not** apply it a second time.
 - `flex_state` — **the intraday Flex engine's computed state** (it owns the flex sleeve end-to-end). Per held flex name: the **exit** decision (`next_action` ∈ hold/scale_out/trail/time_stop/stopped, `r_multiple`, `trail_stop`). Per nomination evaluated: the **entry** decision (`entry_trigger` pass/fail, `skip_reason`, `binding`, `size_shares`). Also `quadrant` (the deterministic quadrant the engine used), `as_of`, and **`reconciliation`** (`{status, engine_held, broker_held}` — the deterministic engine-vs-broker check). **When `reconciliation.status` is `ok`, echo the engine's numbers; never recompute or override a flex price/stop/size. When it is `mismatch`, the PAPER ACCOUNT is canonical** — count `broker_held` names as real flex holdings (🔴), run kill-criteria against the broker position using the last recorded kill price from flex/`TradeHistory`, and open no new flex entry in the affected symbol until resolved (see "Reading flex_state" above). Absent ⟹ engine disabled or not yet run that day — say so, don't invent flex levels.
 - `performance` — the scoreboard (Phase C): account equity vs fully-invested SPY since `inception_date` (`return_since_inception_pct`, `spy_return_since_inception_pct`, `excess_vs_spy_pp`), `rolling` 30/60/90d windows (null until that much history exists), `max_drawdown_pct`, and `account.cash_pct`. This is the mission metric — beating SPY. If `available` is false (pre-funding / Alpaca fallback day), say so and skip the scoreboard line.
+- `quadrant_performance` — regime-call accountability (FOLLOWUPS #12, describe-only): per Q1-Q4 bucket, `ret_30d_pct`/`ret_60d_pct`/`ret_90d_pct` + `excess_Nd_pp` vs SPY, `favored_streak`, `streak_excess_pp`, `lagging_sessions`, and a `suspect` flag; plus top-level `spy_ret_30d_pct`, `favored_today`, and `roster_note`. **Never touches `reference_weights`** — see "Regime-call accountability" below for the mandatory paragraph when `suspect` is true. If `available` is false, say so and skip the Regime P&L dashboard row's numbers.
 - `track_record` — the learning signal (Phase C): aggregate hit-rates of your own past recommendations vs SPY at the 60d headline horizon (`by_layer` / `by_trigger` / `by_thesis`), a confidence `calibration` table, `over_trading.avg_trades_per_day`, `sample_size`, and `horizons` (30/90d for context). See "Track record" below for how to use it. Aggregates only — never per-name.
 - `override_record` — the judgment loop (Phase 5): your matured overrides graded against the **reference-path counterfactual** ("did disagreeing beat obeying") at each record's own `falsifier_date`. `overall` / `by_direction` / `by_status` (+ `by_premise` once a premise reaches n≥10) with win rate + avg `excess_pp`; `enforced_separately` grades the Finding-2 enforcement system, not you. Calibration signal only — see "Track record" below for the rules.
 - `recent_reports` — up to 5 of your previous daily reports for continuity
@@ -840,6 +883,7 @@ analysis. Use exactly these rows, in this order, with a status glyph (🟢 ok /
 | Signal | Reading | Note |
 |---|---|---|
 | **Regime** | {Qx} ({label}){, vs Qy if borderline} | growth {dir} / inflation {dir} |
+| **Regime P&L** | {favored bucket(s)} streak {N}d, {±streak_excess_pp}pp vs SPY | {🔴 suspect / 🟡 favored+negative, below threshold / 🟢 favored+positive or nothing favored} |
 | **Risk Score** | {X}/10 | {one-phrase driver} |
 | **Deployment gate** | {🟢 OPEN / 🔴 CLOSED — = `regime_gate.status`} | {regime_gate.reasons, ≤6 words} |
 | **Growth — GDPNow** | {growth_axis.direction} ({latest}%, traj {first}→{last}) | {confidence; 🔴 if indeterminate} |
@@ -865,6 +909,12 @@ Then the numbered sections, in this order:
    since inception (`excess_vs_spy_pp`) and current `account.cash_pct` — and if the
    book is trailing SPY while cash is high, attribute it to cash drag rather than
    stock selection (this is the mission metric; surface it, do not bury it).
+   When `quadrant_performance.available` is true, echo the CURRENTLY favored
+   bucket(s)' `favored_streak`, `streak_excess_pp`, and `lagging_sessions` verbatim
+   (numbers from the block, never recomputed) — one clause is enough, e.g. "Q3 has
+   been favored 14 sessions, −6.2pp vs SPY over that run." See "Regime-call
+   accountability" below for the full rule (including the mandatory paragraph when
+   `suspect` is true).
 2. **Macro & quadrant** — what the FRED data, FX, yields, and news flow imply.
    **Open this section by reproducing the Quadrant Reference table verbatim.** It is a
    fixed legend — identical in every report, it never changes — so the reader always has
