@@ -427,3 +427,55 @@ def test_amplifier_buy_without_same_role_sell_still_gated():
                           _ctx(deployment_gate="closed"))
     assert "SMH" in [r["symbol"] for r in res["rejected"]]
     assert any("gate" in s for s in res["rejected"][0]["validation"]["reasons"])
+
+
+# --- V1.5: selected-member-only buys (role-based roster seam) ---------------------
+
+def test_naked_non_selected_pool_member_buy_rejected():
+    """SOXX is a semis pool member but semis.selected = SMH — a buy of SOXX alone (no
+    substitution sell, gate open, a near-reference gap row) still gets rejected: a
+    non-selected pool member must never be buyable just because it reads as an
+    ordinary CORE_ROSTER name to V1/V3."""
+    gaps = [_gap("SOXX", 1.0, 2.0, price=100.0)]
+    res = validate_trades(gaps, [_t("SOXX", "buy", 10)], [], CFG,
+                          _ctx(deployment_gate="open"))
+    assert len(res["rejected"]) == 1
+    assert any("non-selected pool member" in s
+               for s in res["rejected"][0]["validation"]["reasons"])
+
+
+def test_selected_member_buy_passes_v1_5():
+    """Control: SMH (the selected member of the same role) passes the same check."""
+    gaps = [_gap("SMH", 1.0, 10.0, price=100.0)]
+    res = validate_trades(gaps, [_t("SMH", "buy", 10)], [], CFG,
+                          _ctx(deployment_gate="open"))
+    assert res["rejected"] == []
+    assert _statuses(res)["SMH"] == "passed"
+
+
+def test_intl_leader_buy_of_current_pick_passes_non_pick_rejected():
+    """intl_leader.selected is AIA in sleeve-roles.json, but the role auto-rotates to
+    intl_governance.leader_pick — a buy of the CURRENT pick (EWJ here, via
+    ctx["intl_leader_pick"]) passes even though sleeve-roles.json hasn't been
+    committed to match, while a buy of a different non-selected pool member (IEMG)
+    is still rejected."""
+    gaps = [_gap("EWJ", 1.0, 3.0, price=100.0), _gap("IEMG", 1.0, 3.0, price=100.0)]
+    res = validate_trades(
+        gaps, [_t("EWJ", "buy", 10), _t("IEMG", "buy", 10)], [], CFG,
+        _ctx(deployment_gate="open", intl_leader_pick="EWJ"),
+    )
+    assert {r["symbol"] for r in res["rejected"]} == {"IEMG"}
+    assert _statuses(res) == {"EWJ": "passed"}
+
+
+# --- V3 seam: buy with no matching gap row -----------------------------------------
+
+def test_buy_with_no_gap_row_rejected():
+    """have_account is True (an SPY row exists in the universe) but GLD has no row at
+    all — the buy must not silently skip the window; it is rejected outright."""
+    gaps = [_gap("SPY", 10.0, 10.0, price=100.0, held=100)]
+    res = validate_trades(gaps, [_t("GLD", "buy", 10)], [], CFG,
+                          _ctx(deployment_gate="open"))
+    assert len(res["rejected"]) == 1
+    assert any("no reference row" in s
+               for s in res["rejected"][0]["validation"]["reasons"])
