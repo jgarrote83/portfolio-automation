@@ -12,14 +12,17 @@ polices what the model DID.
 Rules, per trade, in order (fields normalized exactly as the executor normalizes them):
 
 V1 — Gate rule (absolute; overrides cannot cross): `deployment_gate` not "open" ⇒
-    REJECT any BUY of an Amplifier name (Damper/SGOV buys pass). Additionally a BUY of
-    any name off the CORE_ROSTER is rejected regardless of gate — `trades[]` is
-    core-only by contract; flex goes through `flex_nominations[]`.
+    REJECT any BUY of an Amplifier name (Damper/SGOV buys pass) — EXCEPT an equal-weight
+    within-role substitution (a buy of the role's new selected member funded by selling
+    the role's old member at >= the buy notional) which is regime-neutral and passes.
+    Additionally a BUY of any name off the CORE_ROSTER is rejected regardless of gate,
+    and a BUY of any LEGACY_EXITS name is rejected regardless of gate ("legacy exit —
+    core re-entry closed (flex only)") — `trades[]` is core-only and legacy names are
+    wind-down-only; flex goes through `flex_nominations[]`.
 
-V2 — Exemption rule (absolute): SELL of an EXEMPT_HOLDS name ⇒ REJECT. Per
-    risk-limits.json exemption semantics ("never trimmed below current weight") and
-    Phase B doctrine (core stop_loss/take_profit are null), there is no legitimate
-    exempt-hold sell in `trades[]`.
+V2 — Exemption rule (absolute): SELL of an EXEMPT_HOLDS name ⇒ REJECT. Retired in the
+    roster revision (EXEMPT_HOLDS is now empty, so this is a no-op) but kept so the
+    machinery survives for any future designated hold.
 
 V3 — Window rule (the core; D1's mirror image): the post-trade weight must land inside
     `[max(reference − W, sleeve_floor), reference + W]` where
@@ -67,7 +70,15 @@ from __future__ import annotations
 import logging
 import math
 
-from shared.quadrants import AMPLIFIER_INTL, AMPLIFIER_US, CORE_ROSTER, DAMPER, EXEMPT_HOLDS
+from shared.quadrants import (
+    AMPLIFIER_INTL,
+    AMPLIFIER_US,
+    CORE_ROSTER,
+    DAMPER,
+    EXEMPT_HOLDS,
+    LEGACY_EXITS,
+    role_of,
+)
 from shared.reference_execution import REFERENCE_EXECUTION_DEFAULTS, allowed_residuals
 
 logger = logging.getLogger(__name__)
@@ -146,6 +157,21 @@ def validate_trades(
     # Sells first (stable) so sell proceeds fund the buys we validate after them.
     ordered = sorted(trades or [], key=lambda t: _norm(t)[1] != "sell")
 
+    # Task D — equal-weight within-role substitution budget: sell notional per role
+    # (from sells of that role's pool members) available to fund a gate-closed buy of
+    # the role's new selected member. A within-role sell-old/buy-new at <= the old
+    # dollar weight is regime-neutral (no net-new Q1/Q2 beta), so it is exempt from the
+    # closed-gate amplifier-buy block. Legacy-exit sells are NOT in any role, so they
+    # never fund a substitution.
+    role_sub_budget: dict[str, float] = {}
+    for t in trades or []:
+        s, sd, q = _norm(t)
+        if sd == "sell" and q and q > 0:
+            r = role_of(s)
+            spx = float((rows.get(s) or {}).get("price") or 0)
+            if r and spx > 0:
+                role_sub_budget[r] = role_sub_budget.get(r, 0.0) + q * spx
+
     passed: list[dict] = []
     rejected: list[dict] = []
 
@@ -175,6 +201,11 @@ def validate_trades(
 
         # --- V1: gate + roster (absolute) --------------------------------------
         if side == "buy":
+            if sym in LEGACY_EXITS:
+                _reject(t, reasons + [
+                    "legacy exit — core re-entry closed (flex only)"
+                ])
+                continue
             if sym not in CORE_ROSTER:
                 _reject(t, reasons + [
                     f"off-roster buy {sym} forbidden in trades[] (core-only; flex goes "
@@ -182,11 +213,25 @@ def validate_trades(
                 ])
                 continue
             if gate != "open" and sym in _AMPLIFIER:
-                _reject(t, reasons + [
-                    f"deployment gate {gate or 'unknown'} — amplifier buy {sym} forbidden "
-                    "(Tier-1; an override cannot loosen the gate)"
-                ])
-                continue
+                # Equal-weight within-role substitution carve-out (Task D): a buy of the
+                # role's new selected member funded by selling the old member of the SAME
+                # role at >= this buy's notional is regime-neutral, not net-new beta.
+                rrole = role_of(sym)
+                bpx = float((rows.get(sym) or {}).get("price") or 0)
+                bnotional = (qty or 0) * bpx
+                if (rrole and bpx > 0 and bnotional > 0
+                        and role_sub_budget.get(rrole, 0.0) + 1e-6 >= bnotional):
+                    role_sub_budget[rrole] -= bnotional
+                    reasons.append(
+                        f"gate {gate or 'unknown'} — allowed as an equal-weight within-role "
+                        f"substitution (funded by a same-role sell; no net-new beta)"
+                    )
+                else:
+                    _reject(t, reasons + [
+                        f"deployment gate {gate or 'unknown'} — amplifier buy {sym} forbidden "
+                        "(Tier-1; an override cannot loosen the gate)"
+                    ])
+                    continue
 
         # --- V2: exemption (absolute) ------------------------------------------
         if side == "sell" and sym in exempt:
@@ -206,7 +251,12 @@ def validate_trades(
         if have_account and row is not None and px > 0:
             ref = float(row.get("reference_pct") or 0)
             w = max(residual.get(sym, 0.0), band)
-            lo = max(ref - w, floor_pct if sym in CORE_ROSTER else 0.0, 0.0)
+            # Legacy exits bypass the floor lower bound so an exit sell can reach 0
+            # (Task D — "sell-to-zero allowed ONLY for LEGACY_EXITS"). Every other core
+            # name keeps the sleeve floor.
+            floor_lb = 0.0 if sym in LEGACY_EXITS else (
+                floor_pct if sym in CORE_ROSTER else 0.0)
+            lo = max(ref - w, floor_lb, 0.0)
             hi = ref + w
             cur = cur_pct.get(sym, 0.0)
             delta_pp = qty * px / equity * 100.0

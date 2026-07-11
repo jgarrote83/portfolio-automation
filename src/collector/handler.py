@@ -26,6 +26,7 @@ from shared.quadrants import (
     CORE_ROSTER,
     DAMPER,
     EXEMPT_HOLDS,
+    LEGACY_EXITS,
     QUADRANT_BENCHMARK_ETF,
     QUADRANT_CONCENTRATE,
     active_quadrant,
@@ -50,7 +51,10 @@ _RISK_LIMITS_FILE = _SRC / "config" / "risk-limits.json"
 # Single stocks in the fixed core roster (idiosyncratic risk) — the single-name soft
 # cap applies to these, not to diversified ETF sleeves (which a high-conviction quadrant
 # is meant to concentrate past the cap). Everything else in CORE_ROSTER is an ETF.
-_CORE_SINGLE_STOCKS = ("AMZN", "GOOGL", "INTC", "MCK")
+# No core single stocks remain after the roster revision (all roles are ETFs; the
+# former single names AMZN/GOOGL/INTC/MCK are LEGACY_EXITS). Kept as an empty tuple so
+# the single-name soft-cap loop is a harmless no-op.
+_CORE_SINGLE_STOCKS: tuple[str, ...] = ()
 # Literal-cash buffer kept inside the cash sleeve (rest of the sleeve is SGOV).
 _CASH_BUFFER_PCT = 1.5
 
@@ -3061,8 +3065,8 @@ def _build_reference_weights(
             amp = [t for t in concentrate if is_amplifier(t)]
             non_amp = [t for t in concentrate if not is_amplifier(t)]
             if amp and (quad in ("Q1", "Q2")):
-                us = [t for t in amp if t in ("SPY", "QQQ", "XSD", "AMZN", "GOOGL", "INTC")]
-                intl = [t for t in amp if t not in us]
+                intl = [t for t in amp if t in set(AMPLIFIER_INTL)]
+                us = [t for t in amp if t not in set(AMPLIFIER_INTL)]
                 # 65/35 lean toward the favored leg; 50/50 if a leg is empty.
                 us_share, intl_share = (0.35, 0.65) if intl_lean else (0.65, 0.35)
                 if not intl:
@@ -3124,6 +3128,13 @@ def _build_reference_weights(
     for t, w in raw_core.items():
         if t in core_target:
             core_target[t] = max(floor, w)
+
+    # Legacy exits get a reference target of 0 (liquidate, never re-buy into core). They
+    # stay in CORE_ROSTER so a HELD legacy name still produces a gap row (reference 0)
+    # the validator can size an exit sell against — but they are never floored.
+    for t in LEGACY_EXITS:
+        if t in core_target:
+            core_target[t] = 0.0
 
     # Soft single-name cap applies only to SINGLE STOCKS (idiosyncratic risk), NOT to
     # diversified ETF sleeves — a high-conviction quadrant is *meant* to push one ETF

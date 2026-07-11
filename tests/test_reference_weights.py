@@ -246,8 +246,8 @@ def test_no_read_routes_to_ballast_not_megacaps():
     tw = rw["target_weights_pct"]
     # ballast dominates
     assert tw["GLD"] > 20 and tw["TLT"] > 20
-    # exempt mega-caps are NOT ballooned — held ~current, nowhere near 38%/22%
-    assert tw["GOOGL"] < 8 and tw["AMZN"] < 6
+    # legacy mega-caps are NOT ballooned — target 0 now (exempt retired), so absent
+    assert tw.get("GOOGL", 0) < 8 and tw.get("AMZN", 0) < 6
     # growth beta trimmed to floor
     assert tw["SPY"] < 1 and tw["QQQ"] < 1
 

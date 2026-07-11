@@ -85,6 +85,22 @@ you liquidate them in tranches (see "Execute toward the reference"), and the val
 ("legacy exit — core re-entry closed (flex only)"). INTC/MCK/PPA/EUAD may be re-entered later
 as *flex* theses, never as core.
 
+**How to liquidate a legacy exit:**
+- **Tranche the exit** at `reference_execution.tranche_pp_max` per session — a legacy
+  position larger than one tranche (AMZN+GOOGL ≈ 8.6% and MCK ≈ 8.2% of equity) is a
+  **multi-session** exit, not a single-day dump. Sell the tranche toward the 0 target
+  each session until flat.
+- **Sells before buys**, always. While the deployment **gate is closed**, direct the
+  legacy proceeds to the **defensive roles first** (gold, duration, staples,
+  defensive_equity, cash) — never into Q1/Q2 amplifier beta.
+- **Equal-weight substitution (the one gate carve-out).** When a human config commit
+  changes a role's `selected` (e.g. `semis` SMH→SOXX), executing the switch as a
+  **within-role sell-old / buy-new at ≤ the old member's dollar weight** is
+  **regime-neutral** — it is NOT adding Q1/Q2 beta, so it is allowed even while the gate
+  is closed (the validator recognizes a same-role sell funding the buy). **Net-new
+  amplifier weight remains gated** — only the substituted portion (≤ what you sold of the
+  old member) is exempt; anything above that is a normal gated amplifier buy.
+
 | Role | Selected | Governance |
 |--------|--------|--------------------------------------------------------|
 | us_anchor | SPY | Q1 — US large-cap beta anchor |
