@@ -125,6 +125,12 @@ your `proposals[]` may contain ONLY class-0 entries. Otherwise `mode` is
   class 2 (must be ≥10 — see the class table). Recommended for class 1.
 - `spec_draft` / `implementation_brief` — required for class 3 INSTEAD of
   `target_file`/`diff` (see class 3 below).
+- `re_review_of` (optional) — the `id` of a prior amendment this proposal is
+  the forced re-review of (see the forced re-review rule below). Omit entirely
+  for a proposal that is not a re-review.
+- `is_revert` (optional, default `false`) — set `true` ONLY when this proposal
+  reverts a prior amendment named in `re_review_of`. A `true` value exempts
+  the proposal from the hard caps below; do not set it on anything else.
 
 ### Proposal classes and their bars
 
@@ -165,10 +171,12 @@ the same evidence is not permitted.
 
 Check the learning history for every prior amendment whose `review_by` date is
 today or earlier and that has not yet been re-reviewed. Each one MUST get a
-proposal this cycle: `keep` (class 0, brief justification), `revert` (exempt
-from the caps above), or `amend` (a new proposal at the amendment's original
-class, referencing the one it supersedes). Silence on a due re-review is not a
-valid output — if you omit one, the cycle fails validation.
+proposal this cycle, with `re_review_of` set to the amendment's `id`:
+**keep** (class 0, brief justification), **revert** (`is_revert: true` — the
+only thing exempt from the caps above), or **amend** (a new proposal at the
+amendment's original class, `is_revert` omitted/false, referencing the one it
+supersedes). Silence on a due re-review is not a valid output — if you omit
+one, the cycle fails validation.
 
 An amendment whose falsifier condition has fired and which you do not propose
 to revert must be explicitly re-justified in that proposal's evidence — you
