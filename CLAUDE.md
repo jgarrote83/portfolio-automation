@@ -186,6 +186,7 @@ The intl sleeve is the `intl_broad` (VXUS; pool VXUS/ACWX/IXUS) + `intl_leader` 
 Full details in these companion documents — read them for implementation specifics:
 - **`growth_strategy_spec_v1.md` — the north-star strategy spec (regime-concentration machine; the source of truth all automation is downstream of). Read this first.**
 - **`roster_revision_2026-07.md` — roster revision v2 (role-based selection, AMZN/GOOGL exempt-hold retirement → legacy exits, international rotation governance). SUPERSEDES the fixed-24-ticker core roster (§2–§3) and exempt-hold doctrine (§8) of the strategy spec; resolves FOLLOWUPS #36.**
+- **`Learning_Loop_v1.0.md` — the monthly strategy-review + human-approval amendment channel (proposer ≠ approver; Git/PR is the only change mechanism). Resolves FOLLOWUPS #13 + #32. See "Learning Loop" below.**
 - `Data_Sources_Reference_v1.3.md` — all API endpoints, schemas, budget (supersedes v1.2, which is retained for history)
 - `Storage_Architecture.md` — blob containers, table schemas, retention
 - `Analyzer_Pipeline.md` — context assembly, memory, response parsing, Alpaca mapping
