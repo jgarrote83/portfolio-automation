@@ -87,10 +87,10 @@ portfolio-automation/
 └── README.md
 ```
 
-## Key Vault secrets (9 active)
+## Key Vault secrets (10 active)
 FmpApiKey, FredApiKey, AlpacaApiKey, AlpacaApiSecret, FoundryApiKey, FinnhubApiKey, QuiverApiKey — read at RUNTIME by func-pfauto via Managed Identity (`KEY_VAULT_URI` + `shared/keyvault.py`).
 
-`swa-storage-connection-string`, `swa-func-master-key` — the `web/api` managed-function app settings (SWA hardening batch, FOLLOWUPS #2, 2026-07-11). These are resolved at **DEPLOY TIME**, not runtime: `az bicep`'s `getSecret()` (`infra/main.bicep`, against `kv-pfauto-prod` with `enabledForTemplateDeployment: true`) bakes the current value into a plain `staticwebapp.bicep` app setting on every infra deploy. This is a different mechanism from the func-pfauto secrets above because it has to be — Azure Static Web Apps *managed functions* support neither Key Vault app-setting references nor managed identity, on any plan (verified against Microsoft Learn 2026-07-11). Seed/rotate via `scripts/seed-swa-secrets.sh`.
+`swa-storage-connection-string`, `swa-func-master-key`, `github-learning-pat` — the `web/api` managed-function app settings (SWA hardening batch, FOLLOWUPS #2, 2026-07-11; the PAT added by the Learning Loop batch, FOLLOWUPS #13/#32, 2026-07-12). These are resolved at **DEPLOY TIME**, not runtime: `az bicep`'s `getSecret()` (`infra/main.bicep`, against `kv-pfauto-prod` with `enabledForTemplateDeployment: true`) bakes the current value into a plain `staticwebapp.bicep` app setting on every infra deploy. This is a different mechanism from the func-pfauto secrets above because it has to be — Azure Static Web Apps *managed functions* support neither Key Vault app-setting references nor managed identity, on any plan (verified against Microsoft Learn 2026-07-11). `github-learning-pat` is a fine-grained GitHub PAT scoped to this repo only (`contents:write` + `pull_requests:write`, no merge/admin — see "Learning Loop" below). Seed/rotate via `scripts/seed-swa-secrets.sh`.
 
 (Note: `MassiveApiKey` and the four `Etrade*` secrets may still exist in KV as soft-deletable leftovers from deprecated integrations — safe to delete manually. The collector no longer fetches them.)
 
@@ -124,15 +124,69 @@ There are TWO execution paths into the same `executor.execute_approvals`:
 4. SWA managed API (`web/api/`) records the decision in `approvals/YYYY-MM-DD.json` and calls the `func-pfauto` executor endpoint (function master key fetched via SWA MI → Key Vault reference)
 5-6. Same executor → same `daily-executions/{date}.json` + TradeHistory; SWA `/today` polls and shows status inline
 
-## Table Storage schemas (8 tables)
+## Learning Loop (monthly strategy review + human-approval amendment channel)
+**Spec: `docs/specs/Learning_Loop_v1.0.md`. Resolves FOLLOWUPS #13 + #32.** Where the
+daily analyzer executes toward a fixed reference and grades its own trades, the
+Learning Loop is the missing half: a monthly, high-reasoning review that proposes
+*changes to the rules themselves* from the graded record, gated entirely behind human
+approval. **Non-negotiable invariant: proposer ≠ approver.** Nothing in this system can
+apply a change directly — every approved proposal becomes a GitHub pull request that a
+human merges after CI passes; the automation credential cannot merge (branch protection,
+not convention).
+
+- **`src/learning/bundle.py`** assembles the reviewer's input: the trailing 35 days of
+  daily reports (oldest dropped first if `LEARNING_BUNDLE_MAX_TOKENS` is exceeded — graded
+  records and live config NEVER drop), capture-fine TradeHistory, every OverrideHistory
+  layer, and live config fetched from **GitHub raw at master HEAD** (not the deployed
+  function package — a proposal diff must apply to master) alongside the recorded
+  `diff_base_sha`.
+- **`src/learning/handler.py`** (`learning_reviewer` timer, Saturdays 12:00 ET with an
+  in-code first-Saturday-of-month gate; `learning_run` HTTP trigger for the manual
+  button, 1/day rate-limited) calls the reviewer model — **`LEARNING_MODEL`, default
+  `claude-sonnet-4-6`, the analyzer's EXISTING Foundry deployment** (no new deployment,
+  no new quota; upgrading to Claude Fable 5 is a config flip once quota lands, FOLLOWUPS
+  #40) — then validates the output before anything is stored as pending.
+- **`src/learning/schema.py`** + **`src/learning/diffcheck.py`** (pure-Python unified-diff
+  apply checker, no third-party dep) deterministically enforce the proposal contract:
+  4 classes (0 Observation / 1 Prompt-text / 2 Parameter, needs `evidence_n >= 10` graded
+  rows / 3 Structural, no diff — a spec draft + implementation brief instead), a
+  **target-file allowlist** (`project-instructions.md`, `risk-limits.json`,
+  `sleeve-roles.json`, `flex-candidates.json` — code/validator/infra are never a diff
+  target), hard caps (≤3/cycle, ≤1 structural, reverts exempt), and the forced re-review
+  rule (every amendment past its `review_by` date must get an explicit keep/revert/amend
+  this cycle). **Any violation fails the whole cycle loudly** (`failed_validation`, raw
+  output preserved) — nothing partially surfaces.
+- **`web/api/learning_github.py`** is the ONLY thing that writes to GitHub, and only via
+  PR: Approve re-validates a class 1-2 diff against CURRENT master (stale → the proposal
+  regenerates next cycle, never force-applied), then branches, commits, and opens a PR
+  with the proposal JSON verbatim in the body. Merge detection is lazy (checked on every
+  `GET /api/learning/proposals`, cached ≥10 min) — no webhook in v1. On merge, the
+  proposal flips to `applied` and an OverrideHistory row (layer `amendment`) is written
+  so the loop eventually grades itself (mechanical grader deferred to FOLLOWUPS #38,
+  ≥5 amendments).
+- **Learning tab** (`web/learning.html`/`.js`) — nav entry rendered ONLY when
+  `GET /api/learning/proposals` reports `LEARNING_PHASE >= 2` (`app.js::renderLearningNav`).
+  Decision buttons render only at phase 3. **3-phase rollout** (`LEARNING_PHASE` app
+  setting, ships `1`): 1 = dry-run (reviewer runs, no tab) → 2 = tab read-only → 3 = full
+  loop. `POST /api/learning/decision` additionally checks the authenticated principal's
+  `userId` against `OWNER_OBJECT_ID` (defense in depth on a shared-tenant edge case) —
+  same pattern the platform's `owner`-role auth already establishes (see the Static Web
+  App entry in Tech stack).
+- **Tables**: `LearningCycles` (one row per cycle, status/model/mode/narrative) and
+  `LearningProposals` (one row per proposal, `status`: pending → approved/rejected/stale
+  → applied) — see Table Storage schemas below.
+
+## Table Storage schemas (10 tables)
 - **PortfolioHistory**: PK=ticker, RK=date — positions, weights, P/L
 - **FundamentalsHistory**: PK=ticker, RK=date — P/E, DCF, rating, earnings date
 - **MacroHistory**: PK=series_id, RK=date — FRED values with deltas
 - **ETFLookthroughHistory**: PK=etf_ticker, RK=date — holdings, country/sector allocation
 - **SentimentHistory**: PK=date, RK=indicator — VIX, spreads, P/C ratios, percentiles
 - **TradeHistory**: PK=year-month, RK=trade_id — full lifecycle from recommendation to 30/60/90d outcome. Phase C adds (write-once at recommendation, flex trades) the §7 reasoning enums `primary_trigger`/`thesis_type`/`trigger_evidence`/`catalyst_date`, and (stamped later by the collector at maturity) `price_at_rec`/`spy_at_rec`/`ret_Nd_pct`/`spy_ret_Nd_pct`/`excess_Nd_pp`/`call_correct_Nd`/`outcome_status`. Keys are **lowercase** across analyzer + executor + collector writes — Azure Tables is case-sensitive and upserts MERGE onto one entity (Phase C §9 casing fix).
-- **OverrideHistory**: PK=year-month, RK=`OV-YYYYMMDD-NNN` — one row per override record the analyzer emitted (Phase 4, write-once): `outcome` (accepted/downsized/rejected), `validator_reasons`, `premise_challenged`, `sleeve` (V1_1), `direction`, `magnitude_pp`, `downsized`, `evidence`, `evidence_count`, `falsifier`, `falsifier_date`, `clean_data_only`, `enforced` (Finding-2 band enforcement fired on this sleeve). **Phase 5 (merged 2026-07-05) now STAMPS** `outcome_status`/`resolved_correct` at each record's `falsifier_date`, graded against the reference-path counterfactual ("did disagreeing beat obeying"); the collector maturity pass writes them. Also holds the roster-revision **`sleeve_switch`** / **`intl_leader_rotation`** rows (Task G, RK `SW-…`/`ILR-…`) graded vs the incumbent counterfactual at 30/60/90d, and the **`regime_suspect`** rows (FOLLOWUPS #12 Task C, RK `RS-YYYYMMDD-{bucket}`, one per suspect bucket per report day: `sleeve` = the bucket e.g. `Q3`, `favored_streak`, `streak_excess_pp`, `action` = increased/held/reduced that session — **not yet graded by any stamper**, see `quadrant_performance` above).
+- **OverrideHistory**: PK=year-month, RK=`OV-YYYYMMDD-NNN` — one row per override record the analyzer emitted (Phase 4, write-once): `outcome` (accepted/downsized/rejected), `validator_reasons`, `premise_challenged`, `sleeve` (V1_1), `direction`, `magnitude_pp`, `downsized`, `evidence`, `evidence_count`, `falsifier`, `falsifier_date`, `clean_data_only`, `enforced` (Finding-2 band enforcement fired on this sleeve). **Phase 5 (merged 2026-07-05) now STAMPS** `outcome_status`/`resolved_correct` at each record's `falsifier_date`, graded against the reference-path counterfactual ("did disagreeing beat obeying"); the collector maturity pass writes them. Also holds the roster-revision **`sleeve_switch`** / **`intl_leader_rotation`** rows (Task G, RK `SW-…`/`ILR-…`) graded vs the incumbent counterfactual at 30/60/90d, and the **`regime_suspect`** rows (FOLLOWUPS #12 Task C, RK `RS-YYYYMMDD-{bucket}`, one per suspect bucket per report day: `sleeve` = the bucket e.g. `Q3`, `favored_streak`, `streak_excess_pp`, `action` = increased/held/reduced that session — **not yet graded by any stamper**, see `quadrant_performance` above). The Learning Loop (FOLLOWUPS #13/#32) adds the **`amendment`** layer (RK `AMD-{proposal_id}`, written by `web/api` when a proposal's PR merges): `proposal_id`, `sleeve` = the amendment's `target_file`, `falsifier`, `review_by` — grading hooks also null until the mechanical amendment grader (FOLLOWUPS #38) is built.
 - **SleeveSelectionState**: PK=`state`, RK=role_id (or `intl_governance`) — hysteresis streak (`challenger`/`streak`/`selected`) for the `sleeve_selection` scorecard + the intl `leader`/`composite` de-rotation state.
+- **LearningCycles**: PK=year-month, RK=cycle date (`YYYY-MM-DD`) — one row per Learning Loop reviewer run: `trigger` (timer/manual), `status` (completed/failed_validation), `model`, `mode` (full/observation_only), `proposal_count`, `narrative`.
+- **LearningProposals**: PK=year-month (of its cycle), RK=proposal id (`AMD-YYYY-MM-DD[-N]`) — one row per proposal: `class`, `title`, `change_summary`, `data_summary`, `target_file`, `diff`, `evidence`, `evidence_n`, `expected_effect`, `falsifier`, `review_by`, `spec_draft`/`implementation_brief` (class 3), `re_review_of`/`is_revert`, `diff_base_sha`, and the decision lifecycle: `status` (pending → approved/rejected/stale → applied), `decision`/`decision_reason`/`decided_at`/`decided_by`, `pr_url`/`pr_number`/`pr_last_checked`, `applied_at`.
 
 ## Snapshot analytics blocks (collector pre-computes; analyzer consumes)
 Beyond raw API data, the collector injects pre-computed analysis blocks into each `daily-snapshots/{date}.json` so the analyzer reads conclusions, not raw series: `regional_rotation`, `bond_signals`, `labor_signals`, `market_shock`, `growth_axis`/`inflation_axis`/`regime_gate` (the deterministic quadrant axes + deployment gate, echoed not re-derived), `sleeve_selection` (role-member scorecard, Task E), `intl_governance` (rotation/DXY-governed intl sleeve, Task F), and (Phase C) `performance` (account equity vs fully-invested SPY since inception + rolling 30/60/90d + `cash_pct`), `quadrant_performance` (FOLLOWUPS #12 — regime-call accountability, describe-only) and `track_record` (hit-rate by layer/trigger/thesis at the 60d headline + confidence calibration, aggregated from stamped TradeHistory rows). Phase C 7a also maintains a compact `performance/equity-series.json` blob (collector-owned cache: backfilled once from snapshots, then append-only).

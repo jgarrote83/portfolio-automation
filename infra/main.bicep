@@ -7,6 +7,9 @@ param environment string = 'prod'
 @description('Region for the Static Web App (Free SKU is global; metadata sits here). Use eastus2 since SWA Free is not in all regions.')
 param swaLocation string = 'eastus2'
 
+@description('Learning Loop (FOLLOWUPS #13/#32): Entra object id of the account holder, for the decision/run endpoints owner check (spec §7). Set via parameters.prod.json — never hardcoded.')
+param ownerObjectId string
+
 // ── Resource names (match CLAUDE.md naming conventions) ─────────────────────────────
 var storageAccountName = 'stpfauto${environment}'
 var keyVaultName       = 'kv-pfauto-${environment}'
@@ -115,6 +118,8 @@ module swa 'modules/staticwebapp.bicep' = {
     storageAccountName: storageAccountName
     storageConnectionStringSecret: keyVaultRef.getSecret('swa-storage-connection-string')
     funcMasterKeySecret: keyVaultRef.getSecret('swa-func-master-key')
+    githubLearningPatSecret: keyVaultRef.getSecret('github-learning-pat')
+    ownerObjectId: ownerObjectId
   }
   dependsOn: [keyvault]
 }

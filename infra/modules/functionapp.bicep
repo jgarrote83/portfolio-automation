@@ -105,6 +105,13 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         //   after dry-run validation (POST /api/daytrade {"dry_run":true}) AND
         //   resolving consolidated_source (docs/specs/DayTrade_Lab_v0.1.md §2).
         { name: 'DAYTRADE_ENABLED',                          value: 'false' }
+        //   Learning Loop reviewer (FOLLOWUPS #13/#32, docs/specs/Learning_Loop_v1.0.md).
+        //   Launches on the EXISTING analyzer Foundry deployment — NO new
+        //   deployment, no new quota. The Fable 5 upgrade is a config flip
+        //   (LEARNING_MODEL + raise the two token budgets below), never code.
+        { name: 'LEARNING_MODEL',                            value: 'claude-sonnet-4-6' }
+        { name: 'LEARNING_MAX_TOKENS',                       value: '16000' }
+        { name: 'LEARNING_BUNDLE_MAX_TOKENS',                value: '150000' }
         //   Analyzer Claude call on large snapshots can exceed the old 10-min
         //   Consumption cap; Flex allows more. Backstops host.json functionTimeout.
         { name: 'AzureFunctionsJobHost__functionTimeout',    value: '00:40:00' }

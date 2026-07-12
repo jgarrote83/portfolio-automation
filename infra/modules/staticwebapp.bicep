@@ -18,6 +18,16 @@ param storageConnectionStringSecret string
 @secure()
 param funcMasterKeySecret string
 
+@description('Learning Loop (FOLLOWUPS #13/#32): fine-grained GitHub PAT (contents:write + pull_requests:write, NO merge/admin), resolved from Key Vault at DEPLOY TIME — same rationale as the two secrets above (managed functions cannot use a runtime Key Vault reference).')
+@secure()
+param githubLearningPatSecret string
+
+@description('Learning Loop: Entra object id of the account holder — the decision/run endpoints verify the authenticated principal matches this (defense in depth on a shared-tenant edge case, spec §7). Not a secret, but not hardcoded either.')
+param ownerObjectId string
+
+@description('Learning Loop rollout phase (spec §11): 1 = dry-run (no tab), 2 = tab read-only, 3 = full loop (decisions + PR mechanics). Ships at 1.')
+param learningPhase string = '1'
+
 // SWA Free — managed Functions in /api are included.
 // No system-assigned identity: verified against Microsoft Learn (2026-07-11)
 // that Azure Static Web Apps *managed functions* support neither Key Vault
@@ -63,6 +73,9 @@ resource swaSettings 'Microsoft.Web/staticSites/config@2022-03-01' = {
     FUNCTION_APP_NAME: 'func-pfauto'
     STORAGE_CONNECTION_STRING: storageConnectionStringSecret
     FUNC_MASTER_KEY: funcMasterKeySecret
+    GITHUB_LEARNING_PAT: githubLearningPatSecret
+    OWNER_OBJECT_ID: ownerObjectId
+    LEARNING_PHASE: learningPhase
   }
 }
 
