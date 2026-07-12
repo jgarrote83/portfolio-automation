@@ -83,3 +83,18 @@ tbody tr:hover { background: #1a1f2a; }
 .quad-summary .chip.best { border-color: var(--accent); }
 .quad-summary .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
 .quad-summary .bandnote { font-size: .8rem; }
+
+/* learning tab */
+.pending-row { cursor: pointer; }
+.pending-row:hover { background: #1a1f2a; }
+.detail-row td { background: #12151c; }
+.detail-row ul { margin: .25rem 0 .5rem; padding-left: 1.2rem; }
+.decision-row { display: flex; gap: .5rem; align-items: center; margin-top: .75rem; flex-wrap: wrap; }
+.decision-row input[type="text"] { flex: 1; min-width: 200px; padding: .4rem .6rem;
+  background: #0b0d12; border: 1px solid var(--border); border-radius: 4px; color: var(--text); }
+.badge { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .8em; }
+.badge.note { background: #1c2230; color: var(--muted); }
+.badge.small { background: #203b2e; color: var(--green); }
+.badge.structural { background: #3b2a20; color: #e0a24d; }
+.banner { background: #2a2510; border: 1px solid #5a4a1a; border-radius: 6px;
+  padding: .6rem 1rem; margin: 0 0 1rem; }

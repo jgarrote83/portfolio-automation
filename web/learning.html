@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Learning &middot; Portfolio Automation</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topnav">
+    <strong>Portfolio Automation</strong>
+    <nav>
+      <a href="/today.html">Today</a>
+      <a href="/history.html">History</a>
+      <a href="/portfolio.html">Portfolio</a>
+      <a href="/performance.html">Performance</a>
+    </nav>
+    <span id="user" class="user"></span>
+  </header>
+  <main class="container">
+    <h1>Learning</h1>
+    <p class="muted">Monthly strategy review, proposed from the graded record. The reviewer proposes; you decide — every applied change is a merged GitHub PR.</p>
+
+    <div id="readonly-banner" class="banner" style="display:none">
+      Read-only phase — proposals and history are visible, but decisions are not open yet.
+    </div>
+
+    <section>
+      <h2>Pending</h2>
+      <table id="pending">
+        <thead>
+          <tr><th>#</th><th>Change</th><th>Type</th><th>What the data shows</th><th>Decision</th></tr>
+        </thead>
+        <tbody><tr><td colspan="5" class="muted">Loading…</td></tr></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Run</h2>
+      <p id="run-narrative" class="muted">Loading…</p>
+      <p id="run-stats" class="muted"></p>
+      <div class="decision-row">
+        <button id="run-now" class="btn primary" style="display:none">Run review now</button>
+        <span id="run-status" class="muted"></span>
+      </div>
+    </section>
+
+    <section>
+      <h2>History</h2>
+      <table id="history">
+        <thead>
+          <tr><th>Cycle</th><th>Change</th><th>Type</th><th>Decision</th><th>Reason</th><th>PR</th><th>Grade</th></tr>
+        </thead>
+        <tbody><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
+      </table>
+    </section>
+  </main>
+  <script src="/app.js" defer></script>
+  <script src="/learning.js" defer></script>
+</body>
+</html>

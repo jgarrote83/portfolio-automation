@@ -35,6 +35,28 @@ async function renderUser() {
   }
 }
 
+/** Learning tab nav link — only rendered when the API reports phase >= 2
+ * (FOLLOWUPS #13/#32). Phase 1 ships dry-run only; there is no tab yet. */
+async function renderLearningNav() {
+  const nav = document.querySelector(".topnav nav");
+  if (!nav || nav.querySelector("[data-learning-nav]")) return;
+  try {
+    const r = await fetch("/api/learning/proposals");
+    if (!r.ok) return;
+    const data = await r.json();
+    if ((data.phase || 0) < 2) return;
+    const a = document.createElement("a");
+    a.href = "/learning.html";
+    a.textContent = "Learning";
+    a.dataset.learningNav = "1";
+    if (location.pathname.endsWith("/learning.html")) a.className = "active";
+    nav.appendChild(a);
+  } catch {
+    // Never let a Learning-tab check break navigation on any other page.
+  }
+}
+
 document.addEventListener("DOMContentLoaded", renderUser);
+document.addEventListener("DOMContentLoaded", renderLearningNav);
 
 window.pfauto = { api, postJson };
