@@ -16,6 +16,7 @@ _TABLES = [
     "TradeHistory",
     "OverrideHistory",
     "SleeveSelectionState",
+    "LearningProposals",
 ]
 
 
