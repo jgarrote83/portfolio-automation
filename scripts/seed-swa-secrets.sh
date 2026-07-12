@@ -18,9 +18,20 @@
 #                                       --query connectionString -o tsv`
 #   SWA_FUNC_MASTER_KEY             -- `az functionapp keys list --name func-pfauto
 #                                       -g rg-portfolio-automation-prod --query masterKey -o tsv`
+#   GITHUB_LEARNING_PAT (optional)  -- Learning Loop's fine-grained GitHub PAT
+#                                       (FOLLOWUPS #13/#32). Mint at
+#                                       https://github.com/settings/personal-access-tokens/new
+#                                       scoped to jgarrote83/portfolio-automation ONLY, with
+#                                       repository permissions: Contents = Read and write,
+#                                       Pull requests = Read and write. NOTHING else — no
+#                                       Administration, no merge rights (branch protection on
+#                                       master is the backstop, spec §8). Omit this var to
+#                                       seed only the two SWA-hardening secrets (e.g. before
+#                                       the Learning Loop batch merges).
 #
 # Usage:
-#   SWA_STORAGE_CONNECTION_STRING="..." SWA_FUNC_MASTER_KEY="..." ./scripts/seed-swa-secrets.sh
+#   SWA_STORAGE_CONNECTION_STRING="..." SWA_FUNC_MASTER_KEY="..." [GITHUB_LEARNING_PAT="..."] \
+#     ./scripts/seed-swa-secrets.sh
 #
 # Note (2026-07-11 decision): the AAD custom-app-registration path (Task C's
 # original spec) was NOT taken — Entra auth uses the Free-tier PRECONFIGURED
@@ -53,6 +64,17 @@ az keyvault secret set \
   --name swa-func-master-key \
   --value "$SWA_FUNC_MASTER_KEY" \
   --output none
+
+if [ -n "${GITHUB_LEARNING_PAT:-}" ]; then
+  echo "Seeding github-learning-pat into $VAULT_NAME ..."
+  az keyvault secret set \
+    --vault-name "$VAULT_NAME" \
+    --name github-learning-pat \
+    --value "$GITHUB_LEARNING_PAT" \
+    --output none
+else
+  echo "GITHUB_LEARNING_PAT not set — skipping (Learning Loop approval mechanics need it before Phase 3)."
+fi
 
 echo "Done. Verify with:"
 echo "  az keyvault secret list --vault-name $VAULT_NAME --query \"[?starts_with(name,'swa-')].name\" -o tsv"

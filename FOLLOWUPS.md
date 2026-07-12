@@ -556,7 +556,33 @@ snapshot): Q3 was the favored bucket while being the worst performer since
 inception (−7.1%, GLD −10.5%) — this is exactly the case `suspect` is built to
 catch. Details in the PR description.
 
-### 13. Monthly self-initiated strategy review + amendment channel (HIGH value, spec first)
+### 13. Monthly self-initiated strategy review + amendment channel ✅ DONE 2026-07-12 (`feat/learning-loop`) — Learning Loop v1.0
+Built as **`docs/specs/Learning_Loop_v1.0.md`** ("Learning Loop", combining this item
+and #32 into one spec — the amendment channel and the improvement ledger turned out
+to be the same mechanism, not two). `src/learning/` (bundle builder, deterministic
+schema validator, pure diff-apply checker, the reviewer function) +
+`web/api/learning_github.py` (GitHub PR mechanics) + the Learning tab (`web/learning.*`).
+Ships `LEARNING_PHASE=1` (dry-run only — reviewer runs monthly, output lands in
+blob/table, no tab, no decisions) per the spec's 3-phase rollout (§11); flip to 2 then
+3 manually after each phase's gate is met.
+- **Model decision SUPERSEDED from what's below:** the two-tier "review runs on a
+  stronger model than the daily analyzer" plan (2026-07-02) was revised 2026-07-11 —
+  the reviewer **launches on the EXISTING `claude-sonnet-4-6` deployment** (no new
+  Foundry deployment, no new quota request) and upgrades to Claude Fable 5 later via a
+  pure config flip (`LEARNING_MODEL` + raising the two token-budget settings) once its
+  quota lands — see new item below. Simpler and cheaper than standing up Opus 4.8 as an
+  interim floor while waiting on Fable 5 quota.
+- **Guardrails as actually built:** proposals are capped ≤3/cycle (≤1 structural),
+  classed 0-3 with escalating evidence bars (class 2 parameters require ≥10 graded rows
+  — this is exactly how #37's do-not-tune-early rule resolves, see the note there),
+  target-file allowlisted to 4 config files (code/validator/infra are never a diff
+  target — a class-3 structural proposal is a SPEC DRAFT for a separate human-driven
+  build, never code), and every approval opens a GitHub PR (never a direct write) that
+  the automation credential cannot merge (branch protection). The forced re-review rule
+  (§9) makes an amendment's `review_by` date a real re-review trigger, not a suggestion.
+- **Not yet done (tracked separately below):** the mechanical amendment grader (deferred
+  until ≥5 amendments exist) and the GitHub App replacement for the v1 PAT.
+
 The LLM currently calibrates *trades* (track_record) but has no channel to rethink the
 *strategy* (quadrant membership, ladder shape, tunable params are fixed code/config).
 Design (discussed 2026-07-02, account holder likes it): a scheduled monthly deep-dive
@@ -882,7 +908,19 @@ that `WEBSITE_TIME_ZONE` is Windows-only / silently ignored on Linux (the pre-6f
 `gap_band_pp` is consumed by both Finding 2's `reconcile` (merged PR #11) and the #28
 Tier-1 validator's window rule (PR #12) — verified.
 
-### 32. Improvement Ledger — monthly self-improvement proposals + `/improvements` tab (MEDIUM-HIGH — spec WITH #13, ship with/after it)
+### 32. Improvement Ledger — monthly self-improvement proposals + `/improvements` tab ✅ DONE 2026-07-12 (`feat/learning-loop`) — folded into Learning Loop v1.0
+**Merged into #13's build rather than shipping as a separate ledger + tab.** Once spec'd
+together it became clear the "ledger" and the "amendment channel" were the SAME
+governance discipline wearing two names: `docs/specs/Learning_Loop_v1.0.md`'s
+`proposals[]` (schema §6) ARE the evidence-triggered entries this item asked for —
+`class 0` (Observation) is exactly the "no config change, just a FOLLOWUPS-worthy
+finding" entry type this item described, and the pipeline view (proposed → decided →
+applied/rejected → graded) lives on the single Learning tab (`web/learning.*`) instead
+of a separate `/improvements` page. The governance constraint this item called out as
+"critical, record verbatim" — entries never change behavior directly, always route
+through human approval — is exactly spec §1's "proposer ≠ approver" principle. No
+functionality from this item's design was dropped; it just didn't need its own surface.
+
 **Decided with the account holder 2026-07-03.** The system learns through three loops —
 daily outcome stamping (Phase C/5), regime-call accountability (#12), and the monthly
 amendment channel (#13) — but none of it is *observable as a pipeline*: there is no
@@ -1055,6 +1093,50 @@ once Phase C has graded ≥ 10 switch/rotation decisions** (OverrideHistory laye
 `sleeve_switch` / `intl_leader_rotation`, graded vs the incumbent counterfactual at
 30/60/90d) — if switches whipsaw or the leader tilt is mis-sized, adjust the thresholds.
 Do not tune before the sample exists.
+**Learning Loop note (2026-07-12):** this "do-not-tune-early" rule is now enforced
+automatically rather than by discipline alone — the Learning Loop's class-2 (Parameter)
+bar requires `evidence_n >= 10` graded rows directly bearing on the parameter before a
+proposal touching `sleeve-roles.json`'s hysteresis or intl-ladder values can even pass
+schema validation (`docs/specs/Learning_Loop_v1.0.md` §6/§12 point 5). No special-case
+code was needed — the same bar every other class-2 parameter proposal must clear.
+
+### 38. Mechanical amendment grader (LOW — data-gated, deferred until ≥5 amendments applied)
+Spec §9's third grading function (sibling of `_grade_switch`, per the shape sketched in
+the `regime_suspect` docstring): every applied Learning Loop amendment writes an
+OverrideHistory row (layer `amendment`, `proposal_id`, `falsifier`, `review_by`) with
+its grading hooks (`outcome_status`/`resolved_correct`) left null — nothing stamps them
+yet. Verified (not built) during the Learning Loop batch that neither `_stamp_override_outcomes`
+(requires `sleeve`/`direction`, override-shaped) nor `_stamp_switch_outcomes` (hardcodes
+an allow-list of `layer` values that doesn't include `amendment`) would grade these rows
+even by accident. **Build once ≥5 amendments have been applied** — mirror the mechanical,
+falsifier-at-its-own-terms grading approach already used for `regime_suspect`
+(FOLLOWUPS #12): evaluate at the amendment's `review_by` date whether its falsifier
+condition held. Until then, the Learning Loop's own forced re-review rule (spec §9 — every
+amendment gets an explicit keep/revert/amend at its `review_by` cycle) is the only
+grading mechanism, and it is human judgment, not a stamped grade.
+
+### 39. GitHub App to replace the Learning Loop's fine-grained PAT (LOW — hardening follow-up)
+v1 ships with a fine-grained PAT (`github-learning-pat`, KV-stored, `contents:write` +
+`pull_requests:write`, no merge/admin — spec §8) as the credential behind the approval
+mechanics' branch/commit/PR calls. A GitHub App installation is the cleaner long-term
+replacement (short-lived installation tokens instead of a long-lived PAT, scoped
+permissions enforced by GitHub's own installation model rather than by convention,
+no manual rotation). Noted as a follow-up in the spec, not required for v1 — the PAT's
+blast radius is already bounded (single repo, no merge rights, branch protection as the
+backstop).
+
+### 40. Upgrade the Learning Loop reviewer to Claude Fable 5 (MEDIUM — gated on Foundry quota)
+The reviewer launches on the analyzer's existing `claude-sonnet-4-6` Foundry deployment
+(no new deployment, no new quota — decided 2026-07-11, spec §3). Claude Fable 5's 1M-token
+context would ingest a full month of daily reports + the complete graded record + all
+live config verbatim, instead of the ~8-12 most recent reports the 150K-token launch
+budget fits (`LEARNING_BUNDLE_MAX_TOKENS`, chars/4 estimate) — the graded record is the
+primary evidence engine at launch; full-month verbatim prose is what this upgrade
+unlocks. **The upgrade is a config flip, never a code change:** set `LEARNING_MODEL=
+claude-fable-5` and raise `LEARNING_BUNDLE_MAX_TOKENS`/`LEARNING_MAX_TOKENS` once the
+requested Fable 5 quota lands on the `Portfolio-Analysis` Foundry project. Verify the
+deployment exists and quota is non-zero (`az` / Foundry portal) before flipping — do not
+assume quota approval happened silently.
 
 ---
 

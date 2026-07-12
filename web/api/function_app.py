@@ -26,11 +26,14 @@ import json
 import logging
 import os
 import re
+import socket
 from datetime import datetime, timezone
 from threading import Lock
 
 import azure.functions as func
+import learning_github
 from azure.core.exceptions import ResourceNotFoundError
+from azure.data.tables import TableServiceClient
 from azure.storage.blob import BlobServiceClient
 
 try:  # urllib is stdlib, but keep import isolated so module load is clean
@@ -60,6 +63,23 @@ def _blobs() -> BlobServiceClient:
                     raise RuntimeError("STORAGE_CONNECTION_STRING app setting is not set")
                 _blob_client = BlobServiceClient.from_connection_string(conn)
     return _blob_client
+
+
+# ── table client (lazy, cached) — Learning Loop reads/writes only ────────────
+_table_lock = Lock()
+_table_client: TableServiceClient | None = None
+
+
+def _tables() -> TableServiceClient:
+    global _table_client
+    if _table_client is None:
+        with _table_lock:
+            if _table_client is None:
+                conn = os.environ.get("STORAGE_CONNECTION_STRING")
+                if not conn:
+                    raise RuntimeError("STORAGE_CONNECTION_STRING app setting is not set")
+                _table_client = TableServiceClient.from_connection_string(conn)
+    return _table_client
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -339,6 +359,264 @@ def reject(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="me", methods=["GET"])
 def me(req: func.HttpRequest) -> func.HttpResponse:
     return _json({"clientPrincipal": _client_principal(req)})
+
+
+# ── Learning Loop (FOLLOWUPS #13/#32, docs/specs/Learning_Loop_v1.0.md) ──────
+# Proposer != approver: nothing here can apply a change directly — Approve
+# opens a GitHub PR (learning_github.py) that a human must merge. All three
+# routes sit behind the platform's mandatory owner-role auth (staticwebapp.
+# config.json); POST routes additionally require the `owner` role on the
+# principal, optionally pinned tighter to a specific SWA user id via
+# OWNER_USER_ID (defense in depth, spec §7 — see _owner_ok).
+
+_LEARNING_PROPOSALS_TABLE = "LearningProposals"
+_LEARNING_CYCLES_TABLE = "LearningCycles"
+_PR_RECONCILE_CACHE_SECONDS = 600  # spec §8 point 3: cache >= 10 min
+
+
+def _learning_phase() -> int:
+    try:
+        return int(os.environ.get("LEARNING_PHASE", "1"))
+    except ValueError:
+        return 1
+
+
+def _owner_ok(principal: dict | None) -> bool:
+    """Baseline: the authenticated principal must hold the `owner` role — the
+    same invitation-only role the platform's route rules already enforce
+    (staticwebapp.config.json). Optionally pinned tighter: if `OWNER_USER_ID`
+    is set, the principal's SWA `userId` must also match it exactly.
+
+    NOTE: on SWA's built-in AAD provider, `x-ms-client-principal.userId` is an
+    OPAQUE SWA-GENERATED HASH, not the Entra object id — the two are unrelated
+    identifiers. Capture the real value from `/.auth/me` AFTER signing in, not
+    from Entra/az CLI (fixed 2026-07-12 after that exact mistake shipped in
+    PR #23 as `OWNER_OBJECT_ID`, which would have denied everyone, including
+    the real owner, since no request's `userId` could ever equal an Entra OID)."""
+    if not principal:
+        return False
+    if "owner" not in (principal.get("userRoles") or []):
+        return False
+    pin = os.environ.get("OWNER_USER_ID")
+    if pin:
+        return principal.get("userId") == pin
+    return True
+
+
+def _find_proposal(table, proposal_id: str) -> dict | None:
+    """Look up a proposal by RowKey alone (a query, not a point read) — the
+    caller only has the id, not the PartitionKey (year-month of its cycle)."""
+    rows = list(table.query_entities(f"RowKey eq '{proposal_id}'"))
+    return dict(rows[0]) if rows else None
+
+
+def _write_amendment_history(proposal: dict) -> None:
+    """OverrideHistory row, layer amendment (spec §9) — grading hooks null;
+    the mechanical grader is deferred (Task G FOLLOWUPS entry)."""
+    table = _tables().get_table_client("OverrideHistory")
+    cycle = str(proposal.get("cycle") or "")
+    table.upsert_entity({
+        "PartitionKey": cycle[:7] or "unknown",
+        "RowKey": f"AMD-{proposal.get('RowKey') or proposal.get('id')}",
+        "recommended_at": cycle,
+        "layer": "amendment",
+        "proposal_id": proposal.get("RowKey") or proposal.get("id"),
+        "sleeve": proposal.get("target_file", ""),
+        "falsifier": (proposal.get("falsifier") or "")[:32000],
+        "review_by": proposal.get("review_by", ""),
+        "outcome_status": "",
+        "resolved_correct": None,
+    })
+
+
+def _reconcile_approved_prs() -> None:
+    """Lazily flip `approved` proposals to `applied` once their PR merges
+    (no webhook in v1 — checked opportunistically on every GET, cached per
+    row so we don't hammer the GitHub API)."""
+    try:
+        table = _tables().get_table_client(_LEARNING_PROPOSALS_TABLE)
+        rows = list(table.query_entities("status eq 'approved'"))
+    except Exception:
+        log.exception("learning: could not query approved proposals for reconciliation")
+        return
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        last_checked = row.get("pr_last_checked")
+        if last_checked:
+            try:
+                if (now - datetime.fromisoformat(last_checked)).total_seconds() < _PR_RECONCILE_CACHE_SECONDS:
+                    continue
+            except ValueError:
+                pass
+        pr_number = row.get("pr_number")
+        if not pr_number:
+            continue
+        try:
+            merged = learning_github.is_pr_merged(int(pr_number))
+        except Exception:
+            log.exception("learning: PR state check failed for %s", row.get("RowKey"))
+            continue
+        row["pr_last_checked"] = now.isoformat()
+        if merged:
+            row["status"] = "applied"
+            row["applied_at"] = now.isoformat()
+            try:
+                _write_amendment_history(row)
+            except Exception:
+                log.exception("learning: OverrideHistory amendment write failed for %s", row.get("RowKey"))
+        try:
+            table.upsert_entity(row)
+        except Exception:
+            log.exception("learning: reconciliation upsert failed for %s", row.get("RowKey"))
+
+
+@app.route(route="learning/proposals", methods=["GET"])
+def learning_proposals(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        _reconcile_approved_prs()
+    except Exception:
+        log.exception("learning: reconciliation pass failed (non-fatal)")
+    try:
+        prop_table = _tables().get_table_client(_LEARNING_PROPOSALS_TABLE)
+        rows = [dict(e) for e in prop_table.list_entities()]
+        cyc_table = _tables().get_table_client(_LEARNING_CYCLES_TABLE)
+        cycles = sorted(
+            (dict(e) for e in cyc_table.list_entities()),
+            key=lambda c: str(c.get("RowKey", "")), reverse=True,
+        )
+    except Exception as e:
+        log.exception("learning_proposals failed")
+        return _err(str(e), status=500)
+    pending = [r for r in rows if r.get("status") == "pending"]
+    history = [r for r in rows if r.get("status") != "pending"]
+    return _json({
+        "phase": _learning_phase(),
+        "pending": pending,
+        "history": history,
+        "cycles": cycles[:12],
+        "last_cycle": cycles[0] if cycles else None,
+    })
+
+
+@app.route(route="learning/decision", methods=["POST"])
+def learning_decision(req: func.HttpRequest) -> func.HttpResponse:
+    if _learning_phase() < 3:
+        return _err("decisions are not open yet (LEARNING_PHASE < 3)", status=409)
+    principal = _client_principal(req)
+    if not _owner_ok(principal):
+        return _err("forbidden", status=403)
+    try:
+        body = req.get_json() or {}
+    except ValueError:
+        body = {}
+    proposal_id = body.get("id")
+    decision = body.get("decision")
+    reason = body.get("reason")
+    if not proposal_id or decision not in ("approve", "reject"):
+        return _err("body must be {id, decision: approve|reject, reason?}", status=400)
+    if decision == "reject" and not (reason and str(reason).strip()):
+        return _err("reason is required on reject", status=400)
+
+    table = _tables().get_table_client(_LEARNING_PROPOSALS_TABLE)
+    try:
+        row = _find_proposal(table, proposal_id)
+    except Exception as e:
+        log.exception("learning_decision lookup failed")
+        return _err(str(e), status=500)
+    if row is None:
+        return _err(f"no such proposal: {proposal_id}", status=404)
+    if row.get("status") != "pending":
+        return _err(f"proposal {proposal_id} is not pending (status={row.get('status')})", status=409)
+
+    now = datetime.now(timezone.utc).isoformat()
+    user = (principal or {}).get("userDetails")
+
+    if decision == "reject":
+        row["status"] = "rejected"
+        row["decision"] = "reject"
+        row["decision_reason"] = str(reason)
+        row["decided_at"] = now
+        row["decided_by"] = user or ""
+        table.upsert_entity(row)
+        return _json({"id": proposal_id, "status": "rejected"})
+
+    try:
+        result = learning_github.approve_proposal(row)
+    except Exception as e:  # noqa: BLE001
+        log.exception("learning approve failed for %s", proposal_id)
+        return _err(f"approve failed: {e}", status=500)
+
+    row["decision"] = "approve"
+    row["decided_at"] = now
+    row["decided_by"] = user or ""
+    if result.get("status") == "stale":
+        row["status"] = "stale"
+        row["decision_reason"] = result.get("reason", "diff no longer applies to current master")
+        table.upsert_entity(row)
+        return _json({"id": proposal_id, "status": "stale", "reason": result.get("reason")})
+
+    row["status"] = "approved"
+    row["pr_url"] = result.get("pr_url", "")
+    row["pr_number"] = result.get("pr_number")
+    table.upsert_entity(row)
+    return _json({"id": proposal_id, "status": "approved", "pr_url": result.get("pr_url")})
+
+
+def _invoke_learning_run(date_str: str | None) -> tuple[dict | None, str | None]:
+    """POST to func-pfauto's learning_run trigger (mirrors _invoke_executor).
+
+    SWA managed-function requests are capped at 45s by the platform, but a
+    reviewer cycle's Foundry call can run well past that. A client-side
+    timeout here does NOT mean the cycle failed — func-pfauto keeps running
+    independently — so it is reported as "started", not an error.
+    """
+    host = (
+        os.environ.get("FUNCTION_APP_HOST")
+        or (os.environ.get("FUNCTION_APP_NAME") and f"{os.environ['FUNCTION_APP_NAME']}.azurewebsites.net")
+        or "func-pfauto.azurewebsites.net"
+    )
+    key = os.environ.get("FUNC_MASTER_KEY")
+    if not key:
+        return None, "FUNC_MASTER_KEY not set"
+    if urlrequest is None:
+        return None, "urllib unavailable"
+    url = f"https://{host}/api/learning_run"
+    payload = json.dumps({"date": date_str} if date_str else {}).encode("utf-8")
+    req = urlrequest.Request(
+        url, data=payload, method="POST",
+        headers={"Content-Type": "application/json", "x-functions-key": key},
+    )
+    try:
+        with urlrequest.urlopen(req, timeout=35) as resp:
+            return json.loads(resp.read().decode("utf-8")), None
+    except socket.timeout:
+        return {"status": "started", "note": "still running in the background — check back shortly"}, None
+    except urlerror.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8")
+        except Exception:
+            pass
+        return None, f"learning_run http {e.code}: {body or e.reason}"
+    except Exception as e:  # noqa: BLE001
+        return None, str(e)
+
+
+@app.route(route="learning/run", methods=["POST"])
+def learning_run_proxy(req: func.HttpRequest) -> func.HttpResponse:
+    if _learning_phase() < 2:
+        return _err("manual run is not available yet (LEARNING_PHASE < 2)", status=409)
+    principal = _client_principal(req)
+    if not _owner_ok(principal):
+        return _err("forbidden", status=403)
+    try:
+        body = req.get_json() or {}
+    except ValueError:
+        body = {}
+    result, error = _invoke_learning_run(body.get("date"))
+    if result is None:
+        return _err(error or "learning run invocation failed", status=502)
+    return _json(result)
 
 
 # ── performance: portfolio vs S&P 500 time series ─────────────────────────────

@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from datetime import date
 
 import azure.functions as func
 
@@ -10,6 +11,7 @@ from daytrade.handler import run_daytrade_manage, save_daytrade_nominations
 from executor.handler import execute_approvals, run_auto_execute
 from seeder.handler import seed_positions
 from flex.handler import run_flex_intraday
+from learning.handler import already_ran_today, is_first_saturday, run_cycle
 from shared.storage import read_blob_bytes
 
 logger = logging.getLogger(__name__)
@@ -287,6 +289,69 @@ def seeder(req: func.HttpRequest) -> func.HttpResponse:
         json.dumps(result, default=str),
         status_code=200,
         mimetype="application/json",
+    )
+
+
+@app.timer_trigger(
+    # Every Saturday 12:00 ET (market closed; a full month of graded rows
+    # available) — ET-local via TZ=America/New_York, same as every other
+    # timer in this app (NOT the Windows-only WEBSITE_TIME_ZONE). NCRONTAB
+    # day-of-week 6 = Saturday. The in-code `is_first_saturday` gate narrows
+    # the monthly cron (there is no first-Saturday-of-month NCRONTAB syntax)
+    # to only the first Saturday; the other 3-4 Saturdays a month no-op.
+    schedule="0 0 12 * * 6",
+    arg_name="timer",
+    run_on_startup=False,
+    use_monitor=True,
+)
+def learning_reviewer(timer: func.TimerRequest) -> None:
+    """Learning Loop v1.0 monthly strategy review (FOLLOWUPS #13/#32, spec
+    docs/specs/Learning_Loop_v1.0.md). Always runs the cycle (bundle + Foundry
+    call + deterministic validation + persistence) regardless of
+    LEARNING_PHASE — phase only governs what the SWA tab/API surface."""
+    today = date.today()
+    if not is_first_saturday(today):
+        return
+    if timer.past_due:
+        logger.warning("learning_reviewer timer was past due — running now")
+    try:
+        result = run_cycle(trigger="timer")
+        logger.info("learning_reviewer result: %s", result.get("status"))
+    except Exception:  # noqa: BLE001
+        logger.exception("learning_reviewer failed")
+
+
+@app.route(
+    route="learning_run",
+    methods=["POST"],
+    auth_level=func.AuthLevel.FUNCTION,
+)
+def learning_run(req: func.HttpRequest) -> func.HttpResponse:
+    """Manual trigger for the Learning Loop reviewer (the tab's "Run review
+    now" button, proxied through the SWA API's FUNC_MASTER_KEY). Rate-limited
+    to 1/day via the LearningCycles table. Body: {"date"?} (YYYY-MM-DD, for
+    testing a specific cycle date; defaults to today)."""
+    try:
+        body = req.get_json()
+    except ValueError:
+        body = {}
+    date_str = (body or {}).get("date")
+    cycle_id = date_str or date.today().isoformat()
+    if already_ran_today(cycle_id):
+        return func.HttpResponse(
+            json.dumps({"error": f"a cycle already ran for {cycle_id} (rate-limited to 1/day)"}),
+            status_code=429,
+            mimetype="application/json",
+        )
+    try:
+        result = run_cycle(trigger="manual", date_str=date_str)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("learning_run failed")
+        return func.HttpResponse(
+            json.dumps({"error": str(e)}), status_code=500, mimetype="application/json",
+        )
+    return func.HttpResponse(
+        json.dumps(result, default=str), status_code=200, mimetype="application/json",
     )
 
 
