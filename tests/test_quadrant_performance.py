@@ -18,8 +18,9 @@ from collector.handler import (  # noqa: E402
     _roster_closes,
 )
 
-_API_PATH = os.path.join(os.path.dirname(__file__), "..", "web", "api", "function_app.py")
-_spec = importlib.util.spec_from_file_location("swa_api", _API_PATH)
+_API_DIR = os.path.join(os.path.dirname(__file__), "..", "web", "api")
+sys.path.insert(0, _API_DIR)  # function_app.py imports sibling modules (learning_github, ...)
+_spec = importlib.util.spec_from_file_location("swa_api", os.path.join(_API_DIR, "function_app.py"))
 swa_api = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(swa_api)
 
