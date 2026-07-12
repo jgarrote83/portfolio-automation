@@ -365,8 +365,9 @@ def me(req: func.HttpRequest) -> func.HttpResponse:
 # Proposer != approver: nothing here can apply a change directly — Approve
 # opens a GitHub PR (learning_github.py) that a human must merge. All three
 # routes sit behind the platform's mandatory owner-role auth (staticwebapp.
-# config.json); POST routes additionally verify the principal is the
-# configured OWNER_OBJECT_ID (defense in depth, spec §7).
+# config.json); POST routes additionally require the `owner` role on the
+# principal, optionally pinned tighter to a specific SWA user id via
+# OWNER_USER_ID (defense in depth, spec §7 — see _owner_ok).
 
 _LEARNING_PROPOSALS_TABLE = "LearningProposals"
 _LEARNING_CYCLES_TABLE = "LearningCycles"
@@ -381,11 +382,25 @@ def _learning_phase() -> int:
 
 
 def _owner_ok(principal: dict | None) -> bool:
-    owner_id = os.environ.get("OWNER_OBJECT_ID")
-    if not owner_id:
-        log.warning("OWNER_OBJECT_ID app setting not set — denying all Learning decision/run requests")
+    """Baseline: the authenticated principal must hold the `owner` role — the
+    same invitation-only role the platform's route rules already enforce
+    (staticwebapp.config.json). Optionally pinned tighter: if `OWNER_USER_ID`
+    is set, the principal's SWA `userId` must also match it exactly.
+
+    NOTE: on SWA's built-in AAD provider, `x-ms-client-principal.userId` is an
+    OPAQUE SWA-GENERATED HASH, not the Entra object id — the two are unrelated
+    identifiers. Capture the real value from `/.auth/me` AFTER signing in, not
+    from Entra/az CLI (fixed 2026-07-12 after that exact mistake shipped in
+    PR #23 as `OWNER_OBJECT_ID`, which would have denied everyone, including
+    the real owner, since no request's `userId` could ever equal an Entra OID)."""
+    if not principal:
         return False
-    return bool(principal) and principal.get("userId") == owner_id
+    if "owner" not in (principal.get("userRoles") or []):
+        return False
+    pin = os.environ.get("OWNER_USER_ID")
+    if pin:
+        return principal.get("userId") == pin
+    return True
 
 
 def _find_proposal(table, proposal_id: str) -> dict | None:

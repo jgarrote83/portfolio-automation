@@ -22,15 +22,18 @@ _spec.loader.exec_module(swa_api)
 import azure.functions as func  # noqa: E402
 
 
-def _principal_header(user_id="owner-object-id"):
-    payload = {"userId": user_id, "userDetails": "jgarrote@easygrids.com", "userRoles": ["owner", "authenticated"]}
+def _principal_header(user_id="owner-user-id", roles=("owner", "authenticated")):
+    # NOTE: `user_id` here stands in for SWA's own opaque `userId` (from
+    # /.auth/me) -- deliberately NOT Entra-object-id-shaped, since the two are
+    # unrelated identifiers (2026-07-12 fix).
+    payload = {"userId": user_id, "userDetails": "jgarrote@easygrids.com", "userRoles": list(roles)}
     return base64.b64encode(json.dumps(payload).encode()).decode()
 
 
-def _req(method, route, body=None, principal=True, user_id="owner-object-id"):
+def _req(method, route, body=None, principal=True, user_id="owner-user-id", roles=("owner", "authenticated")):
     headers = {}
     if principal:
-        headers["x-ms-client-principal"] = _principal_header(user_id=user_id)
+        headers["x-ms-client-principal"] = _principal_header(user_id=user_id, roles=roles)
     return func.HttpRequest(
         method=method, url=f"/api/learning/{route}", headers=headers, params={}, route_params={},
         body=json.dumps(body or {}).encode("utf-8"),
@@ -69,9 +72,12 @@ class _FakeTableService:
         return self.tables.setdefault(name, _FakeTableClient())
 
 
-def _setup(monkeypatch, phase="1", owner_id="owner-object-id", proposals_rows=None, cycles_rows=None):
+def _setup(monkeypatch, phase="1", owner_user_id_pin=None, proposals_rows=None, cycles_rows=None):
     monkeypatch.setenv("LEARNING_PHASE", phase)
-    monkeypatch.setenv("OWNER_OBJECT_ID", owner_id)
+    if owner_user_id_pin is not None:
+        monkeypatch.setenv("OWNER_USER_ID", owner_user_id_pin)
+    else:
+        monkeypatch.delenv("OWNER_USER_ID", raising=False)  # roles-only mode
     fake_service = _FakeTableService()
     if proposals_rows is not None:
         fake_service.tables["LearningProposals"] = _FakeTableClient(proposals_rows)
@@ -119,30 +125,56 @@ def test_proposals_get_reports_phase(monkeypatch):
     assert json.loads(resp.get_body())["phase"] == 2
 
 
-# --- OWNER_OBJECT_ID defense-in-depth --------------------------------------------------
+# --- owner check: `owner` role required, optional SWA-userId pin ----------------------
+# (NOT an Entra object id -- see the 2026-07-12 fix note on _owner_ok)
 
-def test_decision_forbidden_for_non_owner(monkeypatch):
+def test_roles_only_mode_allows_owner_role(monkeypatch):
+    """OWNER_USER_ID unset -> roles-only mode: the platform-enforced `owner`
+    role alone is sufficient."""
     rows = [{"PartitionKey": "2026-07", "RowKey": "AMD-1", "status": "pending"}]
-    _setup(monkeypatch, phase="3", owner_id="the-real-owner", proposals_rows=rows)
-    req = _req("POST", "decision", {"id": "AMD-1", "decision": "reject", "reason": "x"}, user_id="someone-else")
+    _setup(monkeypatch, phase="3", proposals_rows=rows)
+    req = _req("POST", "decision", {"id": "AMD-1", "decision": "reject", "reason": "x"})
+    resp = swa_api.learning_decision(req)
+    assert resp.status_code == 200
+
+
+def test_roles_only_mode_denies_without_owner_role(monkeypatch):
+    rows = [{"PartitionKey": "2026-07", "RowKey": "AMD-1", "status": "pending"}]
+    _setup(monkeypatch, phase="3", proposals_rows=rows)
+    req = _req("POST", "decision", {"id": "AMD-1", "decision": "reject", "reason": "x"},
+               roles=("authenticated",))
     resp = swa_api.learning_decision(req)
     assert resp.status_code == 403
 
 
-def test_run_forbidden_for_non_owner(monkeypatch):
-    _setup(monkeypatch, phase="2", owner_id="the-real-owner")
+def test_pin_set_and_match_passes(monkeypatch):
+    rows = [{"PartitionKey": "2026-07", "RowKey": "AMD-1", "status": "pending"}]
+    _setup(monkeypatch, phase="3", owner_user_id_pin="the-real-swa-userid", proposals_rows=rows)
+    req = _req("POST", "decision", {"id": "AMD-1", "decision": "reject", "reason": "x"},
+               user_id="the-real-swa-userid")
+    resp = swa_api.learning_decision(req)
+    assert resp.status_code == 200
+
+
+def test_pin_set_and_mismatch_denies(monkeypatch):
+    rows = [{"PartitionKey": "2026-07", "RowKey": "AMD-1", "status": "pending"}]
+    _setup(monkeypatch, phase="3", owner_user_id_pin="the-real-swa-userid", proposals_rows=rows)
+    req = _req("POST", "decision", {"id": "AMD-1", "decision": "reject", "reason": "x"},
+               user_id="someone-else")  # still has the owner role, wrong user id
+    resp = swa_api.learning_decision(req)
+    assert resp.status_code == 403
+
+
+def test_run_pin_mismatch_denies(monkeypatch):
+    _setup(monkeypatch, phase="2", owner_user_id_pin="the-real-swa-userid")
     resp = swa_api.learning_run_proxy(_req("POST", "run", {}, user_id="someone-else"))
     assert resp.status_code == 403
 
 
-def test_decision_forbidden_when_owner_object_id_unset(monkeypatch):
+def test_missing_principal_denies(monkeypatch):
     rows = [{"PartitionKey": "2026-07", "RowKey": "AMD-1", "status": "pending"}]
-    monkeypatch.setenv("LEARNING_PHASE", "3")
-    monkeypatch.delenv("OWNER_OBJECT_ID", raising=False)
-    fake_service = _FakeTableService()
-    fake_service.tables["LearningProposals"] = _FakeTableClient(rows)
-    monkeypatch.setattr(swa_api, "_tables", lambda: fake_service)
-    req = _req("POST", "decision", {"id": "AMD-1", "decision": "reject", "reason": "x"})
+    _setup(monkeypatch, phase="3", proposals_rows=rows)
+    req = _req("POST", "decision", {"id": "AMD-1", "decision": "reject", "reason": "x"}, principal=False)
     resp = swa_api.learning_decision(req)
     assert resp.status_code == 403
 

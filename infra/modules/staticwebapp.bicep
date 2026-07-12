@@ -22,8 +22,8 @@ param funcMasterKeySecret string
 @secure()
 param githubLearningPatSecret string
 
-@description('Learning Loop: Entra object id of the account holder — the decision/run endpoints verify the authenticated principal matches this (defense in depth on a shared-tenant edge case, spec §7). Not a secret, but not hardcoded either.')
-param ownerObjectId string
+@description('Learning Loop: optional SWA user-id pin (SWA\'s own opaque `userId` from /.auth/me AFTER signing in — NOT an Entra object id, see the note on _owner_ok in web/api/function_app.py). The decision/run endpoints require the `owner` role always; this additionally pins to one specific user id when set. Empty string = roles-only mode. Not a secret, but not hardcoded either.')
+param ownerUserId string = ''
 
 @description('Learning Loop rollout phase (spec §11): 1 = dry-run (no tab), 2 = tab read-only, 3 = full loop (decisions + PR mechanics). Ships at 1.')
 param learningPhase string = '1'
@@ -74,7 +74,7 @@ resource swaSettings 'Microsoft.Web/staticSites/config@2022-03-01' = {
     STORAGE_CONNECTION_STRING: storageConnectionStringSecret
     FUNC_MASTER_KEY: funcMasterKeySecret
     GITHUB_LEARNING_PAT: githubLearningPatSecret
-    OWNER_OBJECT_ID: ownerObjectId
+    OWNER_USER_ID: ownerUserId
     LEARNING_PHASE: learningPhase
   }
 }

@@ -7,8 +7,8 @@ param environment string = 'prod'
 @description('Region for the Static Web App (Free SKU is global; metadata sits here). Use eastus2 since SWA Free is not in all regions.')
 param swaLocation string = 'eastus2'
 
-@description('Learning Loop (FOLLOWUPS #13/#32): Entra object id of the account holder, for the decision/run endpoints owner check (spec §7). Set via parameters.prod.json — never hardcoded.')
-param ownerObjectId string
+@description('Learning Loop (FOLLOWUPS #13/#32): optional SWA user-id pin for the decision/run endpoints owner check (spec §7, defense in depth beyond the owner role). This is SWA\'s own opaque `userId` from /.auth/me AFTER signing in — NOT an Entra object id, the two are unrelated identifiers (a 2026-07-12 fix; the wrong value here would silently deny everyone). Empty string = roles-only mode (the owner role check alone). Set via parameters.prod.json — never hardcoded.')
+param ownerUserId string = ''
 
 // ── Resource names (match CLAUDE.md naming conventions) ─────────────────────────────
 var storageAccountName = 'stpfauto${environment}'
@@ -119,7 +119,7 @@ module swa 'modules/staticwebapp.bicep' = {
     storageConnectionStringSecret: keyVaultRef.getSecret('swa-storage-connection-string')
     funcMasterKeySecret: keyVaultRef.getSecret('swa-func-master-key')
     githubLearningPatSecret: keyVaultRef.getSecret('github-learning-pat')
-    ownerObjectId: ownerObjectId
+    ownerUserId: ownerUserId
   }
   dependsOn: [keyvault]
 }

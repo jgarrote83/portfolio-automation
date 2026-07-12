@@ -191,8 +191,12 @@ name the prior rejection and what changed.
   (function names, file locations, and config values re-verified).
 - **API:** `GET /api/learning/proposals`, `POST /api/learning/decision`,
   `POST /api/learning/run` — all behind the (now mandatory) Entra auth; the
-  decision endpoint additionally verifies the authenticated principal is the
-  configured owner object-id (defense in depth on a shared-tenant edge case).
+  decision/run endpoints additionally require the authenticated principal to
+  hold the `owner` role, optionally pinned tighter to one specific SWA user id
+  via `OWNER_USER_ID` (defense in depth on a shared-tenant edge case) — that
+  value is SWA's own opaque `userId` from `/.auth/me` *after* signing in, NOT
+  an Entra object id (the two are unrelated identifiers; a 2026-07-12 fix
+  after the wrong value shipped and would have denied everyone).
 
 ## 8. Approval mechanics (PR, never direct write)
 

@@ -168,10 +168,14 @@ not convention).
   `GET /api/learning/proposals` reports `LEARNING_PHASE >= 2` (`app.js::renderLearningNav`).
   Decision buttons render only at phase 3. **3-phase rollout** (`LEARNING_PHASE` app
   setting, ships `1`): 1 = dry-run (reviewer runs, no tab) → 2 = tab read-only → 3 = full
-  loop. `POST /api/learning/decision` additionally checks the authenticated principal's
-  `userId` against `OWNER_OBJECT_ID` (defense in depth on a shared-tenant edge case) —
-  same pattern the platform's `owner`-role auth already establishes (see the Static Web
-  App entry in Tech stack).
+  loop. `POST /api/learning/decision` and `/run` require the authenticated principal to
+  hold the `owner` role (the same role the platform's route rules already enforce), with
+  an OPTIONAL tighter pin to one specific SWA user id via `OWNER_USER_ID` — that's SWA's
+  own opaque `userId` from `/.auth/me` *after* signing in, **not an Entra object id**
+  (the two are unrelated identifiers; a wrong value here silently denies everyone,
+  including the real owner — fixed 2026-07-12 after exactly that shipped as
+  `OWNER_OBJECT_ID` in PR #23's first draft). Empty/unset `OWNER_USER_ID` = roles-only
+  mode.
 - **Tables**: `LearningCycles` (one row per cycle, status/model/mode/narrative) and
   `LearningProposals` (one row per proposal, `status`: pending → approved/rejected/stale
   → applied) — see Table Storage schemas below.
