@@ -276,7 +276,9 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
                 len(bad_enforced), [t.get("id") for t in bad_enforced],
             )
         if tv["rejected"] or tv["summary"]["clamped"]:
-            report_md += _validation_addendum(tv, gaps, vctx)
+            report_md += _validation_addendum(
+                tv, gaps, vctx, snapshot.get("paper_account", {}).get("positions")
+            )
         logger.info("Trade validation: %s", tv["summary"])
     except Exception:  # noqa: BLE001
         logger.exception("Trade validation CRASHED — flagging file (fail-closed)")
@@ -299,7 +301,8 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _validation_addendum(tv: dict, gaps: list[dict] | None = None,
-                         ctx: dict | None = None) -> str:
+                         ctx: dict | None = None,
+                         positions: list[dict] | None = None) -> str:
     """Markdown addendum appended to the report when the Tier-1 validator rejected or
     clamped anything — the human-readable record next to the model's own prose.
 
@@ -334,7 +337,7 @@ def _validation_addendum(tv: dict, gaps: list[dict] | None = None,
     # rejection/clamp changes the arithmetic, so recompute literal cash from the
     # VALIDATED (post-clamp) trades + the pre-trade cash in ctx.
     if (tv.get("rejected") or summary["clamped"]) and ctx is not None:
-        post_cash = _post_validation_cash(tv.get("trades", []), gaps or [], ctx)
+        post_cash = _post_validation_cash(tv.get("trades", []), gaps or [], ctx, positions)
         if post_cash is not None:
             lines.append(
                 "\n_Body cash/sleeve figures assumed all proposed trades executed; "
@@ -343,15 +346,26 @@ def _validation_addendum(tv: dict, gaps: list[dict] | None = None,
     return "\n".join(lines) + "\n"
 
 
-def _post_validation_cash(trades: list[dict], gaps: list[dict], ctx: dict) -> float | None:
+def _post_validation_cash(trades: list[dict], gaps: list[dict], ctx: dict,
+                          positions: list[dict] | None = None) -> float | None:
     """Literal cash after only the VALIDATED trades execute: pre-trade cash + sell
-    proceeds - buy notional, priced off the gap rows. None if pre-trade cash is
+    proceeds - buy notional, priced off the gap rows (paper-account position price as
+    a fallback for a validated trade in a name with no gap row — e.g. an off-roster
+    flex leftover like MU, 2026-07-13 audit finding 3). None if pre-trade cash is
     unknown."""
     try:
         cash = float(ctx.get("cash_usd"))
     except (TypeError, ValueError):
         return None
     price: dict[str, float] = {}
+    for p in positions or []:
+        sym = str(p.get("ticker") or "").upper()
+        try:
+            px = float(p.get("current_price"))
+        except (TypeError, ValueError):
+            continue
+        if sym and px > 0:
+            price[sym] = px
     for g in gaps or []:
         sym = str(g.get("symbol") or "").upper()
         try:
@@ -359,7 +373,7 @@ def _post_validation_cash(trades: list[dict], gaps: list[dict], ctx: dict) -> fl
         except (TypeError, ValueError):
             continue
         if sym and px > 0:
-            price[sym] = px
+            price[sym] = px   # gap-row price wins over the position-price fallback
     for t in trades or []:
         sym = str(t.get("symbol") or t.get("ticker") or "").upper()
         side = str(t.get("side") or t.get("action") or "").lower()
@@ -385,6 +399,14 @@ def _build_reference_gaps(snapshot: dict) -> tuple[list[dict], dict]:
     governed by its own band, not the per-sleeve gap protocol — SGOV appears only if
     the reference explicitly targets it. Returns ([], {}) when the reference or the
     paper account is unavailable (enforcement then has nothing to reconcile against).
+
+    A held name that is off-roster (neither a reference target nor a CORE_ROSTER
+    member — a flex leftover like MU, 2026-07-13 audit finding 3) also gets a row, at
+    `reference_pct: 0.0` and flagged `"off_roster": True`, so the Tier-1 validator's
+    V3/V4 sell-side checks see it (sell ≤ held) and `_post_validation_cash` can price
+    it. `reconcile` (band enforcement) must never synthesize a trade for one of these
+    — flex exits are the flex engine's + human approval's job — so it filters
+    `off_roster` rows out of its own working set.
     """
     ref = snapshot.get("reference_weights") or {}
     targets = ref.get("target_weights_pct") or {}
@@ -414,7 +436,10 @@ def _build_reference_gaps(snapshot: dict) -> tuple[list[dict], dict]:
             return None
 
     gaps = []
-    universe = {str(t).upper() for t in targets} | (set(positions) & set(CORE_ROSTER))
+    targets_up = {str(t).upper() for t in targets}
+    core_held = set(positions) & set(CORE_ROSTER)
+    off_roster_held = set(positions) - targets_up - set(CORE_ROSTER)
+    universe = targets_up | core_held | off_roster_held
     for sym in sorted(universe):
         pos = positions.get(sym) or {}
         try:
@@ -434,6 +459,7 @@ def _build_reference_gaps(snapshot: dict) -> tuple[list[dict], dict]:
             "reference_pct": round(float(targets.get(sym, 0.0) or 0.0), 4),
             "price": _price(sym),
             "held_qty": held_qty,   # V4 sell-clamp input for the Tier-1 validator
+            "off_roster": sym in off_roster_held,
         })
     ctx = {
         "deployment_gate": (snapshot.get("regime_gate") or {}).get("status"),

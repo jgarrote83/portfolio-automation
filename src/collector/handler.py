@@ -38,6 +38,7 @@ from shared.quadrants import (
     primary_quadrant,
     intl_config,
     roles_config,
+    selected_core_members,
     selection_config,
 )
 
@@ -443,6 +444,23 @@ def _load_equity_spy_series(
         except Exception:  # noqa: BLE001
             logger.exception("Could not persist perf series (non-fatal)")
     return series
+
+
+def _build_price_universe(tickers: list[str], flex_candidate_tickers: list[str]) -> list[str]:
+    """The EOD-price fetch list: held tickers, every role's `selected` incumbent,
+    the ETF watchlist, and flex candidates (order-preserving, deduped).
+
+    Flex candidates are included so the analyzer can size a buy (weight→shares
+    needs a price) and so gatekeeper G2 sees a price for the candidate. Every
+    role's `selected` incumbent is included (2026-07-13 audit finding 1) because
+    those are exactly the names `reference_weights` can target — a name with no
+    held position and no other reason to be fetched (e.g. KMLM, IEF, VXUS while
+    unheld) previously had no price, no gap row, and no way for band enforcement
+    to synthesize the buy that would close its underweight.
+    """
+    return list(dict.fromkeys(
+        tickers + list(selected_core_members()) + _ETF_WATCHLIST + flex_candidate_tickers
+    ))
 
 
 def _roster_closes(prices: dict | None) -> dict:
@@ -1360,11 +1378,10 @@ def run() -> None:
     logger.info("FRED: %d series collected", sum(1 for v in macro_data.values() if v))
 
     # --- EOD prices (FMP batch-quote, single call) --------------------------
-    # Include flex candidates so the analyzer can size a buy (weight→shares needs
-    # a price) and so gatekeeper G2 sees a price for the candidate.
-    all_tickers = list(dict.fromkeys(tickers + _ETF_WATCHLIST + flex_candidate_tickers))  # preserve order, dedupe
+    all_tickers = _build_price_universe(tickers, flex_candidate_tickers)
     prices = fmp.get_eod_prices(all_tickers)
-    logger.info("FMP prices: %d/%d collected", len(prices), len(all_tickers))
+    logger.info("FMP prices: %d/%d collected (universe: held+selected-core+watchlist+flex)",
+                len(prices), len(all_tickers))
 
     # --- Regional rotation pre-compute --------------------------------------
     regional_rotation = _build_regional_rotation(fmp, macro_data)

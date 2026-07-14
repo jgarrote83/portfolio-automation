@@ -1138,6 +1138,58 @@ requested Fable 5 quota lands on the `Portfolio-Analysis` Foundry project. Verif
 deployment exists and quota is non-zero (`az` / Foundry portal) before flipping — do not
 assume quota approval happened silently.
 
+### 41. 2026-07-13 daily-report audit: price universe, intl-pool floor, off-roster validation seam — 🔶 PR OPEN (`fix/20260713-audit-price-universe-validator`), pending account-holder review
+The 07-13 report exposed three systemic gaps, all confirmed against the code and fixed
+on this branch (not yet merged):
+- **Finding 1 (HIGH) — reference buys were impossible, not deferred.** The collector's
+  EOD price universe (`tickers + _ETF_WATCHLIST + flex_candidate_tickers`) never
+  included an unheld role's `selected` incumbent (KMLM, IEF, VXUS, XLV, USMV, COWZ,
+  VTIP, SMH, XLF — the names the Q3/Q4 underweights needed), so they had no price, no
+  gap row, and band enforcement could never synthesize the buy. **Fixed (Task A):**
+  new `shared/quadrants.selected_core_members()` + collector `_build_price_universe()`
+  add every role's selected member to the fetch list. FMP `get_eod_prices` cost rose
+  from ~29 to ~38 tickers/day (well inside the 250 req/day Starter budget — the
+  alternative full-`CORE_ROSTER` universe would be ~46 tickers, also affordable, but
+  the minimal selected-members version was shipped per the task's own preference).
+- **Finding 2 — non-selected `intl_leader` pool members (EWZ/VSS/IEMG/IDMO/EWJ)
+  couldn't be unwound.** They're `CORE_ROSTER` but not `LEGACY_EXITS`, so V3 floor-
+  clamped every attempted full exit to a 0.1%/1-share dust stub. **B0 decision (this
+  session, per the task's explicit decision gate): Option 1 — allow sell-to-zero.**
+  Rationale: the roster revision made intl leader-selective (only VXUS + `leader_pick`
+  should be held), the reference already targets non-selected members at 0, and V1.5
+  already blocks BUYING them — the sell-side floor bypass is the mirror image. A
+  member can always come back later via a human `selected`/`leader_pick` commit.
+  **Fixed (Task B1):** `trade_validation._non_selected_pool_member()` mirrors V1.5's
+  role/leader_pick logic exactly; `floor_lb` is 0 for `LEGACY_EXITS` **or** a non-
+  selected pool member, never keyed off `reference_pct == 0` (a selected out-of-favor
+  name can legitimately show ref 0 and still owes its floor). Also fixed a cosmetic
+  bug (**Task B2**, unconditional on B0): the sell-clamp math could compute a
+  negative share count ("sell clamped 1→-1") when `cur` sat fractionally inside the
+  floor epsilon — now floors at 0 with a clean "already at/below the window floor —
+  nothing sellable" reason. **Task B3:** project-instructions.md now distinguishes
+  "intl pool unwinds" (`[CORE — intl pool]`) from legacy exits — the 07-13 report had
+  mislabeled these five names `[LEGACY EXIT]`.
+- **Finding 3 — off-roster held names (flex leftovers like MU) were invisible to the
+  deterministic layer.** `_build_reference_gaps`'s universe excluded them, so (a)
+  `_post_validation_cash` undercounted post-validation literal cash by the flex
+  position's proceeds (07-13: printed ≈$4,597 vs a true ≈$6,440), and (b) an
+  off-roster SELL skipped V3/V4 entirely and could reach the executor unvalidated.
+  **Fixed:** Task C1 adds a paper-position `current_price` fallback to
+  `_post_validation_cash` (gap-row price still wins when both exist); Task C2 makes
+  `_build_reference_gaps` append a `reference_pct: 0.0, off_roster: True` row for
+  every held off-roster name, priced via the existing position fallback — visible to
+  the validator's sell-side V3/V4 checks (a full exit passes, an oversell clamps to
+  held) but filtered out of `reconcile`'s working set (band enforcement must never
+  synthesize a trade for a flex leftover — that's the flex engine's + human
+  approval's job). Off-roster BUYs are unaffected (V1 already rejected them, still
+  does with the row present).
+- **Shipped:** Tasks A, B (B0=Option 1, B1, B2, B3), C (C1, C2). Suite +19 tests
+  (545→564), ruff clean. **Out of scope on this branch** (see the prompt for this
+  session): the cash-drag attribution rule, the shock-3 "15% ceiling" prompt phrasing,
+  the Table A deterministic `current_by_quadrant` block, the FMP `earnings_calendar`
+  GOOGL 07-22 coverage gap, and tranche-sizing config visibility (#33(i)) — all still
+  open for a future session.
+
 ---
 
 ## Done

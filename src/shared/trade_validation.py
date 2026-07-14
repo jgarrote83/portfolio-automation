@@ -107,6 +107,22 @@ _DEFENSIVE = set(DAMPER) | {"SGOV"}
 _EPS_PP = 0.05
 
 
+def _non_selected_pool_member(sym: str, intl_leader_pick: str | None) -> bool:
+    """True when `sym` belongs to a role's pool but isn't that role's `selected`
+    incumbent — mirrors V1.5's selection logic (including the `intl_leader` /
+    `leader_pick` auto-rotation exception) so the sell-side floor bypass (Task B,
+    2026-07-13 audit finding 2) can never disagree with V1.5's buy-side block on
+    which member is "the" selected one."""
+    r = role_of(sym)
+    if r is None:
+        return False
+    if sym == selected_for_role(r):
+        return False
+    if r == "intl_leader" and intl_leader_pick and sym == intl_leader_pick:
+        return False
+    return True
+
+
 def _norm(trade: dict) -> tuple[str, str, float | None]:
     """Normalize exactly as the executor does: symbol|ticker upper, side|action
     lower, quantity|qty numeric (None when non-numeric)."""
@@ -293,10 +309,19 @@ def validate_trades(
             ref = float(row.get("reference_pct") or 0)
             w = max(residual.get(sym, 0.0), band)
             # Legacy exits bypass the floor lower bound so an exit sell can reach 0
-            # (Task D — "sell-to-zero allowed ONLY for LEGACY_EXITS"). Every other core
-            # name keeps the sleeve floor.
-            floor_lb = 0.0 if sym in LEGACY_EXITS else (
-                floor_pct if sym in CORE_ROSTER else 0.0)
+            # (Task D — "sell-to-zero allowed ONLY for LEGACY_EXITS"). A non-selected
+            # pool member (2026-07-13 audit finding 2, B0 decided: sell-to-zero) gets
+            # the same bypass — the roster revision made these roles selective, the
+            # reference already targets non-selected members at 0, and V1.5 already
+            # blocks BUYING them, so blocking a full sell-side unwind was the one gap.
+            # Every other core name (including the role's SELECTED/current-leader-pick
+            # member) keeps the sleeve floor — do NOT key this on reference_pct == 0,
+            # since the reference drops sub-0.05% floors from target_weights_pct and a
+            # selected out-of-favor name can legitimately show ref 0 while still owed
+            # its floor.
+            floor_lb = 0.0 if (
+                sym in LEGACY_EXITS or _non_selected_pool_member(sym, intl_leader_pick)
+            ) else (floor_pct if sym in CORE_ROSTER else 0.0)
             lo = max(ref - w, floor_lb, 0.0)
             hi = ref + w
             cur = cur_pct.get(sym, 0.0)
@@ -312,13 +337,23 @@ def validate_trades(
                     ])
                     continue
                 if post < lo - _EPS_PP:
-                    # +1e-6: float noise must never cost a whole share on the floor()
-                    new_qty = math.floor((cur - lo) / 100.0 * equity / px + 1e-6)
-                    reasons.append(
-                        f"sell clamped {int(qty)}→{new_qty}: landing {post:.2f}% would "
-                        f"breach the window floor {lo:.2f}% (ref {ref:.2f} ± {w:.1f}, "
-                        "floor-protected)"
-                    )
+                    # +1e-6: float noise must never cost a whole share on the floor().
+                    # max(0, ...): `cur` can sit fractionally BELOW `lo` (inside
+                    # _EPS_PP, so the reject above didn't fire) and still floor() to
+                    # a negative share count — the stamped quantity/reason must never
+                    # go negative (2026-07-13 audit finding 2's cosmetic "sell clamped
+                    # 1→-1" bug).
+                    new_qty = max(0, math.floor((cur - lo) / 100.0 * equity / px + 1e-6))
+                    if new_qty <= 0:
+                        reasons.append(
+                            "already at/below the window floor — nothing sellable"
+                        )
+                    else:
+                        reasons.append(
+                            f"sell clamped {int(qty)}→{new_qty}: landing {post:.2f}% would "
+                            f"breach the window floor {lo:.2f}% (ref {ref:.2f} ± {w:.1f}, "
+                            "floor-protected)"
+                        )
                     qty = float(new_qty)
             else:
                 # Task 2 carve-out: a literal-cash → SGOV conversion is a pure cash-

@@ -75,7 +75,8 @@ rotation".)
 floor of **~0.1% of equity, and never below 1 share** (Phase 1 is integer-shares-only, so
 for higher-priced names the 1-share minimum is the binding floor). The backbone is always
 *held*, not merely *eligible*; trimming hard toward the floor is how you express "this
-quadrant is out of favor" — going to zero is forbidden **except for legacy exits** (below).
+quadrant is out of favor" — going to zero is forbidden **except for legacy exits and intl
+pool unwinds** (below).
 
 **Legacy exits (liquidate, never re-buy into core):** AMZN, GOOGL, INTC, MCK, DBA, TIP,
 XSD, PPA, EUAD are **held names being wound down** (the AMZN/GOOGL exempt-hold doctrine is
@@ -84,6 +85,13 @@ you liquidate them in tranches (see "Execute toward the reference"), and the val
 **allows a legacy name to be sold to zero** (floor bypassed) but **rejects any buy** of one
 ("legacy exit — core re-entry closed (flex only)"). INTC/MCK/PPA/EUAD may be re-entered later
 as *flex* theses, never as core.
+
+**Intl pool unwinds (distinct from legacy exits — never label these `[LEGACY EXIT]`):** a
+held pool member that is not its role's `selected` incumbent (nor, for `intl_leader`, the
+current `leader_pick`) — e.g. EWZ/VSS/IEMG/IDMO/EWJ while AIA is selected — is sellable to
+zero exactly like a legacy exit (2026-07-13 audit), but it is still core, not wound down: a
+future human `selected`/`leader_pick` change can bring it back. Label these trades
+`[CORE — intl pool]`.
 
 **How to liquidate a legacy exit:**
 - **Tranche the exit** at `reference_execution.tranche_pp_max` per session — a legacy
