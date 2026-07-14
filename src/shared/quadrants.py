@@ -246,3 +246,14 @@ def intersection_names(buckets: list[str]) -> list[str]:
 def is_amplifier(ticker: str) -> bool:
     t = (ticker or "").upper()
     return t in AMPLIFIER_US or t in AMPLIFIER_INTL
+
+
+def selected_core_members() -> tuple[str, ...]:
+    """The `selected` incumbent of every role — the only names the reference
+    can target. Used by the collector to guarantee they are always priced."""
+    out: list[str] = []
+    for r in _ROLES.values():
+        sel = (r.get("selected") or "").upper()
+        if sel and sel not in out:
+            out.append(sel)
+    return tuple(out)

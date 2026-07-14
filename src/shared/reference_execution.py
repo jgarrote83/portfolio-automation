@@ -145,7 +145,14 @@ def reconcile(
         return {"sleeves": sleeves, "enforced_trades": enforced, "summary": summary,
                 "enforcement_notional_usd": 0.0}
 
-    rows = {str(g.get("symbol") or "").upper(): g for g in gaps if g.get("symbol")}
+    # Off-roster held names (flex leftovers, e.g. MU) get a gap row so the Tier-1
+    # validator can clamp their sells, but band enforcement must NEVER synthesize a
+    # trade for one — flex exits are governed by the flex engine and human approval,
+    # not the deterministic reference (2026-07-13 audit finding 3).
+    rows = {
+        str(g.get("symbol") or "").upper(): g
+        for g in gaps if g.get("symbol") and not g.get("off_roster")
+    }
 
     # D1 — per-sleeve allowed residual (shared helper — rejected/absent shelters nothing).
     residual = allowed_residuals(override_decisions, max_mag)

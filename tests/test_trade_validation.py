@@ -479,3 +479,70 @@ def test_buy_with_no_gap_row_rejected():
     assert len(res["rejected"]) == 1
     assert any("no reference row" in s
                for s in res["rejected"][0]["validation"]["reasons"])
+
+
+# --- Task B1 (2026-07-13 audit finding 2, B0 decided: sell-to-zero) ----------------
+# Non-selected pool members (e.g. the intl_leader pool's EWZ/VSS/IEMG/IDMO/EWJ) were
+# permanent dust stubs — CORE_ROSTER members but not LEGACY_EXITS, so V3 floor-clamped
+# every attempted full exit. The reference already targets them at 0 and V1.5 already
+# blocks BUYING them; the floor bypass now mirrors that on the sell side.
+
+def test_non_selected_intl_pool_member_sells_to_zero():
+    """EWZ (intl_leader pool member; selected=AIA, current pick=AIA) sells its full
+    held position — the floor is bypassed exactly like a legacy exit."""
+    gaps = [_gap("EWZ", 0.44, 0.0, price=38.0, held=12)]
+    res = validate_trades(gaps, [_t("EWZ", "sell", 12)], [], CFG,
+                          _ctx(intl_leader_pick="AIA"))
+    assert res["rejected"] == []
+    t = res["trades"][0]
+    assert t["validation"]["status"] == "passed"
+    assert t["quantity"] == 12
+
+
+def test_one_share_non_selected_pool_member_sells_to_zero():
+    """IEMG at 1 share — below the OLD 0.1%/1-share floor — now sells fully."""
+    gaps = [_gap("IEMG", 0.08, 0.0, price=48.0, held=1)]
+    res = validate_trades(gaps, [_t("IEMG", "sell", 1)], [], CFG,
+                          _ctx(intl_leader_pick="AIA"))
+    assert res["rejected"] == []
+    t = res["trades"][0]
+    assert t["validation"]["status"] == "passed"
+    assert t["quantity"] == 1
+
+
+def test_selected_member_sell_to_zero_still_floor_clamped():
+    """Control: the SELECTED member of a role (VXUS, intl_broad) keeps its floor
+    even on a sell-to-zero attempt — only non-selected pool members bypass it."""
+    gaps = [_gap("VXUS", 5.0, 0.0, price=50.0, held=100)]
+    res = validate_trades(gaps, [_t("VXUS", "sell", 100)], [], CFG, _ctx())
+    t = res["trades"][0]
+    assert t["validation"]["status"] == "clamped"
+    assert 1 <= t["quantity"] < 100
+    assert res["rejected"] == []
+
+
+def test_current_leader_pick_sell_to_zero_still_floor_clamped():
+    """Control: the CURRENT intl_leader_pick (even one that differs from
+    sleeve-roles.json's committed `selected`) also keeps its floor."""
+    gaps = [_gap("EWJ", 5.0, 0.0, price=60.0, held=90)]
+    res = validate_trades(gaps, [_t("EWJ", "sell", 90)], [], CFG,
+                          _ctx(intl_leader_pick="EWJ"))
+    t = res["trades"][0]
+    assert t["validation"]["status"] == "clamped"
+    assert 1 <= t["quantity"] < 90
+    assert res["rejected"] == []
+
+
+# --- Task B2 (2026-07-13 audit finding 2): negative sell-clamp cosmetic bug --------
+
+def test_sell_clamp_never_goes_negative_at_floor_edge():
+    """cur sits fractionally inside the floor (not rejected outright — cur >= lo −
+    EPS) but strictly below lo, so pre-fix `floor((cur−lo)/100*equity/px)` produced a
+    NEGATIVE share count ("sell clamped 1→-1"). The clamp must floor at 0 with a
+    clean reason, never a negative quantity or reason string."""
+    gaps = [_gap("GLD", 0.09, 0.05, price=100.0, held=1)]   # lo = max(0.05−5, 0.1, 0) = 0.1
+    res = validate_trades(gaps, [_t("GLD", "sell", 1)], [], CFG, _ctx())
+    assert len(res["rejected"]) == 1
+    reasons = res["rejected"][0]["validation"]["reasons"]
+    assert any("already at/below the window floor" in r for r in reasons)
+    assert not any("-1" in r or "→-" in r for r in reasons)

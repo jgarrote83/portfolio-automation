@@ -319,12 +319,19 @@ def test_build_reference_gaps_from_snapshot():
     }
     gaps, ctx = _build_reference_gaps(snap)
     by_sym = {g["symbol"]: g for g in gaps}
-    assert set(by_sym) == {"SPY", "GLD"}          # MU is off-roster — excluded
+    # MU is off-roster (neither a reference target nor CORE_ROSTER) — it still gets
+    # a row (2026-07-13 audit finding 3, Task C2) so the validator can clamp its
+    # sell, but flagged off_roster so band enforcement (reconcile) ignores it.
+    assert set(by_sym) == {"SPY", "GLD", "MU"}
     assert by_sym["SPY"]["current_pct"] == 17.0
     assert by_sym["SPY"]["price"] == 555.0        # snapshot price wins
     assert by_sym["SPY"]["held_qty"] == 30.0      # read from the "qty" field
+    assert by_sym["SPY"]["off_roster"] is False
     assert by_sym["GLD"]["current_pct"] == 0.0    # unheld target still gets a row
     assert by_sym["GLD"]["held_qty"] == 0.0
+    assert by_sym["MU"]["reference_pct"] == 0.0
+    assert by_sym["MU"]["off_roster"] is True
+    assert by_sym["MU"]["price"] == 120.0         # no snapshot price — position fallback
     assert ctx["deployment_gate"] == "closed"
     assert ctx["equity_usd"] == 100_000.0 and ctx["cash_usd"] == 5_000.0
 

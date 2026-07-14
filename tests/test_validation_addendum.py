@@ -66,3 +66,26 @@ def test_post_validation_cash_counts_buys_and_sells():
 
 def test_post_validation_cash_none_without_pretrade_cash():
     assert _post_validation_cash([], [], {}) is None
+
+
+# --- Task C1 (2026-07-13 audit finding 3): paper-position price fallback ----------
+# A validated trade in a name with no gap row (e.g. an off-roster flex leftover like
+# MU) previously contributed $0 to the corrected cash figure.
+
+def test_post_validation_cash_falls_back_to_position_price_without_gap_row():
+    trades = [_stamped("MU", "sell", 10)]
+    positions = [{"ticker": "MU", "current_price": 75.0}]
+    # No gap row for MU at all — only the paper-account position carries a price.
+    assert _post_validation_cash(trades, [], {"cash_usd": 1_000.0}, positions) == 1_750.0
+
+
+def test_post_validation_cash_gap_row_price_wins_over_position_fallback():
+    trades = [_stamped("MU", "sell", 10)]
+    gaps = [{"symbol": "MU", "price": 80.0}]
+    positions = [{"ticker": "MU", "current_price": 75.0}]
+    assert _post_validation_cash(trades, gaps, {"cash_usd": 1_000.0}, positions) == 1_800.0
+
+
+def test_post_validation_cash_skips_trade_with_neither_price_source():
+    trades = [_stamped("MU", "sell", 10)]
+    assert _post_validation_cash(trades, [], {"cash_usd": 1_000.0}, []) == 1_000.0
