@@ -274,3 +274,45 @@ def test_high_conviction_regime_is_not_no_read():
     rw = _build(_paper({"SPY": 20, "SGOV": 10}), g, i, _gate("open", "dovish"))
     assert rw["no_read"] is False
     assert "no_read_ballast" not in rw["binding"]
+
+
+# --- Task C (decision C0 = Option 1, session 2026-07-15): intl_broad gate-closed --
+
+def _ig(broad_target="VXUS", broad_pp=2.0, leader_pick="AIA", leader_pp=1.0):
+    targets = {broad_target: broad_pp}
+    if leader_pick and leader_pp:
+        targets[leader_pick] = leader_pp
+    return {
+        "available": True, "status": "active", "broad_target": broad_target,
+        "leader_pick": leader_pick, "sleeve_target_pp": broad_pp + (leader_pp or 0.0),
+        "intl_targets_pct": targets,
+    }
+
+
+def test_intl_broad_zeroed_when_gate_closed():
+    """VXUS was rejected two days running (07-14, 07-15) — 'amplifier buy VXUS
+    forbidden' — because intl_broad is unconditionally amplifier_intl and the gate
+    was closed both days. The reference must not keep targeting a structurally
+    unreachable buy; C0 zeroes intl_broad's base while closed."""
+    g, i = _axes("falling", "flat")
+    # Wire intl_governance directly (the _build helper doesn't thread it through).
+    rw_closed = _build_reference_weights(
+        _paper({"GLD": 10, "SGOV": 10}), g, i, _gate("closed", "hawkish"), _rot("neutral"),
+        {}, {}, {}, CFG, intl_governance=_ig(),
+    )
+    assert rw_closed["target_weights_pct"].get("VXUS", 0.0) == 0.0
+    # The leader slot is UNTOUCHED by this gate — it stays whatever intl_governance
+    # (already gate-aware, halves not zeroes) computed.
+    assert rw_closed["target_weights_pct"].get("AIA", 0.0) > 0.0
+    assert abs(_total(rw_closed) - 100.0) < 0.6
+
+
+def test_intl_broad_restored_when_gate_open():
+    """Self-healing: the same inputs with an OPEN gate keep the full intl_broad
+    base target — this is rebuilt fresh every day, no state to get stuck."""
+    g, i = _axes("falling", "flat")
+    rw_open = _build_reference_weights(
+        _paper({"GLD": 10, "SGOV": 10}), g, i, _gate("open", "dovish"), _rot("neutral"),
+        {}, {}, {}, CFG, intl_governance=_ig(),
+    )
+    assert rw_open["target_weights_pct"].get("VXUS", 0.0) == 2.0

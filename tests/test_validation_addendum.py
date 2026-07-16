@@ -12,7 +12,11 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from analyzer.handler import _post_validation_cash, _validation_addendum  # noqa: E402
+from analyzer.handler import (  # noqa: E402
+    _flagged_sleeves_addendum,
+    _post_validation_cash,
+    _validation_addendum,
+)
 
 
 def _stamped(sym, side, qty, status="passed", reasons=None):
@@ -55,6 +59,33 @@ def test_no_cash_line_when_ctx_absent():
     md = _validation_addendum(tv)
     assert "post-validation literal cash" not in md
     assert "Submittable: 1 of 1 proposed trades." in md
+
+
+# --- Task D2 (session 2026-07-15): flagged-sleeves addendum -------------------
+
+def test_flagged_sleeves_addendum_empty_when_nothing_flagged():
+    assert _flagged_sleeves_addendum({}) == ""
+    assert _flagged_sleeves_addendum({"SPY": {"status": "confirming"}}) == ""
+
+
+def test_flagged_sleeves_addendum_lists_non_compliant_sleeves():
+    """Pins the MCK slow-walk shape: a legacy-exit shortfall that reconcile flagged
+    must now show up in the REPORT, not just daily-trades JSON."""
+    recon_sleeves = {
+        "MCK": {
+            "status": "non_compliant_flagged", "gap_pp": 11.56,
+            "required_move_today_pp": 6.56, "model_move_pp": 1.65,
+            "reasons": ["6.6pp re-risk shortfall — never synthesized (spec §6 asymmetry)"],
+        },
+        "SPY": {"status": "confirming", "gap_pp": 2.0},
+    }
+    md = _flagged_sleeves_addendum(recon_sleeves)
+    assert "Reference-execution shortfalls" in md
+    assert "**MCK**" in md
+    assert "11.56pp" in md
+    assert "6.56pp" in md
+    assert "1.65pp" in md
+    assert "SPY" not in md
 
 
 def test_post_validation_cash_counts_buys_and_sells():

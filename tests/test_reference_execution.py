@@ -67,9 +67,27 @@ def test_is_de_risk_move_classification():
     assert is_de_risk_move("sell", "AIA")        # selected intl amplifier too
     assert is_de_risk_move("buy", "GLD")         # buying damper = de-risk
     assert is_de_risk_move("buy", "SGOV")        # SGOV counts as ballast
+    assert is_de_risk_move("sell", "MCK")        # legacy-exit sell = de-risk (Task D1)
+    assert is_de_risk_move("sell", "AMZN")       # legacy-exit sell = de-risk (Task D1)
     assert not is_de_risk_move("sell", "TLT")    # selling damper = re-risk
     assert not is_de_risk_move("buy", "QQQ")     # risk-on buy = re-risk
     assert not is_de_risk_move("buy", "MU")      # off-roster buy = re-risk
+
+
+def test_legacy_exit_slow_walk_now_synthesized_not_flagged():
+    """Pins the 2026-07-14/07-15 MCK slow-walk: a legacy-exit overweight shortfall
+    used to be flagged 'non_compliant_flagged — re-risk shortfall — never
+    synthesized' with zero backstop (the book's largest overweight both sessions).
+    Task D1 makes a legacy-exit sell de-risk, so D3 now synthesizes the shortfall
+    at tranche pace like any other de-risk correction."""
+    # MCK 11.56% vs 0% reference (07-14 shape) — gap 11.56pp, band 5pp, tranche 10pp.
+    gaps = [_gap("MCK", 11.56, 0.0, price=100.0)]
+    r = reconcile(gaps, [], [], CFG, _ctx(equity_usd=100_000.0, cash_usd=0.0))
+    assert r["sleeves"]["MCK"]["status"] == "enforced"
+    assert r["enforced_trades"], "expected a synthesized MCK sell, got none"
+    trade = r["enforced_trades"][0]
+    assert trade["side"] == "sell"
+    assert trade["symbol"] == "MCK"
 
 
 # --- D2: confirming at tranche pace -------------------------------------------

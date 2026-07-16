@@ -8,6 +8,7 @@ from shared.storage import (
     ensure_tables,
     list_snapshot_dates,
     query_entities,
+    read_executions,
     read_json_blob,
     read_perf_series,
     read_snapshot,
@@ -1707,6 +1708,29 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Override record build failed (non-fatal)")
 
+    # --- Session 2026-07-15, Task A1: execution_review (fill/failure visibility) --
+    # Non-fatal. Alpaca-only, FMP budget untouched. See _build_execution_review's
+    # docstring — this is the fix for the MU incident's invisibility, not the MU
+    # position itself (that is the account holder's call, outside this session).
+    execution_review: dict = {"available": False}
+    try:
+        execution_review = _build_execution_review(secrets, today)
+        if execution_review.get("failed") or execution_review.get("unfilled"):
+            logger.warning(
+                "Execution review for %s: %d failed, %d unfilled (of %d submitted)",
+                execution_review.get("date"), len(execution_review.get("failed") or []),
+                len(execution_review.get("unfilled") or []),
+                execution_review.get("submitted"),
+            )
+        else:
+            logger.info(
+                "Execution review: available=%s date=%s filled=%s",
+                execution_review.get("available"), execution_review.get("date"),
+                execution_review.get("filled"),
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Execution review build failed (non-fatal)")
+
     # --- Assemble snapshot ---------------------------------------------------
     snapshot = {
         "date": today,
@@ -1751,6 +1775,7 @@ def run() -> None:
         "quadrant_performance": quadrant_performance,
         "track_record": track_record,
         "override_record": override_record,
+        "execution_review": execution_review,
         "news": {
             "market": market_news[:50],
             "forex": forex_news[:20],
@@ -1926,6 +1951,104 @@ def _build_flex_reconciliation(flex_state: dict, paper_account: dict) -> dict:
     broker_held = sorted(broker)
     status = "ok" if engine_held == broker_held else "mismatch"
     return {"status": status, "engine_held": engine_held, "broker_held": broker_held}
+
+
+def _build_execution_review(secrets: dict, today: str) -> dict:
+    """Read the prior trading day's `daily-executions/{date}.json` and reconcile
+    each submitted order's ACTUAL terminal state against Alpaca (session 2026-07-15,
+    Task A1 — a response to the 2026-07-14/15 MU incident).
+
+    By the 09:00 ET run every order from the prior session is terminal (filled,
+    rejected, canceled, or expired) — but nothing previously read this blob back or
+    checked in with Alpaca after submission: `_place_one` records SUBMISSION, not
+    fills, and the analyzer/report were both blind to a submitted-but-errored (MU's
+    403, two days running) or submitted-but-unfilled order. It silently re-proposed
+    the same trade the next day with no visible trace of the failure. This block
+    closes that loop: the analyzer's prompt (Task A1 companion edit) must surface
+    `failed`/`unfilled` entries in the Data Integrity Warning and must not assume
+    yesterday's proposals executed.
+
+    Alpaca-only (the FMP budget is untouched). Non-fatal: any failure here (missing
+    creds, no prior file within a week, an Alpaca outage) returns
+    `{"available": False, "reason": ...}` — never raises, never loses the snapshot.
+    """
+    try:
+        ak = secrets.get("AlpacaApiKey")
+        asec = secrets.get("AlpacaApiSecret")
+        if not ak or not asec:
+            return {"available": False, "reason": "Alpaca credentials missing"}
+        client = AlpacaClient(api_key=ak, api_secret=asec)
+
+        d0 = date.fromisoformat(today)
+        prev_doc = None
+        prev_date = None
+        for back in range(1, 8):
+            d = (d0 - timedelta(days=back)).isoformat()
+            doc = read_executions(d)
+            if doc:
+                prev_doc, prev_date = doc, d
+                break
+        if not prev_doc:
+            return {
+                "available": False,
+                "reason": "no prior daily-executions found in the last 7 days",
+            }
+
+        executions = prev_doc.get("executions") or []
+        failed: list[dict] = []
+        unfilled: list[dict] = []
+        filled_count = 0
+
+        for e in executions:
+            oid = e.get("alpaca_order_id")
+            if not oid:
+                # Never even reached Alpaca (e.g. the MU 403) — no order to look
+                # up, but still a failure the analyzer must not assume executed.
+                if e.get("status") == "error":
+                    failed.append({
+                        "symbol": e.get("symbol"), "side": e.get("side"),
+                        "qty": e.get("qty"), "status": "error",
+                        "error": e.get("error") or "submission failed",
+                    })
+                continue
+            try:
+                order = client.get_order(oid)
+            except Exception as oe:  # noqa: BLE001
+                unfilled.append({
+                    "symbol": e.get("symbol"), "side": e.get("side"),
+                    "qty": e.get("qty"), "status": "unknown",
+                    "error": f"order lookup failed: {oe}",
+                })
+                continue
+            status = str(order.get("status") or "")
+            if status == "filled":
+                filled_count += 1
+            elif status in ("rejected", "canceled", "expired"):
+                failed.append({
+                    "symbol": e.get("symbol"), "side": e.get("side"),
+                    "qty": e.get("qty"), "status": status,
+                    "error": f"order {status}",
+                })
+            else:
+                # Still resting / partially filled at the next day's collector run
+                # — not terminal, worth surfacing (e.g. a limit order never filled).
+                unfilled.append({
+                    "symbol": e.get("symbol"), "side": e.get("side"),
+                    "qty": e.get("qty"), "status": status,
+                    "filled_qty": order.get("filled_qty"),
+                })
+
+        return {
+            "date": prev_date,
+            "submitted": len(executions),
+            "filled": filled_count,
+            "failed": failed,
+            "unfilled": unfilled,
+            "available": True,
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Execution review build failed (non-fatal)")
+        return {"available": False, "reason": str(e)}
 
 
 def _aggregate_by_quadrant(target_weights_pct: dict, literal_cash_pct: float) -> dict:
@@ -3784,6 +3907,25 @@ def _build_reference_weights(
     ig = intl_governance or {}
     intl_targets = {str(t).upper(): float(v) for t, v in (ig.get("intl_targets_pct") or {}).items()}
     intl_total_pct = float(ig.get("sleeve_target_pp") or 0.0) if ig.get("available") else 0.0
+
+    # Session 2026-07-15 (Task C, decision C0 = Option 1): intl_broad's base target is
+    # gated to 0 while the deployment gate is closed. intl_broad is unconditionally
+    # `block: amplifier_intl` (sleeve-roles.json), so the Tier-1 validator rejects its
+    # buy on every closed-gate day regardless of the rotation score — confirmed
+    # 2026-07-14 AND 2026-07-15, both "amplifier buy VXUS forbidden". The 2.0pp base
+    # target was therefore structurally unreachable, not merely deferred: a wasted
+    # trade slot every day and (until Finding B's two-pass validation) starved cash
+    # available for band enforcement. Zeroing it here is self-healing — this function
+    # reruns every day, so the target restores automatically the day the gate opens.
+    # The LEADER slot is untouched (intl_governance already halves — never zeroes — it
+    # on a closed gate; it stays rotation-governed per roster_revision_2026-07 §4). A
+    # held intl_broad position is not force-sold: a held-vs-0 gap sits inside the
+    # override band, and this only stops a fresh gate-closed BUY from being proposed.
+    gate_status = str((regime_gate or {}).get("status") or "").lower()
+    broad_ticker = str(ig.get("broad_target") or "").upper()
+    if gate_status == "closed" and broad_ticker and broad_ticker in intl_targets:
+        intl_total_pct = max(0.0, intl_total_pct - intl_targets.pop(broad_ticker))
+
     intl_pool: set[str] = set()
     for _r in roles_config():
         if _r.get("quadrants") == "rotation":

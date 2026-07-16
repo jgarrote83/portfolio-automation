@@ -303,6 +303,54 @@ def _validation_refusal(trades_doc: dict | list, trades: list[dict], date_str: s
     return ""
 
 
+def _cancel_conflicting_orders(client: AlpacaClient, symbol: str) -> list[str]:
+    """Cancel any pre-existing OPEN Alpaca order on `symbol` before submitting a new
+    one for it (session 2026-07-15, Task A3).
+
+    A resting order — e.g. a stop the flex engine left open when its own `held[]`
+    bookkeeping dropped the position (the MU incident: an engine/broker mismatch
+    that ran 6+ consecutive sessions) — locks shares as `qty_available` collateral.
+    Alpaca then rejects any SECOND order against those same shares with a 403, and
+    nothing here previously detected or cleared it: confirmed against the live paper
+    book 2026-07-15 — MU's daily-recommended exit 403'd two days running (07-14,
+    07-15) against a GTC stop resting since 2026-07-08, silently re-proposed every
+    morning with no path to ever actually close.
+
+    Today's `trades[]` recommendation is the authoritative decision for the day and
+    supersedes a stale resting order on the same symbol, so clear the way first.
+    Best-effort: a failed list/cancel is logged, never raised — the trade still
+    falls through to the pre-existing 403 path exactly as before this fix.
+    """
+    try:
+        open_orders = client.list_orders(status="open", limit=500)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Could not list open orders for %s conflict check — proceeding without it",
+            symbol,
+        )
+        return []
+    cancelled: list[str] = []
+    for o in open_orders:
+        if str(o.get("symbol") or "").upper() != symbol.upper():
+            continue
+        oid = o.get("id")
+        if not oid:
+            continue
+        try:
+            client.cancel_order(oid)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to cancel conflicting order %s for %s", oid, symbol)
+            continue
+        cancelled.append(oid)
+        logger.warning(
+            "Cancelled pre-existing open order %s (%s %s, stop=%s) for %s — clearing "
+            "share collateral before submitting today's order",
+            oid, o.get("side"), o.get("order_type") or o.get("type"),
+            o.get("stop_price"), symbol,
+        )
+    return cancelled
+
+
 def _place_one(client: AlpacaClient, trade: dict, date_str: str) -> dict:
     # Single-leg market/limit orders only. `stop_loss` / `take_profit` on the trade
     # are ADVISORY levels evaluated by the analyzer on the next run (it proposes an
@@ -330,6 +378,8 @@ def _place_one(client: AlpacaClient, trade: dict, date_str: str) -> dict:
 
     if not symbol or side not in ("buy", "sell") or not qty:
         return {**base, "status": "error", "error": "invalid trade payload"}
+
+    _cancel_conflicting_orders(client, symbol)
 
     try:
         order = client.submit_order(
