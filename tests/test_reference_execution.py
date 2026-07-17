@@ -342,7 +342,7 @@ def test_build_reference_gaps_from_snapshot():
     # sell, but flagged off_roster so band enforcement (reconcile) ignores it.
     assert set(by_sym) == {"SPY", "GLD", "MU"}
     assert by_sym["SPY"]["current_pct"] == 17.0
-    assert by_sym["SPY"]["price"] == 555.0        # snapshot price wins
+    assert by_sym["SPY"]["price"] == 550.0        # paper position price wins for a held name (Task A, 2026-07-17)
     assert by_sym["SPY"]["held_qty"] == 30.0      # read from the "qty" field
     assert by_sym["SPY"]["off_roster"] is False
     assert by_sym["GLD"]["current_pct"] == 0.0    # unheld target still gets a row

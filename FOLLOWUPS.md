@@ -1138,7 +1138,7 @@ requested Fable 5 quota lands on the `Portfolio-Analysis` Foundry project. Verif
 deployment exists and quota is non-zero (`az` / Foundry portal) before flipping — do not
 assume quota approval happened silently.
 
-### 42. 2026-07-15 daily-report audit: execution-fill visibility, reconcile sequencing, VXUS deadlock, legacy-exit enforcement, override direction — 🔶 PR OPEN (`fix/20260715-exec-fills-reconcile-seams`), pending account-holder review
+### 42. 2026-07-15 daily-report audit: execution-fill visibility, reconcile sequencing, VXUS deadlock, legacy-exit enforcement, override direction — ✅ DONE, merged 2026-07-17 (PR #25, `fix/20260715-exec-fills-reconcile-seams`)
 Post-PR-#24 observation of the 07-14/07-15 reports exposed five new systemic findings.
 All confirmed against the code (Finding A diagnosed live against the Alpaca paper API)
 and fixed on this branch:
@@ -1241,6 +1241,102 @@ and fixed on this branch:
   Table A cell arithmetic, the misleading Recommended-weight column, the shock-3 "15%
   ceiling" phrasing, the Q2 per-sleeve band-granularity observation, tranche-config
   visibility (#33(i)), and the model's KMLM 43-vs-44-share table slip.
+
+### 43. 2026-07-17 post-merge audit: price-basis coherence, config visibility, deterministic quadrant/series blocks, flex order hygiene — ✅ DONE, branch `fix/20260717-price-basis-config-determinism`
+Post-PR-#25 observation of the 07-16/07-17 daily reports exposed the residual seams
+below. One decision gate (**G1**, Task F3): **account holder chose YES — switch flex
+repair/entry stop orders from GTC to DAY**, re-placed every in-hours tick by the
+existing no-naked-long path (identical protection during regular hours, no immortal
+stale orders; the tradeoff — no stop coverage on a day the flex run itself never
+ticks — is covered by the new F2 orphan sweep + the very next tick's repair).
+- **Task A (HIGH) — phantom V3 clamp: the gap-row price basis contradicted
+  `current_pct`'s basis.** `_build_reference_gaps._price` let the FMP EOD close win
+  over the paper-account position's `current_price` for a HELD name, while
+  `current_pct` was computed from the paper-priced `market_value` — any FMP-vs-paper
+  divergence over ~3% mixed the two bases in V3's landing-percentage math and could
+  phantom-clamp a legitimate full exit to a 1-share stub (confirmed 2026-07-16, MU:
+  a 5.9% divergence clamped 2→1 share; a 2.8% divergence on 07-17 happened to slip
+  under the `_EPS_PP` epsilon and pass — luck, not correctness). **Fixed:** `_price`
+  now prefers the paper position's `current_price` for any held symbol, falling back
+  to the FMP close only for an unheld reference target. New coherence invariant
+  pinned permanently (`tests/test_price_basis_coherence.py`): for every gap row with
+  `held_qty > 0`, `current_pct` must agree with `held_qty * price / equity * 100`.
+- **Task B (HIGH leverage) — execution_config snapshot block (closes #33(i)).** Four
+  consecutive sessions guessed operative config numbers (assumed `tranche_pp_max`
+  3-5pp against a true 10.0; assumed `gap_band_pp` 1.0pp against a true 5.0, which
+  alone filed three unnecessary in-band overrides on GLD/XLP/TLT on 07-17). **Fixed:**
+  `shared.reference_execution.effective_execution_config()` resolves the exact
+  numbers `reconcile`/`validate_trades` use; the collector echoes it into the
+  snapshot's new `execution_config` block; the prompt now quotes every tranche/band/
+  floor/min-notional/evidence-bar figure from it verbatim and states the in-band
+  shelter rule up front (never assume or guess a config value).
+- **Task C — static `selected` vs runtime `leader_pick` doctrine (echo only, no
+  validator change).** `sleeve_selection` only ranks `selection: "scorecard"` roles,
+  so the `intl_leader` role (`selection: "rotation"`) never appeared there at all —
+  nothing distinguished a runtime `leader_pick` de-rotating to null (normal daily
+  modulation) from an actual deselection. 07-17: the model proposed selling AIA's
+  1-share floor on exactly that confusion; Tier-1 correctly rejected it (the existing
+  2026-07-13-audit floor-bypass design was already right). **Fixed:** new collector
+  `role_selection` block echoes every role's static `selected` (including
+  `intl_leader` + its current `leader_pick`), and the prompt states the doctrine with
+  the 07-17 AIA case as the worked example.
+- **Task D (MEDIUM-HIGH) — deterministic `quadrant_allocation` block (retires
+  deferred findings 7+8).** 07-17 published two contradictory Table A's in the same
+  report (Q1 0.77% vs a corrected 1.46%; Q2 5.37% vs 3.72%), with a literal "wait —
+  let me recompute carefully" leaking into the markdown (07-16 leaked similarly).
+  **Fixed:** collector `_build_quadrant_allocation` precomputes Table A's Current
+  column from the paper account, using the SAME static `primary_quadrant()` tagging
+  the Reference column (`_aggregate_by_quadrant`) already uses (shared
+  `quadrants.quadrant_allocation_bucket`) — Q1-Q4, `intl`, dedicated `legacy_exits` /
+  `off_roster` rows, `cash_sleeve`, `unmapped` safety net. The Recommended (post-trade)
+  column is computed deterministically POST-model (`analyzer._quadrant_allocation_addendum`,
+  applied to the FINAL validated `trades[]`) since trades don't exist at collect
+  time. Freehand quadrant arithmetic is now prohibited in the prompt entirely.
+- **Task E (MEDIUM) — deterministic `series_deltas` block (hardens F1).** 07-17's
+  catalyst adjudication fired but attributed a CPI flag to the wrong prior report and
+  the wrong prior value (named 07-14's value while claiming it was 07-15's), and
+  hand-waved a third-party press figure that plainly disagreed with FRED. **Fixed:**
+  collector `_build_series_deltas` reads back the prior trading day's snapshot
+  (same non-fatal "look back up to 7 days" pattern as `execution_review`) and
+  computes `{value, as_of, prior_value, prior_as_of, delta, new_print}` per tracked
+  series; the prompt must cite this — never recollection — for every new-print /
+  cadence / catalyst-resolution statement, and report a disagreeing press figure as
+  unreconciled rather than massaging it into agreement.
+- **Task F — flex order hygiene (root-cause closure of the MU failure class).**
+  The MU saga's true root cause: a GTC repair stop survived a ledger-row loss
+  invisibly, locking the shares as collateral for 8+ sessions with nothing to notice
+  or cancel it (the merged executor-side fix, `_cancel_conflicting_orders`, was a
+  collision-point backstop, not prevention). **Fixed:** F1 — `reconcile_ledger` now
+  also returns `orphan_orders` (broker open orders for a symbol the ledger doesn't
+  track), surfaced in `flex_state.reconcile.orphan_orders` and the Data Integrity
+  section. F2 — the engine sweeps its own orphans every tick
+  (`flex/handler._sweep_orphan_orders`), STRICTLY scoped to its own client_order_id
+  family (current `FLEXC-` + legacy pre-split `flex-`) — never a DayTrade Lab
+  (`FLEXD-`) or daily-executor order. F3 (**G1 = yes**) — repair/trail stop orders
+  switched from `time_in_force="gtc"` to `"day"`, re-placed every in-hours tick by
+  the existing no-naked-long check.
+- **Task G — small items.** G-a (prompt-only): a legacy exit whose ENTIRE remaining
+  position fits within one tranche and clears min-notional must be finished outright,
+  not dripped (07-17 proposed 1 of MCK's 5 remaining shares, a 4.33pp in-band
+  position, for no doctrinal reason). G-b: `learning.bundle.fetch_override_history`
+  now annotates each `layer: "override"` accepted/downsized row with
+  `_direction_suspect` (true when `declared_direction` is absent — possible only for
+  a pre-Task-E1 record, since every accepted/downsized decision since 2026-07-15
+  always populates both `direction` and `declared_direction`) so the monthly review
+  never treats a 07-15-era GLD/XLP/TLT-style backwards direction as reliable signal
+  without accounting for it.
+- **Shipped:** Tasks A, B, C, D, E, F (F1/F2/F3 with G1=yes), G (G-a, G-b). New test
+  files: `test_price_basis_coherence.py`, `test_execution_config.py`,
+  `test_role_selection.py`, `test_quadrant_allocation.py`,
+  `test_quadrant_allocation_addendum.py`, `test_series_deltas.py`,
+  `test_flex_order_hygiene.py`; extended `test_flex_reconcile.py`,
+  `test_learning_bundle.py`, `test_reference_execution.py`,
+  `test_daytrade_separation.py`. Full suite green, ruff clean. **Out of scope on
+  this branch** (per the session prompt, unchanged): the Finding-5 equity-bridge
+  attribution batch (unexplained +$330/+$66/+$536 residuals across three sessions),
+  the Finding-4 earnings-calendar held-position filtering, and the live MU
+  position/stale-order state (expected already resolved by the merged executor fix
+  at the 07-17 09:35 ET run — confirm via the next `execution_review`).
 
 ---
 

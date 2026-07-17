@@ -68,10 +68,11 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
         logger.exception("Could not read positions/orders — skipping reconciliation")
         positions, open_orders = [], []
 
-    ledger, exits_to_record, repairs = reconcile_ledger(ledger, positions, open_orders)
+    ledger, exits_to_record, repairs, orphan_orders = reconcile_ledger(ledger, positions, open_orders)
     decisions["reconcile"] = {
         "repairs": repairs,
         "closed": [e["symbol"] for e in exits_to_record],
+        "orphan_orders": orphan_orders,
     }
     for ex in exits_to_record:
         _record_trade_history(today, ex["symbol"], "sell", int(ex["entry"].get("qty_current") or 0),
@@ -79,6 +80,7 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
     if not dry_run:
         for rep in repairs:
             _apply_repair(client, rep, today, decisions, executions)
+        _sweep_orphan_orders(client, orphan_orders, decisions)
     write_ledger(ledger)
 
     # ── STEP 1 — clock gate (closed → free no-op) ────────────────────────────
@@ -167,8 +169,17 @@ def _apply_repair(client, rep, today, decisions, executions) -> None:
             qty = int(rep.get("qty") or 0)
             stop_price = float(rep.get("stop_price") or 0)
             if qty > 0 and stop_price > 0:
+                # DAY, not GTC (session 2026-07-17, Task F3 — root-cause closure of
+                # the MU incident): a stop order only triggers during regular hours
+                # anyway, so DAY gives identical protection with no immortal stale
+                # order surviving a ledger-row loss. It expires with the session and
+                # is RE-PLACED every subsequent tick by this same repair path (STEP 0
+                # runs every ~15 min; the very first in-hours tick after a DAY stop
+                # expires overnight finds "no adequate resting stop" and replaces it)
+                # — the tradeoff (no stop coverage on a day the flex run itself never
+                # ticks) is covered by the F2 orphan sweep + the next run's repair.
                 order = client.submit_order(
-                    sym, qty, "sell", order_type="stop", time_in_force="gtc",
+                    sym, qty, "sell", order_type="stop", time_in_force="day",
                     stop_price=round(stop_price, 2),
                     client_order_id=_coid(today, sym, "rep"),
                 )
@@ -177,6 +188,53 @@ def _apply_repair(client, rep, today, decisions, executions) -> None:
     except Exception as e:  # noqa: BLE001
         logger.exception("repair %s for %s failed", action, sym)
         decisions["orders_suppressed"].append({"symbol": sym, "reason": f"repair_error:{action}:{e}"})
+
+
+def _is_flex_catalyst_order_id(client_order_id: str) -> bool:
+    """True for a client_order_id this engine (or its pre-split predecessor)
+    could have placed — the CURRENT ``FLEXC-`` prefix or the LEGACY pre-split
+    ``flex-`` naming (e.g. the real 2026-07-08 MU repair stop,
+    ``flex-2026-07-07-MU-rep-302e8f``, placed before the FLEXC-/FLEXD- split).
+    Deliberately EXCLUDES ``FLEXD-`` (the DayTrade Lab's own namespace, a
+    separate engine with its own ledger/reconciliation) and the daily
+    executor's undecorated ``{date}-{trade_id}`` ids."""
+    cid = client_order_id or ""
+    return cid.startswith("FLEXC-") or cid.startswith("flex-")
+
+
+def _sweep_orphan_orders(client, orphan_orders: list[dict], decisions: dict) -> None:
+    """Cancel any resting order this engine could have placed for a symbol its
+    ledger no longer tracks (session 2026-07-17, Task F2 — root-cause closure of
+    the MU incident: a repair/entry stop orphaned when the ledger lost its row
+    locked the position as broker collateral for 8+ sessions, invisible and
+    unmanaged, until the daily executor's `_cancel_conflicting_orders` collided
+    with it days later).
+
+    STRICTLY scoped to `_is_flex_catalyst_order_id` — this is load-bearing: a
+    daily-executor resting order or a DayTrade Lab (`FLEXD-`) order must NEVER be
+    touched by this sweep; each is a different engine's own state. Best-effort:
+    a cancel failure is logged and never raised — a sweep miss is caught by
+    `_apply_repair`'s no-naked-long stop replacement next tick, and by the daily
+    executor's own `_cancel_conflicting_orders` as the final backstop.
+    """
+    for o in orphan_orders or []:
+        cid = str(o.get("client_order_id") or "")
+        if not _is_flex_catalyst_order_id(cid):
+            continue
+        oid = o.get("id")
+        if not oid:
+            continue
+        try:
+            client.cancel_order(oid)
+            decisions.setdefault("orphan_orders_cancelled", []).append(
+                {"symbol": o.get("symbol"), "client_order_id": cid, "order_id": oid},
+            )
+            logger.warning(
+                "orphan order swept: %s (%s) for %s — ledger no longer tracks this symbol",
+                oid, cid, o.get("symbol"),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("orphan order sweep: cancel %s (%s) failed: %s", oid, cid, e)
 
 
 def _act_on_exit(client, ledger, sym, st, today, decisions, executions) -> None:
@@ -261,8 +319,12 @@ def _replace_stop(client, entry, new_stop, today, sym, decisions, executions) ->
         return
     try:
         _cancel_stops(client, entry)
+        # DAY, not GTC — same Task F3 rationale as the repair stop above: the
+        # no-naked-long check in `reconcile_ledger` re-places a missing/inadequate
+        # stop every in-hours tick, so a DAY trail/breakeven stop that expires
+        # overnight is simply replaced fresh the next session.
         order = client.submit_order(
-            sym, qty, "sell", order_type="stop", time_in_force="gtc",
+            sym, qty, "sell", order_type="stop", time_in_force="day",
             stop_price=new_stop, client_order_id=_coid(today, sym, "stop"))
         _issued(decisions, executions, sym, "stop_replace", order)
         entry["current_stop"] = new_stop

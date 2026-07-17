@@ -181,8 +181,30 @@ def fetch_trade_history() -> list[dict]:
 
 def fetch_override_history() -> list[dict]:
     """All OverrideHistory rows, every layer (override, sleeve_switch,
-    intl_leader_rotation, regime_suspect, amendment) — no filtering."""
-    return query_entities("OverrideHistory")
+    intl_leader_rotation, regime_suspect, amendment) — no filtering.
+
+    Session 2026-07-17, Task G-b: annotates each ``layer: "override"`` row with
+    ``_direction_suspect`` — true for an accepted/downsized override whose
+    ``declared_direction`` is empty, which is possible ONLY for a record from
+    before Task E1 (2026-07-15 introduced `derive_override_direction` and started
+    persisting both the derived `direction` and the model's original
+    `declared_direction`; every accepted/downsized decision since then always
+    populates both, even when they agree — see
+    `shared/overrides.py::validate_override`). A pre-E1 accepted/downsized row's
+    `direction` may be BACKWARDS (07-15 filed three de-risk holds — GLD, XLP,
+    TLT — as `re_risk`, which would apply the wrong evidence bar and invert the
+    sign Phase-5's counterfactual grading uses). The monthly reviewer must not
+    treat a `_direction_suspect` row's `direction` / `outcome_status` as reliable
+    signal without accounting for this (e.g. exclude it from any direction-based
+    aggregate, or explicitly caveat it). Rejected rows are left unflagged — a
+    rejected override shelters nothing, so its direction never affected any
+    evidence bar or grading sign regardless of era.
+    """
+    rows = query_entities("OverrideHistory")
+    for r in rows:
+        if r.get("layer") == "override" and r.get("outcome") in ("accepted", "downsized"):
+            r["_direction_suspect"] = not r.get("declared_direction")
+    return rows
 
 
 def fetch_learning_history() -> dict:

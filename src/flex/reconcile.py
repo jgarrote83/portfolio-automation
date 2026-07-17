@@ -42,10 +42,25 @@ def reconcile_ledger(
     ledger: dict,
     alpaca_positions: list[dict],
     alpaca_orders: list[dict],
-) -> tuple[dict, list[dict], list[dict]]:
-    """Return ``(new_ledger, exits_to_record, repairs)``.
+) -> tuple[dict, list[dict], list[dict], list[dict]]:
+    """Return ``(new_ledger, exits_to_record, repairs, orphan_orders)``.
 
     ``repairs`` is sorted so ``place_missing_stop`` is always first.
+
+    ``orphan_orders`` (session 2026-07-17, Task F1) — every broker OPEN order
+    whose symbol is NOT a key of the POST-reconciliation ``new_ledger`` (i.e. not
+    a symbol this run's ledger manages, including one just closed this tick). This
+    is the visibility fix for the MU incident's root cause: a repair/entry stop is
+    placed directly against the broker (`flex/handler.py::_apply_repair`/
+    `_open_position`), never through this function, so if the ledger row that
+    "owns" that order is EVER lost by some other path (the MU incident: the
+    engine's internal ``held[]`` state dropped the position while its GTC repair
+    stop stayed resting), nothing before this scanned the broker's full open-order
+    list for a symbol the ledger no longer tracks — the order sat there,
+    invisible, locking the shares as collateral. Each entry: ``{symbol, side,
+    type, stop_price, client_order_id, submitted_at, id}`` (``id`` is the Alpaca
+    order id, needed to cancel it — see ``flex/handler.py::_sweep_orphan_orders``,
+    Task F2). Describe-only here — this function never cancels anything itself.
     """
     new_ledger = copy.deepcopy(ledger or {})
     pos_qty = {
@@ -103,4 +118,20 @@ def reconcile_ledger(
             })
 
     repairs.sort(key=lambda r: _PRIORITY.get(r.get("action"), 99))
-    return new_ledger, exits_to_record, repairs
+
+    managed = set(new_ledger.keys())
+    orphan_orders = [
+        {
+            "symbol": str(o.get("symbol", "")).upper(),
+            "side": o.get("side"),
+            "type": o.get("type"),
+            "stop_price": o.get("stop_price"),
+            "client_order_id": o.get("client_order_id"),
+            "submitted_at": o.get("submitted_at") or o.get("created_at"),
+            "id": o.get("id"),
+        }
+        for o in orders
+        if str(o.get("symbol", "")).upper() not in managed
+    ]
+
+    return new_ledger, exits_to_record, repairs, orphan_orders

@@ -113,10 +113,18 @@ future human `selected`/`leader_pick` change can bring it back. Label these trad
 `[CORE — intl pool]`.
 
 **How to liquidate a legacy exit:**
-- **Tranche the exit** at `reference_execution.tranche_pp_max` per session — a legacy
+- **Tranche the exit** at `execution_config.tranche_pp_max` per session — a legacy
   position larger than one tranche (AMZN+GOOGL ≈ 8.6% and MCK ≈ 8.2% of equity) is a
   **multi-session** exit, not a single-day dump. Sell the tranche toward the 0 target
   each session until flat.
+- **Finish it, don't drip it (session 2026-07-17, Task G-a).** When the ENTIRE
+  remaining position fits within one `execution_config.tranche_pp_max` AND clears
+  `execution_config.min_notional_usd`, propose the FULL remaining exit that
+  session — never a partial tranche of a position that's already small enough to
+  finish outright. *(07-17 proposed selling 1 of MCK's 5 remaining shares — a
+  4.33pp in-band position, well under one tranche — extending a wind-down that
+  could have closed that day across four more sessions for no doctrinal reason.)*
+  Only tranche a position that is genuinely LARGER than one tranche.
 - **Sells before buys**, always. While the deployment **gate is closed**, direct the
   legacy proceeds to the **defensive roles first** (gold, duration, staples,
   defensive_equity, cash) — never into Q1/Q2 amplifier beta.
@@ -236,6 +244,19 @@ never "echo the engine state" over the broker:**
 - **File no new flex entries in the affected symbol** until the desync is resolved.
 State the mismatch in one line in Section 6 and act on it; do not silently echo an
 empty engine state past a broker position it holds.
+
+**Orphan order visibility (session 2026-07-17, Task F1 — distinct from
+`reconciliation` above, which is about POSITIONS; this is about resting ORDERS).**
+`flex_state.reconcile.orphan_orders` lists every broker OPEN order the engine found
+for a symbol its ledger does not track at all — the mechanism that catches the MU
+incident's actual root cause (a repair stop survived a ledger-row loss, invisible,
+locking the shares as collateral for 8+ sessions with nothing to notice or cancel
+it). The engine now sweeps its own orders in this list automatically each tick
+(`flex_state.orphan_orders_cancelled` shows what it canceled this run), so a
+nonempty `orphan_orders` after that sweep means a resting order the engine could
+NOT clear on its own (e.g. a non-flex-prefixed order, or a cancel that failed) —
+surface any such entry under the Data Integrity Warning heading (symbol, type,
+stop_price, client_order_id) exactly like an `execution_review` failure.
 
 ---
 
@@ -580,6 +601,26 @@ runs). Your job is to **echo, not decide**:
   `OverrideHistory` (layer `intl_leader_rotation`) so Phase C can grade it vs the
   incumbent.
 
+**Static `selected` vs runtime `leader_pick` — do not conflate them (session
+2026-07-17, Task C).** `role_selection` (a small per-role echo, separate from
+`sleeve_selection`) names every role's static `selected` incumbent, including the
+`intl_leader` role — which `sleeve_selection` never covers at all (it only ranks
+`selection: "scorecard"` roles; `intl_leader` is `selection: "rotation"`). Two facts
+about a role's `selected` member:
+
+- It changes **ONLY** via a committed `sleeve-roles.json` edit — a human disposing of
+  a `switch_signal` (scorecard roles) or a `leader_pick` rotation proposal (the
+  `intl_leader` role). Nothing in your output can deselect it.
+- It keeps its **0.1% / ≥1-share floor** regardless of runtime modulation:
+  `intl_governance.leader_pp` at 0, `leader_pick` at `null` (the lead faded or
+  de-rotation fired), or a scorecard `switch_signal` true — none of these are a
+  deselection. **Do not propose selling a `selected` member's floor position on that
+  basis.** *(2026-07-17: `leader_pick` went null when AIA's lead faded, and the model
+  proposed selling AIA's 1-share floor as "de-rotation triggered, reference = 0%" —
+  the Tier-1 validator correctly rejected it, because AIA was still `intl_leader`'s
+  `selected` member. Report it instead as "AIA floor-held, out of favor — leader_pick
+  null" and move on.)*
+
 ### Event-driven override (read `market_shock` before everything else)
 
 The 60-day rotation windows and the quadrant cadence rule are deliberately slow
@@ -904,9 +945,11 @@ A single JSON snapshot for one trading day containing:
 - `fomc_stance` — the RAW manually-maintained stance file (`config/fomc-stance.json`: `stance` + `as_of`), kept for reference. **The stance you must use is the resolved `policy_axis`.**
 - `policy_axis` — **pre-computed RESOLVED policy stance**: `stance` (hawkish/neutral/dovish/unconfirmed) + `source` (`manual_fresh` / `market_implied` / `unconfirmed`), `market_implied` (`stance`, `dgs2_latest`, `dff_latest`, `dgs2_delta_20d_bp`, `spread_bp`), `manual` (echo + `fresh`), `agreement` (null when either layer is unavailable), `note`. A fresh manual SEP/dot-plot governs; else DGS2 20d momentum; `unconfirmed` only when both are unavailable. **Echo `stance` + `source`.**
 - `regime_gate` — **pre-computed deployment gate**: `status` (`open`/`closed`), `reasons`, `policy_note`, derived from the two axes + the resolved `policy_axis` stance (see `derived_from.policy_source`). **Echo `status` into `deployment_gate`.**
+- `quadrant_allocation` — **the deterministic CURRENT-side counterpart to `reference_weights.by_quadrant`** (session 2026-07-17, Task D): `buckets` (`Q1`/`Q2`/`Q3`/`Q4`/`intl`/`legacy_exits`/`off_roster`/`cash_sleeve`/`unmapped`, each a % of equity, summing to ~100%) + `contributions` (per-bucket list of `{symbol, pct_of_equity}`) + `cash_literal_pct`. **This is Table A's Current column — quote it verbatim, never recompute it from `portfolio.positions` by hand.** The post-trade "Recommended" column is a SEPARATE deterministic addendum appended after your report (see "Quadrant allocation" in Section 1) — you do not compute it either. `available: false` ⟹ paper account unavailable; fall back to a qualitative description for that column only.
 - `reference_weights` — **the deterministic per-ticker target allocation the book executes toward** (strategy-spec §10). `target_weights_pct` (per-ticker % of equity), `by_quadrant` (the deterministic per-quadrant aggregation of `target_weights_pct` — SGOV + literal cash → `cash_sleeve`; **echo this verbatim in Table A's Reference column, never re-sum by hand**), `active_quadrant`/`favored_bucket`/`borderline`, `conviction_proxy`+label, `active_quadrant_target_pct_of_core`, `ceiling_pct_of_core`, `dollar_tilt`, `transition_lean` (the Phase-3 lean, already applied), `cash_sleeve_target_pct`, `binding`. **This is the reference you reason against and execute toward via the OVERRIDE_SCHEMA_V1 protocol (Section 2).** Absent ⟹ paper account unavailable; fall back to the qualitative quadrant call and say so.
 - `divergences` — the pre-computed **tension detector** (list): each `{id, description, signals, direction_implied, status}` flags two signals that should agree but don't (leading-vs-lagging inflation, credit complacency, price-vs-regime, dollar-vs-intl). **You adjudicate them** (they are not resolved for you); an `active` one may serve as override evidence, an `indeterminate` one may not. Surface them in Section 6 and weigh them in Section 2.
-- `sleeve_selection` — the **role member scorecard** (Task E): per scorecard role `{incumbent, scores, ineligible, challenger, lead, streak, switch_signal}`. **Describe-only** — a `switch_signal` NEVER authorizes a trade and NEVER changes `selected`; a human disposes via a config commit. Echo it; when a `switch_signal` is true, add ONE adjudication line (see "Sleeve selection" below). Never trade a non-selected pool member.
+- `sleeve_selection` — the **role member scorecard** (Task E): per scorecard role `{incumbent, scores, ineligible, challenger, lead, streak, switch_signal}`. **Describe-only** — a `switch_signal` NEVER authorizes a trade and NEVER changes `selected`; a human disposes via a config commit. Echo it; when a `switch_signal` is true, add ONE adjudication line (see "Sleeve selection" below). Never trade a non-selected pool member. **Only covers `selection: "scorecard"` roles — see `role_selection` for the `intl_leader` (rotation) role too.**
+- `role_selection` — the **static-selection echo** (session 2026-07-17, Task C), EVERY role's `{role_id, selected, selection}` — including `intl_leader` (`{..., leader_pick}` + a note), which `sleeve_selection` never covers. Check this before ever proposing to reduce a role's `selected` member below its floor: `selected` changes only via a committed config edit, never via runtime modulation (`leader_pick` null, `leader_pp` 0, a scorecard `switch_signal`). See "Static `selected` vs runtime `leader_pick`" below.
 - `intl_governance` — the **rotation/DXY-governed intl sleeve** (Task F): `{status, rotation_composite, leader_pick, leader_picks, broad_pp, leader_pp, sleeve_target_pp, intl_targets_pct, modifiers, de_rotation}`. **Already baked into `reference_weights`** (the intl roles' targets) — echo it; execute toward the intl targets; the `intl_leader` slot follows `leader_pick` as a within-role substitution. Do NOT re-size the intl tilt yourself.
 - `transition_watch` — the deterministic **pre-staging** signal (`active`, `projected_quadrant`, `direction`, `staged_fraction`, `basis`, `status`). **Already baked into `reference_weights`** (see its `transition_lean`) — surface it as context, do **not** apply it a second time.
 - `flex_state` — **the intraday Flex engine's computed state** (it owns the flex sleeve end-to-end). Per held flex name: the **exit** decision (`next_action` ∈ hold/scale_out/trail/time_stop/stopped, `r_multiple`, `trail_stop`). Per nomination evaluated: the **entry** decision (`entry_trigger` pass/fail, `skip_reason`, `binding`, `size_shares`). Also `quadrant` (the deterministic quadrant the engine used), `as_of`, and **`reconciliation`** (`{status, engine_held, broker_held}` — the deterministic engine-vs-broker check). **When `reconciliation.status` is `ok`, echo the engine's numbers; never recompute or override a flex price/stop/size. When it is `mismatch`, the PAPER ACCOUNT is canonical** — count `broker_held` names as real flex holdings (🔴), run kill-criteria against the broker position using the last recorded kill price from flex/`TradeHistory`, and open no new flex entry in the affected symbol until resolved (see "Reading flex_state" above). Absent ⟹ engine disabled or not yet run that day — say so, don't invent flex levels.
@@ -914,6 +957,8 @@ A single JSON snapshot for one trading day containing:
 - `quadrant_performance` — regime-call accountability (FOLLOWUPS #12, describe-only): per Q1-Q4 bucket, `ret_30d_pct`/`ret_60d_pct`/`ret_90d_pct` + `excess_Nd_pp` vs SPY, `favored_streak`, `streak_excess_pp`, `lagging_sessions`, and a `suspect` flag; plus top-level `spy_ret_30d_pct`, `favored_today`, and `roster_note`. **Never touches `reference_weights`** — see "Regime-call accountability" below for the mandatory paragraph when `suspect` is true. If `available` is false, say so and skip the Regime P&L dashboard row's numbers.
 - `track_record` — the learning signal (Phase C): aggregate hit-rates of your own past recommendations vs SPY at the 60d headline horizon (`by_layer` / `by_trigger` / `by_thesis`), a confidence `calibration` table, `over_trading.avg_trades_per_day`, `sample_size`, and `horizons` (30/90d for context). See "Track record" below for how to use it. Aggregates only — never per-name.
 - `override_record` — the judgment loop (Phase 5): your matured overrides graded against the **reference-path counterfactual** ("did disagreeing beat obeying") at each record's own `falsifier_date`. `overall` / `by_direction` / `by_status` (+ `by_premise` once a premise reaches n≥10) with win rate + avg `excess_pp`; `enforced_separately` grades the Finding-2 enforcement system, not you. Calibration signal only — see "Track record" below for the rules.
+- `execution_config` — **the LIVE operative numbers behind every tranche/band/floor/min-notional/evidence-bar figure named in Section 2**, resolved the exact same way `reconcile`/`validate_trades` resolve them (session 2026-07-17, Task B — see `shared/reference_execution.py::effective_execution_config`): `execution_config.gap_band_pp`, `execution_config.max_magnitude_pp`, `de_risk_min_evidence` (1), `execution_config.re_risk_min_evidence`, `tranche_pp_max`, `enforce`, `enforcement_turnover_max_pct`, `min_notional_usd`, `sleeve_floor_pct_of_core`. **Quote these values verbatim — never assume or guess a config number.** Four prior sessions guessed wrong (assumed `tranche_pp_max` 3-5pp against a true 10.0; assumed `execution_config.gap_band_pp` 1.0pp against a true 5.0, which alone filed three unnecessary in-band overrides on GLD/XLP/TLT — all three sat inside the REAL 5pp band and needed no override at all). **An in-band gap (`|gap| ≤ gap_band_pp`) is sheltered by construction: it never needs an override and never generates a "buy/sell tranche" obligation** — check the band FIRST, before reasoning about direction or evidence. If `execution_config` is absent from the snapshot, say so in one line and fall back to describing the constraint qualitatively rather than inventing a number.
+- `series_deltas` — **deterministic prior-vs-current comparison for the freshness-set macro series** (session 2026-07-17, Task E — hardens F1): per tracked series id (GDPNow, core/headline CPI+PCE, DFF, DGS2, real 10Y, WTI/Brent, DXY, breakevens, HY OAS) `{value, as_of, prior_value, prior_as_of, delta, new_print}`, read back from the ACTUAL prior trading day's snapshot (never your recollection of a prior report). **Use this — not memory — for every "new print" / cadence / catalyst-resolution statement in Section 5 ("Catalysts").** `available: false` ⟹ no prior snapshot found in the last 7 days; say so and skip the comparison.
 - `recent_reports` — up to 5 of your previous daily reports for continuity
 
 If a field is empty or stale, say so — do not invent the missing data.
@@ -1002,41 +1047,67 @@ Then the numbered sections, in this order:
 
    **Table A — Accounting view (every dollar counted once; rows sum to ~100%).**
    *Purpose: shows where the capital literally sits vs. the deterministic reference. Each
-   name appears in exactly one quadrant, so the percentages are a true share of equity.
-   The **Reference** column is `reference_weights.by_quadrant` echoed VERBATIM — the
-   collector already aggregated the per-name targets by primary quadrant; never re-sum
-   them by hand (see "Execute toward the reference" below).*
+   name appears in exactly one bucket, so the percentages are a true share of equity.
+   **ALL THREE columns are deterministic, precomputed inputs — quote every one of them
+   verbatim; freehand quadrant arithmetic is prohibited anywhere in this report**
+   (session 2026-07-17, Task D — closes the seam that produced two contradictory Table
+   A's in the same 07-17 report, and a literal "wait — let me recompute carefully"
+   leaking into the markdown on 07-16/07-17).*
 
-   | Quadrant | Current % of equity | Reference % (`reference_weights`) | Recommended % (post-trade) |
+   | Quadrant/Bucket | Current % of equity | Reference % (`reference_weights`) | Recommended % (post-trade) |
    |---|---|---|---|
    | Q1 Goldilocks | … | … | … |
    | Q2 Reflation | … | … | … |
    | Q3 Stagflation | … | … | … |
    | Q4 Deflation | … | … | … |
    | Intl (rotation-governed) | … | … | … |
+   | Legacy exits (wind-down) | … | … | … |
+   | Off-roster (flex leftovers) | … | … | … |
    | Cash sleeve (cash + SGOV) | … | … | … |
 
+   - **Current** = `quadrant_allocation.buckets[<bucket>]` echoed **verbatim** (the
+     collector's `quadrant_allocation` snapshot block, keyed `Q1`/`Q2`/`Q3`/`Q4`/
+     `intl`/`legacy_exits`/`off_roster`/`cash_sleeve`/`unmapped`). If `unmapped` is
+     nonzero, add its names to the table as an extra row rather than dropping them —
+     it means a held name (should not normally happen) didn't resolve to any bucket.
+     **Never recompute this column from `portfolio.positions` by hand** — that
+     freehand summation is exactly what produced the 07-16/07-17 arithmetic errors.
+     If `quadrant_allocation.available` is false, say so and fall back to a
+     qualitative description for this column only.
    - **Reference** = `reference_weights.by_quadrant[<quadrant>]` echoed **verbatim**
      (the collector already aggregated `target_weights_pct` by primary quadrant, with
-     SGOV + literal cash → the `cash_sleeve` row and the two intl roles → the `intl` row).
+     SGOV + literal cash → the `cash_sleeve` row and the two intl roles → the `intl` row —
+     `reference_weights.by_quadrant` has no `legacy_exits`/`off_roster` rows since the
+     reference never targets either above 0; treat those two Reference cells as 0).
      **Do NOT re-sum the per-name targets
      yourself** — the 2026-07-09 report did and produced a Q3 total (42.9%) that
      disagreed with its own per-name footnote (~58%) and a Reference column that summed
-     to ~89.5% instead of 100%. **Recommended = Reference ± your logged overrides**
-     (see below) — it is NOT a free-hand number. If Recommended differs from Reference
-     for any row, an override record must justify the difference.
+     to ~89.5% instead of 100%.
+   - **Recommended** comes from the deterministic **post-trade quadrant allocation
+     addendum** appended to your own report after validation (a markdown table titled
+     "Post-trade quadrant allocation") — **quote its figures verbatim; it is not a
+     number you compute.** It applies your FINAL validated trades to the Current
+     column using the identical bucket tagging, so Current/Reference/Recommended are
+     always apples-to-apples. If Recommended differs from Reference for any row, an
+     override record must justify the difference. (The addendum is appended after your
+     report text — you will not see it while writing, so leave the Recommended cells
+     as `…` in your own draft; the deterministic post-processing fills them in.)
 
    - The **Intl** row is the rotation-governed sleeve (`intl_governance.sleeve_target_pp`
      = VXUS broad + the leader slot) — NOT a US quadrant. Do not fold intl names into
      Q1/Q2.
-
-   - Assign each held name to its **primary** quadrant only so the rows sum to
-     ~100% without double-counting; put cash + SGOV in the Cash sleeve row. This is
-     the accounting convention for **Table A only** — it is not a claim that SGOV
-     lacks a Q4 role (Table B captures that).
-   - "Primary" is **regime-relative** for genuinely dual-regime names: in a Q3/Q4
-     regime tag VDE/PDBC/DBA/TIP to **Q3** (the role they are currently playing), not
-     Q2; in a Q1/Q2 regime tag them to Q2.
+   - The **Legacy exits** row (`quadrant_allocation.buckets.legacy_exits`) is every
+     held LEGACY_EXITS name (AMZN/GOOGL/INTC/MCK/DBA/TIP/XSD/PPA/EUAD) — a wind-down
+     position never re-bought into core; do not fold it into whatever quadrant it used
+     to represent.
+   - The **Off-roster** row (`quadrant_allocation.buckets.off_roster`) is a held name
+     outside both CORE_ROSTER and LEGACY_EXITS (a flex leftover, e.g. MU) — the flex
+     engine's sleeve, not the core reference's.
+   - `quadrant_allocation`'s bucket tagging is **static**, the SAME convention
+     `reference_weights.by_quadrant` already uses — a dual-quadrant role (e.g.
+     VDE/energy, XLI/PAVE, GLD, KMLM) always tags to its first-listed quadrant
+     regardless of the current regime, so Current and Reference can never disagree
+     about which bucket a name's dollars belong to.
 
    **Table B — Functional coverage view (secondary roles counted; NOT additive to 100%).**
    *Purpose: shows how defended the book actually is per quadrant — the question Table
@@ -1078,8 +1149,10 @@ Then the numbered sections, in this order:
    deviating from it is an explicit, logged act, never a silent default.**
 
    1. **Compute the Current-vs-Reference gap per sleeve.** For each ticker, `gap = current%
-      − reference%`. Name the sleeves whose absolute gap exceeds `reference_weights` /
-      config `gap_band_pp` (the accountability band). These are the sleeves you must act on.
+      − reference%`. Name the sleeves whose absolute gap exceeds **`execution_config.gap_band_pp`**
+      (quote the number from the snapshot, never assume it — see the `execution_config` input
+      above) — the accountability band. A sleeve inside the band needs no override and no
+      tranche trade; only sleeves outside it are sleeves you must act on.
    2. **`transition_watch` is already baked into `reference_weights`** (its `transition_lean`
       field shows it). Surface it as context — "the reference already leans toward {Qx} via
       transition_watch" — and do **not** apply it a second time.
@@ -1089,10 +1162,9 @@ Then the numbered sections, in this order:
    4. **For each out-of-band sleeve, the DEFAULT is to trade a tranche.** Compute:
       - `allowed_residual` = the |`magnitude_pp`| of your **accepted per-sleeve override**
         for that sleeve — 0 if you file none, and 0 if the validator rejects it; never
-        more than `max_magnitude_pp`.
-      - `required_move_total = max(0, |gap| − max(allowed_residual, gap_band_pp))`
-      - `required_move_today = min(required_move_total, tranche_pp_max)` (config
-        `reference_execution.tranche_pp_max`).
+        more than `execution_config.max_magnitude_pp`.
+      - `required_move_total = max(0, |gap| − max(allowed_residual, execution_config.gap_band_pp))`
+      - `required_move_today = min(required_move_total, execution_config.tranche_pp_max)`.
 
       Then choose exactly one:
       - **Confirm the reference** → emit a trade moving **≥ `required_move_today`**
@@ -1101,17 +1173,18 @@ Then the numbered sections, in this order:
         residual gap needs **no** override while you keep tranche pace.
       - **Override the reference (per-sleeve)** → emit an `overrides[]` record with the
         mandatory **`sleeve`** field (OVERRIDE_SCHEMA_V1_1). An override shelters **at
-        most `max_magnitude_pp` of residual gap** — for a larger gap you MUST still
+        most `execution_config.max_magnitude_pp` of residual gap** — for a larger gap you MUST still
         trade the remainder (≥ the `required_move_today` computed above). No record ⇒
         no deviation; a rejected record shelters nothing.
 
       **Pre-flight every trade before you emit it (submittability check).** For each
       trade you intend to propose, compute the **post-trade landing weight**
       (`current% ± quantity·price/equity·100`) and verify it lands **within
-      `reference ± max(allowed_residual, gap_band_pp)` and above the sleeve floor** —
+      `reference ± max(allowed_residual, execution_config.gap_band_pp)` and above the
+      sleeve floor (`execution_config.sleeve_floor_pct_of_core`)** —
       the exact window the deterministic Tier-1 validator enforces downstream. If the
       **tradable room** to the near window edge is worth less than
-      `reference_execution.min_notional_usd`, the trade is **un-submittable** — do NOT
+      `execution_config.min_notional_usd`, the trade is **un-submittable** — do NOT
       propose it and do NOT build the report narrative on it. Instead state the binding
       constraint in **one line of prose** (e.g. "SGOV already at 28.44% vs its 28.50%
       window ceiling — no room to add; ~$X of literal cash stays idle until the
@@ -1132,12 +1205,12 @@ Then the numbered sections, in this order:
       rationalizations this protocol exists to stop, and de-risk gaps hidden behind them
       **will now be traded through**. A hold that leaves defensive coverage below the
       reference remains a **re-risk** override needing the **higher** evidence bar
-      (≥ `re_risk_min_evidence` clean items + a falsifier).
+      (≥ `execution_config.re_risk_min_evidence` clean items + a falsifier).
    6. **The de-risk / re-risk asymmetry (the safety).** An override *toward more
       defense/caution* (trimming risk-on beta, adding ballast) is **cheap** — one clean,
       sourced evidence item suffices, at full magnitude. An override *toward more risk / less
       defense* (holding or adding risk-on beta the reference wants smaller) is **dear** — it
-      needs ≥ `re_risk_min_evidence` clean items and a specific dated falsifier; the
+      needs ≥ `execution_config.re_risk_min_evidence` clean items and a specific dated falsifier; the
       validator **downsizes** (halves) an under-evidenced re-risk override and **rejects** one
       with no evidence. When in doubt, defer to the reference.
 
@@ -1160,7 +1233,7 @@ Then the numbered sections, in this order:
    7. **Bounds you cannot cross with an override (Tier-1, enforced downstream).** No override
       may: breach the 0.1% floor or the 90%-of-core ceiling; **re-buy a legacy-exit name into
       core** (AMZN/GOOGL/INTC/MCK/DBA/TIP/XSD/PPA/EUAD — core re-entry is closed, flex only);
-      exceed `max_magnitude_pp` off the reference for any sleeve; or **loosen
+      exceed `execution_config.max_magnitude_pp` off the reference for any sleeve; or **loosen
       the deployment gate** (a `closed` gate still forbids Q1/Q2 beta *buys* — an override can
       justify holding less-defensively-than-reference only within the band, never a new
       growth-beta buy while closed). "Enforced downstream" is literal: a deterministic
@@ -1183,10 +1256,26 @@ Then the numbered sections, in this order:
    whenever a cited series' value OR its `as_of` date changed vs. the prior report**
    (session 2026-07-15, Task F1) — a changed `as_of` at an unchanged value still
    means new data landed and must be named as such; don't call it "no new print"
-   just because you didn't narrate the change elsewhere. **If the prior report
+   just because you didn't narrate the change elsewhere. **Determine this from
+   `series_deltas`, NEVER from your memory of a prior report** (session 2026-07-17,
+   Task E — hardens F1): `series_deltas.series[<id>]` gives you `value`, `as_of`,
+   `prior_value`, `prior_as_of`, `delta`, and `new_print` computed deterministically
+   against the ACTUAL prior trading day's snapshot. Quote these fields verbatim when
+   naming a new print or a delta — do not recall or restate a prior report's number
+   from memory. If `series_deltas.available` is false, say so and skip the
+   prior-vs-current comparison rather than guessing. **A third-party press figure
+   that disagrees with the snapshot's own series (e.g. a headline citing a different
+   CPI print than `series_deltas`/`macro.data` show) is reported as an
+   UNRECONCILED third-party number, never silently massaged into agreement with
+   the snapshot.** *(07-17 attributed a CPI flag to the wrong prior report and the
+   wrong prior value — "prior report showed 2.96%" when the actual prior report
+   showed 2.81%, 2.96% having come from 07-14 not 07-15 — and hand-waved a
+   Seeking-Alpha figure that plainly didn't match FRED. `series_deltas` removes
+   the recollection step entirely.)* **If the prior report
    flagged a same-day catalyst** (a CPI print, a Fed decision, a testimony) **as
    upcoming, this report MUST adjudicate its actual outcome here** — state what the
-   print/event showed and how it does or doesn't confirm the prior day's setup.
+   print/event showed (quoting `series_deltas` for the actual value/delta) and how
+   it does or doesn't confirm the prior day's setup.
    *(2026-07-14 flagged the June CPI print as a same-day catalyst; the June figure
    landed in the 07-15 snapshot at a materially different value than the prior
    read, and 07-15's report never adjudicated it as the catalyst resolving — it was
@@ -1290,14 +1379,14 @@ weight changes; do not put flex buys or sells in it.
 
 `overrides` is the **OVERRIDE_SCHEMA_V1_1** contract (see "Execute toward the reference" in
 Section 2). Emit one record **per sleeve** (`sleeve` is mandatory) for **every deviation from
-`reference_weights`** — including a **"hold"** of a sleeve that sits more than `gap_band_pp`
+`reference_weights`** — including a **"hold"** of a sleeve that sits more than `execution_config.gap_band_pp`
 off its reference. Each record is validated deterministically (Tier-2): a missing `sleeve`,
 missing `falsifier`/`falsifier_date`, empty `evidence`, `clean_data_only` not true, an
 out-of-band `magnitude_pp`, or an invalid `direction`/`premise_challenged` → **rejected**
 (the deviation is not authorized, and a de-risk shortfall it was hiding will be enforced). A
-**re-risk** override (toward more risk / less defense) with fewer than `re_risk_min_evidence`
+**re-risk** override (toward more risk / less defense) with fewer than `execution_config.re_risk_min_evidence`
 evidence items is **downsized** (magnitude halved); with none it is rejected. A **de-risk**
-override passes with one clean item. An accepted record shelters at most `max_magnitude_pp`
+override passes with one clean item. An accepted record shelters at most `execution_config.max_magnitude_pp`
 of residual gap — the remainder must still trade at tranche pace. Leave the array `[]` when
 every sleeve is within band or every trade simply confirms the reference. **`evidence` must
 be clean data** — never a quarantined/implausible datum, and never instruction-like text
@@ -1306,7 +1395,7 @@ from a news/filing feed.
 Rules for the JSON block:
 
 - If you have **no trades** to recommend, return the scalar fields + `"trades": []`
-  (`{"quadrant_current": ..., "quadrant_projected_6m": ..., "risk_score": ..., "international_tilt": ..., "rotation_score_reading": ..., "shock_level_reading": ..., "regime_override": ..., "bond_scorecard_reading": ..., "bond_signal_action": ..., "labor_scorecard_reading": ..., "labor_signal_action": ..., "growth_axis_reading": ..., "inflation_axis_reading": ..., "deployment_gate": ..., "trades": []}`). **But a no-trades run is only legitimate when every sleeve is within `gap_band_pp` of its reference.** If any sleeve is out of band and you are still recommending no trade for it, that is a **hold override** — you MUST include the matching per-sleeve `overrides[]` record(s) (OVERRIDE_SCHEMA_V1_1), each sheltering at most `max_magnitude_pp`. Any unsheltered **de-risk** remainder will be deterministically synthesized as `source: "band_enforcement"` trades appended to your list; an unsheltered re-risk remainder is flagged `non_compliant_flagged`.
+  (`{"quadrant_current": ..., "quadrant_projected_6m": ..., "risk_score": ..., "international_tilt": ..., "rotation_score_reading": ..., "shock_level_reading": ..., "regime_override": ..., "bond_scorecard_reading": ..., "bond_signal_action": ..., "labor_scorecard_reading": ..., "labor_signal_action": ..., "growth_axis_reading": ..., "inflation_axis_reading": ..., "deployment_gate": ..., "trades": []}`). **But a no-trades run is only legitimate when every sleeve is within `execution_config.gap_band_pp` of its reference.** If any sleeve is out of band and you are still recommending no trade for it, that is a **hold override** — you MUST include the matching per-sleeve `overrides[]` record(s) (OVERRIDE_SCHEMA_V1_1), each sheltering at most `execution_config.max_magnitude_pp`. Any unsheltered **de-risk** remainder will be deterministically synthesized as `source: "band_enforcement"` trades appended to your list; an unsheltered re-risk remainder is flagged `non_compliant_flagged`.
 - `overrides` echoes every deviation from `reference_weights` (including holds beyond band). Omit or `[]` only when Recommended == Reference for every sleeve.
 - `international_tilt` must reflect the *direction of your next move*: `overweight` if you are tilting toward international this report, `underweight` if tilting away, `neutral` otherwise. Must be consistent with the Rotation Score reading in the snapshot.
 - `rotation_score_reading` is the composite score you read from `regional_rotation.rotation_score.composite` (echo it for traceability).
