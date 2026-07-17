@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import math
 
-from shared.quadrants import AMPLIFIER_INTL, AMPLIFIER_US, DAMPER
+from shared.quadrants import AMPLIFIER_INTL, AMPLIFIER_US, DAMPER, LEGACY_EXITS
 
 # Fallback config if risk-limits.json lacks a reference_execution block (mirror it).
 REFERENCE_EXECUTION_DEFAULTS = {
@@ -64,12 +64,58 @@ _DEFENSIVE = set(DAMPER) | {"SGOV"}
 
 def is_de_risk_move(side: str, symbol: str) -> bool:
     """The D3 classification, deterministic off the quadrants.py block model:
-    SELLING an Amplifier name or BUYING a Damper/SGOV name is de-risk; everything
-    else (selling dampers, any risk-on buy) is re-risk and is never synthesized."""
+    SELLING an Amplifier or LEGACY_EXITS name, or BUYING a Damper/SGOV name, is
+    de-risk; everything else (selling dampers, any risk-on buy) is re-risk and is
+    never synthesized.
+
+    LEGACY_EXITS sells were added session 2026-07-15 (Task D1, decision D0): a
+    legacy long (AMZN/GOOGL/MCK/...) is being wound down to a 0% reference target
+    by design — reducing it is unambiguously de-risk (less concentration, more
+    cash/ballast), the same as trimming an overweight amplifier. Before this, a
+    legacy sell shortfall was flagged `non_compliant_flagged` ("re-risk shortfall
+    — never synthesized") and left the book's largest overweight (MCK, 07-14/15)
+    unpoliced — the model traded 1.65pp of a 6.56pp required tranche on 07-14 and
+    0.82pp of 4.79pp on 07-15, with no backstop and no override filed either time."""
     s = (symbol or "").upper()
     if (side or "").lower() == "sell":
-        return s in AMPLIFIER_US or s in AMPLIFIER_INTL
+        return s in AMPLIFIER_US or s in AMPLIFIER_INTL or s in LEGACY_EXITS
     return s in _DEFENSIVE
+
+
+def derive_override_direction(sleeve: str, gap_signed: float | None) -> str | None:
+    """Deterministic override direction (session 2026-07-15, Task E1) — shares the
+    block model with `is_de_risk_move` so an override's direction can never
+    disagree with what enforcement itself would call de-risk vs re-risk for the
+    same sleeve.
+
+    ``gap_signed`` = current_pct − reference_pct for the sleeve (positive =
+    overweight, negative = underweight; the sign convention `reconcile` uses).
+
+    - Damper/SGOV sleeve **overweight** its reference (holding MORE defense than
+      the reference wants) ⇒ ``de_risk``; **underweight** (LESS defense) ⇒
+      ``re_risk``.
+    - Amplifier or LEGACY_EXITS sleeve **overweight** (holding MORE risk-on, or
+      slow-walking a legacy exit above its 0% target) ⇒ ``re_risk``;
+      **underweight** (LESS) ⇒ ``de_risk``.
+
+    Returns ``None`` when the sleeve's block can't be classified (an unknown/
+    off-roster ticker) or the gap is exactly zero (no deviation to direction) —
+    callers must not silently default a direction in that case, only fall back
+    to whatever was declared.
+
+    *(Motivating case: 2026-07-14 correctly filed a GLD-above-reference hold as
+    de_risk; 2026-07-15 filed the identical situation — plus XLP and TLT, also
+    dampers held above reference — as re_risk, backwards, which would have held
+    them to a HARDER evidence bar than the cheap de-risk case actually requires.)*
+    """
+    if gap_signed is None or gap_signed == 0:
+        return None
+    s = (sleeve or "").upper()
+    if s in _DEFENSIVE:
+        return "de_risk" if gap_signed > 0 else "re_risk"
+    if s in AMPLIFIER_US or s in AMPLIFIER_INTL or s in LEGACY_EXITS:
+        return "re_risk" if gap_signed > 0 else "de_risk"
+    return None
 
 
 def allowed_residuals(override_decisions: list[dict], max_magnitude_pp: float) -> dict[str, float]:
@@ -148,11 +194,17 @@ def reconcile(
     # Off-roster held names (flex leftovers, e.g. MU) get a gap row so the Tier-1
     # validator can clamp their sells, but band enforcement must NEVER synthesize a
     # trade for one — flex exits are governed by the flex engine and human approval,
-    # not the deterministic reference (2026-07-13 audit finding 3).
-    rows = {
-        str(g.get("symbol") or "").upper(): g
-        for g in gaps if g.get("symbol") and not g.get("off_roster")
+    # not the deterministic reference (2026-07-13 audit finding 3). `all_rows`
+    # (session 2026-07-15, Task B2) keeps them for PRICING ONLY — an off-roster
+    # sell still raises real cash that enforcement's buy sizing must see (07-14: MU's
+    # ~$1,967 sell proceeds were excluded from `cash_avail`, understating what was
+    # available and contributing to a cash-starved KMLM synthesis). `rows` (excluding
+    # off_roster) remains the synthesis working set below — off-roster names must
+    # never become an enforcement TARGET, only a cash SOURCE.
+    all_rows = {
+        str(g.get("symbol") or "").upper(): g for g in gaps if g.get("symbol")
     }
+    rows = {sym: g for sym, g in all_rows.items() if not g.get("off_roster")}
 
     # D1 — per-sleeve allowed residual (shared helper — rejected/absent shelters nothing).
     residual = allowed_residuals(override_decisions, max_mag)
@@ -168,7 +220,7 @@ def reconcile(
             qty = abs(float(t.get("quantity") or 0))
         except (TypeError, ValueError):
             qty = 0.0
-        row = rows.get(sym)
+        row = all_rows.get(sym)
         try:
             px = float((row or {}).get("price") or 0)
         except (TypeError, ValueError):

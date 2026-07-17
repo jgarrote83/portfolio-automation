@@ -16,6 +16,7 @@ from shared.overrides import (  # noqa: E402
     validate_override,
     validate_overrides,
 )
+from shared.reference_execution import derive_override_direction  # noqa: E402
 
 CFG = dict(OVERRIDE_DEFAULTS)  # max_magnitude_pp=15, re_risk_min_evidence=2, gap_band_pp=5
 
@@ -169,3 +170,83 @@ def test_validate_overrides_empty_ok():
 def test_validate_overrides_none_cfg_uses_defaults():
     res = validate_overrides([_ov()], None)
     assert len(res["accepted"]) == 1
+
+
+# --- Task E1 (session 2026-07-15): deterministic direction derivation --------
+
+def test_derive_direction_damper_overweight_is_de_risk():
+    """GLD overweight vs reference (current 17.1 > reference 12.46) = holding
+    MORE defense than reference = de_risk (this is exactly the 07-14/07-15
+    GLD situation — 07-14 called it correctly, 07-15 called it re_risk)."""
+    assert derive_override_direction("GLD", 17.1 - 12.46) == "de_risk"
+
+
+def test_derive_direction_damper_underweight_is_re_risk():
+    """A damper UNDERWEIGHT its reference = holding LESS defense = re_risk."""
+    assert derive_override_direction("TLT", 2.0 - 4.86) == "re_risk"
+
+
+def test_derive_direction_amplifier_overweight_is_re_risk():
+    assert derive_override_direction("SPY", 20.0 - 10.0) == "re_risk"
+
+
+def test_derive_direction_amplifier_underweight_is_de_risk():
+    assert derive_override_direction("QQQ", 5.0 - 10.0) == "de_risk"
+
+
+def test_derive_direction_legacy_exit_overweight_is_re_risk():
+    """Slow-walking a legacy exit (held above its 0% reference) is re_risk —
+    holding MORE of a name that should be fully wound down."""
+    assert derive_override_direction("MCK", 11.56 - 0.0) == "re_risk"
+
+
+def test_derive_direction_unclassifiable_or_zero_gap_is_none():
+    assert derive_override_direction("MU", 2.0) is None       # off-roster, unknown block
+    assert derive_override_direction("GLD", 0.0) is None      # no deviation to direct
+    assert derive_override_direction("GLD", None) is None
+
+
+def test_mislabeled_re_risk_corrected_to_de_risk_and_flagged():
+    """The exact 07-15 bug: GLD overweight (de_risk, cheap) declared as re_risk.
+    Correct-and-flag: the EFFECTIVE direction used for the asymmetry bar is the
+    DERIVED de_risk (so one evidence item is enough — no downsizing), the
+    declared claim is preserved, and a disagreement reason is appended."""
+    ov = _ov(sleeve="GLD", direction="re_risk", evidence=["one clean item"])
+    gap_signed = 17.1 - 12.46   # overweight
+    d = validate_override(ov, CFG, gap_signed)
+    assert d["outcome"] == "accepted"          # de_risk asymmetry, not downsized
+    assert d["override"]["direction"] == "de_risk"
+    assert d["override"]["declared_direction"] == "re_risk"
+    assert any("disagrees with the derived direction" in r for r in d["reasons"])
+
+
+def test_correctly_labeled_direction_has_no_disagreement_reason():
+    ov = _ov(sleeve="GLD", direction="de_risk")
+    gap_signed = 17.1 - 12.46
+    d = validate_override(ov, CFG, gap_signed)
+    assert d["outcome"] == "accepted"
+    assert d["override"]["direction"] == "de_risk"
+    assert d["override"]["declared_direction"] == "de_risk"
+    assert d["reasons"] == []
+
+
+def test_no_gap_available_falls_back_to_declared_direction():
+    """Backward-compatible: gap_signed=None (off-roster sleeve, or no gaps
+    supplied) skips derivation entirely — declared direction stands unchanged."""
+    ov = _ov(sleeve="MU", direction="re_risk", evidence=["one", "two"])
+    d = validate_override(ov, CFG, None)
+    assert d["outcome"] == "accepted"
+    assert d["override"]["direction"] == "re_risk"
+    assert d["override"]["declared_direction"] == "re_risk"
+    assert d["reasons"] == []
+
+
+def test_validate_overrides_threads_gaps_for_derivation():
+    """The batch API (session 2026-07-15) accepts `gaps` and derives direction
+    per-sleeve from them — the same shape `reconcile` consumes."""
+    ovs = [_ov(sleeve="GLD", direction="re_risk", evidence=["one item"])]
+    gaps = [{"symbol": "GLD", "current_pct": 17.1, "reference_pct": 12.46}]
+    res = validate_overrides(ovs, CFG, gaps)
+    assert len(res["accepted"]) == 1
+    assert res["accepted"][0]["direction"] == "de_risk"
+    assert res["accepted"][0]["declared_direction"] == "re_risk"

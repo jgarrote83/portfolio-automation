@@ -70,6 +70,33 @@ def test_reconcile_skips_off_roster_rows():
     assert all(t["symbol"] != "MU" for t in recon["enforced_trades"])
 
 
+def test_reconcile_counts_off_roster_sell_proceeds_toward_cash():
+    """Task B2 (session 2026-07-15): an off-roster sell (e.g. MU) must never become
+    a synthesis TARGET, but its proceeds are real cash and must fund a synthesized
+    BUY elsewhere. 07-14 shape: MU's sell proceeds were excluded from reconcile's
+    cash_avail, understating what was available for enforcement."""
+    gaps = [
+        {"symbol": "GLD", "current_pct": 0.0, "reference_pct": 20.0, "price": 50.0},
+        {"symbol": "MU", "current_pct": 2.0, "reference_pct": 0.0, "price": 75.0,
+         "off_roster": True},
+    ]
+    ctx = {
+        "deployment_gate": "open", "equity_usd": 100_000.0, "cash_usd": 0.0,
+        "date": "2026-07-14", "exempt_holds": [],
+    }
+    mu_sell = {"id": "T-MU-sell", "symbol": "MU", "side": "sell", "quantity": 2}
+
+    without_mu_sell = reconcile(gaps, [], [], CFG, dict(ctx))
+    with_mu_sell = reconcile(gaps, [mu_sell], [], CFG, dict(ctx))
+
+    # Without MU's proceeds counted, cash_avail is 0 -> GLD shortfall unenforceable.
+    assert without_mu_sell["sleeves"]["GLD"]["status"] == "non_compliant_flagged"
+    # With MU's $150 proceeds counted, GLD enforcement has cash to work with.
+    assert with_mu_sell["sleeves"]["GLD"]["status"] == "enforced"
+    assert all(t["symbol"] != "MU" for t in with_mu_sell["enforced_trades"])
+    assert "MU" not in with_mu_sell["sleeves"]   # never a synthesis target
+
+
 def test_off_roster_buy_still_rejected_by_v1_even_with_row_present():
     gaps, ctx = _build_reference_gaps(_snapshot())
     ctx["date"] = "2026-07-13"

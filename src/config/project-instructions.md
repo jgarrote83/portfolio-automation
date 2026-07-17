@@ -51,6 +51,25 @@ that the 07-08 oil spike "partially reversed" — the print predates the spike a
 nothing about it. The correct statement is "latest WTI print $69.60 as-of 07-06; the
 07-08 spike is unconfirmed by the current series.")*
 
+### Execution review (never assume yesterday's trades executed)
+
+`execution_review` (session 2026-07-15, Task A1) reconciles the PRIOR trading day's
+submitted orders against their actual Alpaca terminal state — a response to the
+2026-07-14/15 MU incident, where a validated, submitted sell 403'd against a stale
+resting order and was silently re-proposed the next day with no visible failure
+anywhere in the report. **You must never assume a prior day's proposed trade
+executed** — check `execution_review` before repeating or building on it:
+- If `execution_review.available` is `false`, say so in one line (no prior-day
+  execution data to check) and proceed normally.
+- If `failed` or `unfilled` is non-empty, surface each entry (`symbol`, `side`,
+  `qty`, `status`, `error`) under the Data Integrity Warning heading — this is
+  exactly the kind of "quiet failure" that heading exists to catch.
+- **When you re-propose a trade in a symbol that appears in `execution_review.failed`
+  or `.unfilled`, say so explicitly** ("re-proposing the MU close — yesterday's
+  attempt failed: 403 Forbidden") rather than presenting it as a fresh idea. A
+  repeated failure across multiple sessions is itself evidence worth naming (e.g. a
+  stale resting order, a persistent liquidity issue) — do not just resubmit silently.
+
 ---
 
 ## Portfolio structure — role-based core + flex
@@ -158,6 +177,16 @@ Everything else is separate:
   and a core weight change is never a flex idea.
 - ≤ **10** flex tickers and flex aggregate ≤ **25%** of equity — both enforced by
   the engine; nominate within that budget.
+- **The one documented exception — the orphaned-flex-exit (session 2026-07-15,
+  Task A2).** When `flex_state.reconciliation.status == "mismatch"` and you run
+  kill-criteria against the broker-held orphan per the reconciliation doctrine
+  below and the position should be closed, **the exit order goes in `trades[]`**
+  (`layer: "core"`, `flex_source: null`), not `flex_nominations[]` — there is no
+  engine left to size or exit it (that's the entire point of the mismatch), and
+  the position is real, held, and needs a real sell order. State the orphan status
+  in the trade's `rationale`. This is the only case where a `trades[]` entry
+  originates from a flex position rather than a core weight change; everything
+  else in this contract is unchanged.
 
 #### Your job on Flex: nominate + assert regime fit (the engine does the rest)
 
@@ -419,6 +448,15 @@ real 10y, HY OAS, and oil. **Flag anything older than 5 calendar days as STALE**
 flag any primary classifier that is *missing entirely* — a missing growth/policy
 input is a blind spot you must name, not paper over.
 
+**As-of date convention (session 2026-07-15, Task F2).** The `as-of date` column is
+the series' **observation period** as given verbatim in the snapshot — never a
+release/publish date, and never a date you compute or estimate. Compute
+days-stale as `today − that as_of`. *(2026-07-14 showed Core CPI/PCE as-of
+2026-06-10/2026-06-25 — dates that do not follow the snapshot's own monthly
+first-of-period convention — while 2026-07-15's report on the SAME underlying
+prints showed 2026-06-01/2026-05-01. If you cannot find an explicit `as_of` field
+for a series, say "as-of date not present in snapshot" rather than inferring one.)*
+
 ### Quadrant cadence rule (governs depth of re-examination, NOT whether the label may change)
 
 The cadence thresholds decide **when to re-examine in depth**, never **whether the
@@ -431,7 +469,13 @@ These thresholds flag a likely material shift since your previous report:
 - Core CPI YoY changes by ≥ ±0.3% month-on-month
 - 10-year yield moves ≥ ±25 bp over a 5-trading-day window
 - ISM Manufacturing crosses 50 (in either direction)
-- DXY moves ≥ ±2% over a 10-trading-day window
+- DXY moves ≥ ±2% over a **10-trading-day** window specifically (session
+  2026-07-15, Task F3) — not 2 days, not 60 days. If the snapshot's DXY series
+  does not carry an observation ~10 trading days back, **say so explicitly**
+  ("DXY cadence check: no 10d-ago observation in snapshot — cannot evaluate this
+  trigger") rather than substituting whatever shorter or longer window happens to
+  be available; a substituted window is not evidence the threshold was or wasn't
+  crossed.
 - A major central-bank rate decision (Fed/ECB/BoJ) lands between reports
 
 If at least one triggered, treat the regime as **actively in question** and show your
@@ -523,6 +567,13 @@ runs). Your job is to **echo, not decide**:
   role, the incumbent, the challenger/new member, the lead, and the streak (e.g.
   "`semis`: SMH → SOXX proposed (lead +2.4, streak 11) — awaiting config commit"), and
   a Dashboard **Note**. Do not expand it into a section.
+- **When a challenger is leading but `switch_signal` is FALSE** (streak below the
+  `hysteresis_runs` threshold, e.g. 3 of the required 10 — session 2026-07-15, Task
+  F4), do **NOT** say "proposed" or "awaiting config commit" — that language claims
+  a threshold has been met when it hasn't. State only the lead/streak/threshold
+  status: "`trend`: DBMF leads KMLM by +2.38pp, streak 3 of 10 required — no
+  `switch_signal`." *(2026-07-14 described three roles at streak 2 as "proposed …
+  awaiting config commit" — premature; none had reached the hysteresis bar.)*
 - **The one exception is the `intl_leader` slot**, which follows `leader_pick`
   automatically — execute that rotation as a within-role sell-old/buy-new at the sleeve
   target (the validator permits it even under a closed gate). It is logged to
@@ -1089,6 +1140,23 @@ Then the numbered sections, in this order:
       needs ≥ `re_risk_min_evidence` clean items and a specific dated falsifier; the
       validator **downsizes** (halves) an under-evidenced re-risk override and **rejects** one
       with no evidence. When in doubt, defer to the reference.
+
+      **Direction is about the SLEEVE's own defensiveness, not about which number is
+      bigger (session 2026-07-15, Task E2).** Holding a Damper/SGOV sleeve — **GLD,
+      XLP, TLT, KMLM, IEF, USMV, VTIP, PDBC, COWZ, XLV/IHE, XLI/PAVE, XLF, SGOV** —
+      **above** its reference is **de_risk** (you are holding MORE defense than the
+      reference wants — cheap). Holding an Amplifier sleeve (SPY, QQQ, SMH/XSD/SOXX,
+      or the intl roles) above reference, or holding a **LEGACY_EXITS** name above
+      its 0% reference (i.e. slow-walking an exit), is **re_risk** (you are holding
+      LESS defense than the reference wants — dear). *(2026-07-14 correctly filed
+      the GLD-above-reference hold as `de_risk`; 2026-07-15 filed the identical
+      situation — plus XLP and TLT, also dampers held above reference — as
+      `re_risk`, which is backwards and would have made the bar HARDER than
+      required for a cheap, legitimate override.)* The Tier-2 validator now derives
+      the direction itself from the sleeve's block and the gap sign, uses the
+      DERIVED direction for the asymmetry bar, and flags — never silently
+      rejects — a disagreement with your declared `direction`. Get it right anyway:
+      a flagged disagreement is logged as a data-quality signal against you.
    7. **Bounds you cannot cross with an override (Tier-1, enforced downstream).** No override
       may: breach the 0.1% floor or the 90%-of-core ceiling; **re-buy a legacy-exit name into
       core** (AMZN/GOOGL/INTC/MCK/DBA/TIP/XSD/PPA/EUAD — core re-entry is closed, flex only);
@@ -1111,7 +1179,18 @@ Then the numbered sections, in this order:
    `[CORE]` or `[FLEX]`. Keep notes terse (≤ 12 words) — this table is the largest
    section and the trades JSON below it must never be cut off by the output limit.
 5. **Catalysts** — earnings within 14 days, congressional flow, sector-moving news,
-   lobbying / government-contracts signals worth noting.
+   lobbying / government-contracts signals worth noting. **State a "new print"
+   whenever a cited series' value OR its `as_of` date changed vs. the prior report**
+   (session 2026-07-15, Task F1) — a changed `as_of` at an unchanged value still
+   means new data landed and must be named as such; don't call it "no new print"
+   just because you didn't narrate the change elsewhere. **If the prior report
+   flagged a same-day catalyst** (a CPI print, a Fed decision, a testimony) **as
+   upcoming, this report MUST adjudicate its actual outcome here** — state what the
+   print/event showed and how it does or doesn't confirm the prior day's setup.
+   *(2026-07-14 flagged the June CPI print as a same-day catalyst; the June figure
+   landed in the 07-15 snapshot at a materially different value than the prior
+   read, and 07-15's report never adjudicated it as the catalyst resolving — it was
+   silently absorbed into "no new print.")*
 6. **Themes & flex pipeline** — the theme ledger (each active theme: status,
    tier where opportunity remains, signals being watched); the **flex nominations**
    you are emitting this run in `flex_nominations[]` (candidate, dated catalyst,
@@ -1240,9 +1319,14 @@ Rules for the JSON block:
 - `growth_axis_reading` echoes `growth_axis.direction` and `inflation_axis_reading` echoes `inflation_axis.direction` (verbatim from the snapshot — do not substitute your own read). Your `quadrant_current` MUST be consistent with them: growth `rising` → Q1/Q2; growth `falling` → Q3/Q4; inflation `rising` → Q2/Q3; inflation `falling` → Q1/Q4. A `flat`/`indeterminate` axis means that half of the grid is not confirmed — do not claim the quadrant that requires it.
 - `deployment_gate` echoes `regime_gate.status` (`"open"` / `"closed"`) — it must equal the precomputed value, not a status you re-reasoned. When it is `"closed"`, the `trades` array MUST NOT contain any **buy** of a Q1/Q2 risk-on equity name justified on a cash-drag / deployment rationale (defensive buys — TLT, GLD, staples — trims, hedges, rotations, and sleeve raises are still allowed).
 - `id` must be unique per trade and embed today's date.
-- `layer` is **always `"core"` in `trades[]`** — the 24 core tickers, weight-only.
-  Flex is **not** traded here: flex ideas go in `flex_nominations[]` and are entered/
-  sized/exited by the engine. Set `flex_source` to `null` for every `trades[]` entry.
+- `layer` is **always `"core"` in `trades[]`**. Flex is **not** traded here: flex
+  ideas go in `flex_nominations[]` and are entered/sized/exited by the engine. Set
+  `flex_source` to `null` for every `trades[]` entry. **The one exception** (see
+  "The Separation Contract" above): a broker-held flex ORPHAN
+  (`flex_state.reconciliation.status == "mismatch"`) that meets kill-criteria is
+  exited via a `trades[]` entry — `layer: "core"`, `flex_source: null` — because
+  no engine remains to manage it. Every other flex idea, entry, and exit stays out
+  of `trades[]` entirely.
 - A buy of any ticker not on the Core roster is **forbidden** in `trades[]` — if it is
   a flex idea, nominate it in `flex_nominations[]` instead.
 - `confidence` is a float 0.0–1.0. Be honest — use < 0.5 when uncertain.

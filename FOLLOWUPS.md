@@ -1138,61 +1138,161 @@ requested Fable 5 quota lands on the `Portfolio-Analysis` Foundry project. Verif
 deployment exists and quota is non-zero (`az` / Foundry portal) before flipping — do not
 assume quota approval happened silently.
 
-### 41. 2026-07-13 daily-report audit: price universe, intl-pool floor, off-roster validation seam — 🔶 PR OPEN (`fix/20260713-audit-price-universe-validator`), pending account-holder review
-The 07-13 report exposed three systemic gaps, all confirmed against the code and fixed
-on this branch (not yet merged):
-- **Finding 1 (HIGH) — reference buys were impossible, not deferred.** The collector's
-  EOD price universe (`tickers + _ETF_WATCHLIST + flex_candidate_tickers`) never
-  included an unheld role's `selected` incumbent (KMLM, IEF, VXUS, XLV, USMV, COWZ,
-  VTIP, SMH, XLF — the names the Q3/Q4 underweights needed), so they had no price, no
-  gap row, and band enforcement could never synthesize the buy. **Fixed (Task A):**
-  new `shared/quadrants.selected_core_members()` + collector `_build_price_universe()`
-  add every role's selected member to the fetch list. FMP `get_eod_prices` cost rose
-  from ~29 to ~38 tickers/day (well inside the 250 req/day Starter budget — the
-  alternative full-`CORE_ROSTER` universe would be ~46 tickers, also affordable, but
-  the minimal selected-members version was shipped per the task's own preference).
-- **Finding 2 — non-selected `intl_leader` pool members (EWZ/VSS/IEMG/IDMO/EWJ)
-  couldn't be unwound.** They're `CORE_ROSTER` but not `LEGACY_EXITS`, so V3 floor-
-  clamped every attempted full exit to a 0.1%/1-share dust stub. **B0 decision (this
-  session, per the task's explicit decision gate): Option 1 — allow sell-to-zero.**
-  Rationale: the roster revision made intl leader-selective (only VXUS + `leader_pick`
-  should be held), the reference already targets non-selected members at 0, and V1.5
-  already blocks BUYING them — the sell-side floor bypass is the mirror image. A
-  member can always come back later via a human `selected`/`leader_pick` commit.
-  **Fixed (Task B1):** `trade_validation._non_selected_pool_member()` mirrors V1.5's
-  role/leader_pick logic exactly; `floor_lb` is 0 for `LEGACY_EXITS` **or** a non-
-  selected pool member, never keyed off `reference_pct == 0` (a selected out-of-favor
-  name can legitimately show ref 0 and still owes its floor). Also fixed a cosmetic
-  bug (**Task B2**, unconditional on B0): the sell-clamp math could compute a
-  negative share count ("sell clamped 1→-1") when `cur` sat fractionally inside the
-  floor epsilon — now floors at 0 with a clean "already at/below the window floor —
-  nothing sellable" reason. **Task B3:** project-instructions.md now distinguishes
-  "intl pool unwinds" (`[CORE — intl pool]`) from legacy exits — the 07-13 report had
-  mislabeled these five names `[LEGACY EXIT]`.
-- **Finding 3 — off-roster held names (flex leftovers like MU) were invisible to the
-  deterministic layer.** `_build_reference_gaps`'s universe excluded them, so (a)
-  `_post_validation_cash` undercounted post-validation literal cash by the flex
-  position's proceeds (07-13: printed ≈$4,597 vs a true ≈$6,440), and (b) an
-  off-roster SELL skipped V3/V4 entirely and could reach the executor unvalidated.
-  **Fixed:** Task C1 adds a paper-position `current_price` fallback to
-  `_post_validation_cash` (gap-row price still wins when both exist); Task C2 makes
-  `_build_reference_gaps` append a `reference_pct: 0.0, off_roster: True` row for
-  every held off-roster name, priced via the existing position fallback — visible to
-  the validator's sell-side V3/V4 checks (a full exit passes, an oversell clamps to
-  held) but filtered out of `reconcile`'s working set (band enforcement must never
-  synthesize a trade for a flex leftover — that's the flex engine's + human
-  approval's job). Off-roster BUYs are unaffected (V1 already rejected them, still
-  does with the row present).
-- **Shipped:** Tasks A, B (B0=Option 1, B1, B2, B3), C (C1, C2). Suite +19 tests
-  (545→564), ruff clean. **Out of scope on this branch** (see the prompt for this
-  session): the cash-drag attribution rule, the shock-3 "15% ceiling" prompt phrasing,
-  the Table A deterministic `current_by_quadrant` block, the FMP `earnings_calendar`
-  GOOGL 07-22 coverage gap, and tranche-sizing config visibility (#33(i)) — all still
-  open for a future session.
+### 42. 2026-07-15 daily-report audit: execution-fill visibility, reconcile sequencing, VXUS deadlock, legacy-exit enforcement, override direction — 🔶 PR OPEN (`fix/20260715-exec-fills-reconcile-seams`), pending account-holder review
+Post-PR-#24 observation of the 07-14/07-15 reports exposed five new systemic findings.
+All confirmed against the code (Finding A diagnosed live against the Alpaca paper API)
+and fixed on this branch:
+- **Finding A (HIGH) — a validated MU sell was never executed, and execution failures
+  were invisible to the next day's report.** Diagnosed live (Task A0): the 07-14
+  `daily-trades` file DID contain a validated MU sell (`layer: "flex"`, passed);
+  `daily-executions/2026-07-14.json` shows it 403'd (`Forbidden`) and the SAME 403 hit
+  again on 07-15. Root cause: a stale **GTC stop order** placed by the flex engine on
+  2026-07-08 (`client_order_id: flex-2026-07-07-MU-rep-302e8f`, stop $628.48, still
+  `status: "new"`, `expires_at: 2026-10-06`) had locked both MU shares as order
+  collateral (`qty_available: 0`) ever since — every subsequent sell attempt for that
+  symbol was rejected by Alpaca, invisibly, forever. **Fixed:** Task A1 adds a collector
+  `execution_review` snapshot block (Alpaca-only, non-fatal) that reads back the prior
+  trading day's `daily-executions/{date}.json` and reconciles each order's actual
+  terminal Alpaca state, surfacing `failed`/`unfilled` entries for the prompt to name
+  in the Data Integrity Warning and never assume executed. Task A2 codifies the
+  orphaned-flex-exit exception already implicit in the reconciliation doctrine
+  (`trades[]`, `layer: "core"`, `flex_source: null`) in both the Separation Contract and
+  the trades[] schema sections of `project-instructions.md`. Task A3 fixes the
+  executor-level bug: `_place_one` now cancels any pre-existing OPEN Alpaca order on a
+  symbol before submitting a new one for it (`_cancel_conflicting_orders`) — today's
+  recommendation is the authoritative decision and supersedes a stale resting order.
+  The MU position itself is NOT force-resolved by this session (account holder's call);
+  A1 makes a second failure visible instead of silent.
+- **Finding B (HIGH) — `reconcile()` sized enforcement BEFORE the validator ran, and its
+  cash model excluded off-roster sell proceeds.** Exact to the share: the 07-14
+  synthesized KMLM buy was 57 shares (doctrine math said ~126-135 affordable) because
+  (1) `analyzer/handler.py` ran `reconcile` on the model's RAW trades, so the
+  soon-to-be-rejected $1,927 VXUS buy was still counted as spent, and (2) `reconcile`'s
+  `rows` dict excluded MU's off-roster sell entirely, so its ~$1,967 proceeds never
+  entered `cash_avail`. **Fixed:** Task B1 restructures the analyzer into two Tier-1
+  passes — pass 1 validates the model's raw trades and drops what Tier-1 would reject;
+  `reconcile` runs against the pass-1 SURVIVORS; pass 2 re-validates the full merged
+  list (survivors + synthesized trades) so cumulative checks see the final list.
+  Rejections from both passes are combined into the addendum, deduped by trade id. Task
+  B2 adds an `all_rows` lookup (includes off-roster rows for PRICING only) so an
+  off-roster sell's proceeds count toward `cash_avail` while off-roster names remain
+  excluded from the synthesis working set (`rows`) — never an enforcement TARGET, only
+  a cash SOURCE. Task B3 pins the exact scenario (`tests/test_reconcile_validate_sequencing.py`)
+  and asserts `_post_validation_cash` agrees with reconcile's cash view.
+- **Finding C (MEDIUM-HIGH) — VXUS structural deadlock.** `intl_broad`'s reference
+  target (2.0pp) is unconditional, but VXUS is `block: amplifier_intl`, so V1 rejects
+  its buy on every closed-gate day regardless of the rotation score — confirmed
+  rejected 07-14 AND 07-15 ("amplifier buy VXUS forbidden"), wasting a trade slot daily
+  and (until Finding B landed) starving enforcement cash. **C0 decision (account
+  holder, this session): Option 1 — gate `intl_broad` to 0 in the reference builder
+  while the deployment gate is closed.** Rationale: doctrine-consistent ("the gate
+  outranks everything"), self-healing (rebuilt daily, restores the day the gate opens),
+  and a held VXUS position isn't force-sold (a 2pp gap sits inside the 5pp band). The
+  leader slot is untouched (already halved, never zeroed, on a closed gate — rotation-
+  governed per roster_revision_2026-07 §4). **Fixed:** collector `_build_reference_weights`
+  pops the `intl_broad` selected ticker from `intl_targets` (and its pp from
+  `intl_total_pct`) when `regime_gate.status == "closed"`, folding the freed room into
+  normal core renormalization.
+- **Finding D (MEDIUM) — legacy-exit sells were invisible to D3 enforcement; the model
+  slow-walked MCK unpoliced.** `is_de_risk_move` recognized only amplifier sells as
+  de-risk; legacy exits (no block) fell to "re-risk shortfall — never synthesized" with
+  zero backstop on the book's largest overweight. MCK: 1.65pp traded of a 6.56pp
+  required tranche (07-14), 0.82pp of 4.79pp (07-15), no override filed either day.
+  **D0 decision (account holder, this session): yes to both D1 and D2.** **Fixed:** D1
+  extends `is_de_risk_move` so a SELL of a `LEGACY_EXITS` name counts as de-risk,
+  letting D3 synthesize legacy-exit shortfall sells at tranche pace (a real behavior
+  change — D3 will now sell MCK/AMZN/GOOGL down deterministically whenever the model
+  under-trades the tranche). D2 (unconditional, no gate) surfaces `reconcile`'s
+  `non_compliant_flagged` sleeves in a new report addendum
+  (`analyzer._flagged_sleeves_addendum`) — symbol/gap/required-move/model-move/reason
+  — so slow-walking is visible in the report itself, not just the JSON.
+- **Finding E (MEDIUM) — override `direction` was self-declared and flip-flopped
+  between days.** 07-14 correctly filed the GLD-above-reference hold as `de_risk`;
+  07-15 filed the SAME situation — plus XLP and TLT, all dampers held above reference —
+  as `re_risk` (backwards; would have imposed the HARDER evidence bar on a cheap,
+  legitimate override). Consequential beyond labeling: the collector's
+  `_override_sign`/`_grade_override` (Phase 5 outcome stamping) derive the weight
+  direction FROM the persisted `direction` + the sleeve's block — a mislabeled
+  `direction` would have inverted the counterfactual grading sign. **Fixed:** Task E1
+  adds `shared.reference_execution.derive_override_direction` (pure, shares the block
+  model with `is_de_risk_move`); `shared.overrides.validate_override`/`validate_overrides`
+  now accept `gaps`, derive the direction deterministically, use the DERIVED direction
+  for the asymmetry bar, and **correct-and-flag** a disagreement (append a reason,
+  never reject solely for a mislabeled direction) — both `direction` (effective) and
+  `declared_direction` (the model's original claim) persist to OverrideHistory so
+  Phase C can measure the misclassification rate. Task E2 adds a concrete GLD/XLP/TLT
+  example + the derivation note to the override section of `project-instructions.md`.
+- Task F1-F4 (prompt-only, `project-instructions.md`): F1 — state a "new print" when a
+  series' value OR `as_of` changed vs. the prior report, and adjudicate a previously-
+  flagged same-day catalyst's outcome in Section 5 (07-14 flagged the June CPI print as
+  today's catalyst; 07-15 never adjudicated it, calling it "no new print" despite a
+  materially different value). F2 — echo the snapshot's `as_of` verbatim (observation
+  period), never a computed/release date (07-14 showed CPI/PCE as-of dates that don't
+  follow the monthly first-of-period convention 07-15's did on the same underlying
+  prints). F3 — the DXY cadence check is a specific 10-trading-day window; say so
+  explicitly when the snapshot lacks that observation rather than substituting a
+  shorter/longer delta. F4 — only call a role switch "proposed / awaiting config
+  commit" when `switch_signal` is actually true; below the hysteresis threshold, state
+  lead/streak/threshold status only (07-14 called three streak-2 roles "proposed").
+- **Shipped:** Tasks A (A0 diagnosis, A1, A2, A3), B (B1, B2, B3), C (C0=Option 1), D
+  (D0=yes to D1+D2), E (E1, E2), F (F1-F4). Suite +25 tests (564→589), ruff clean. **Out
+  of scope on this branch** (deferred 07-13-audit findings 4–8, unchanged): FMP
+  earnings-calendar held-position filtering, performance-lag attribution, quadrant
+  Table A cell arithmetic, the misleading Recommended-weight column, the shock-3 "15%
+  ceiling" phrasing, the Q2 per-sleeve band-granularity observation, tranche-config
+  visibility (#33(i)), and the model's KMLM 43-vs-44-share table slip.
 
 ---
 
 ## Done
+- **2026-07-13** (PR #24, branch `fix/20260713-audit-price-universe-validator`, merged
+  2026-07-13) — **2026-07-13 daily-report audit: price universe, intl-pool floor,
+  off-roster validation seam.** The 07-13 report exposed three systemic gaps, all
+  confirmed against the code and fixed:
+  - **Finding 1 (HIGH) — reference buys were impossible, not deferred.** The collector's
+    EOD price universe (`tickers + _ETF_WATCHLIST + flex_candidate_tickers`) never
+    included an unheld role's `selected` incumbent (KMLM, IEF, VXUS, XLV, USMV, COWZ,
+    VTIP, SMH, XLF — the names the Q3/Q4 underweights needed), so they had no price, no
+    gap row, and band enforcement could never synthesize the buy. **Fixed (Task A):**
+    new `shared/quadrants.selected_core_members()` + collector `_build_price_universe()`
+    add every role's selected member to the fetch list. FMP `get_eod_prices` cost rose
+    from ~29 to ~38 tickers/day (well inside the 250 req/day Starter budget — the
+    alternative full-`CORE_ROSTER` universe would be ~46 tickers, also affordable, but
+    the minimal selected-members version was shipped per the task's own preference).
+  - **Finding 2 — non-selected `intl_leader` pool members (EWZ/VSS/IEMG/IDMO/EWJ)
+    couldn't be unwound.** They're `CORE_ROSTER` but not `LEGACY_EXITS`, so V3 floor-
+    clamped every attempted full exit to a 0.1%/1-share dust stub. **B0 decision (that
+    session, per the task's explicit decision gate): Option 1 — allow sell-to-zero.**
+    Rationale: the roster revision made intl leader-selective (only VXUS + `leader_pick`
+    should be held), the reference already targets non-selected members at 0, and V1.5
+    already blocks BUYING them — the sell-side floor bypass is the mirror image. A
+    member can always come back later via a human `selected`/`leader_pick` commit.
+    **Fixed (Task B1):** `trade_validation._non_selected_pool_member()` mirrors V1.5's
+    role/leader_pick logic exactly; `floor_lb` is 0 for `LEGACY_EXITS` **or** a non-
+    selected pool member, never keyed off `reference_pct == 0` (a selected out-of-favor
+    name can legitimately show ref 0 and still owes its floor). Also fixed a cosmetic
+    bug (**Task B2**, unconditional on B0): the sell-clamp math could compute a
+    negative share count ("sell clamped 1→-1") when `cur` sat fractionally inside the
+    floor epsilon — now floors at 0 with a clean "already at/below the window floor —
+    nothing sellable" reason. **Task B3:** project-instructions.md now distinguishes
+    "intl pool unwinds" (`[CORE — intl pool]`) from legacy exits — the 07-13 report had
+    mislabeled these five names `[LEGACY EXIT]`.
+  - **Finding 3 — off-roster held names (flex leftovers like MU) were invisible to the
+    deterministic layer.** `_build_reference_gaps`'s universe excluded them, so (a)
+    `_post_validation_cash` undercounted post-validation literal cash by the flex
+    position's proceeds (07-13: printed ≈$4,597 vs a true ≈$6,440), and (b) an
+    off-roster SELL skipped V3/V4 entirely and could reach the executor unvalidated.
+    **Fixed:** Task C1 adds a paper-position `current_price` fallback to
+    `_post_validation_cash` (gap-row price still wins when both exist); Task C2 makes
+    `_build_reference_gaps` append a `reference_pct: 0.0, off_roster: True` row for
+    every held off-roster name, priced via the existing position fallback — visible to
+    the validator's sell-side V3/V4 checks (a full exit passes, an oversell clamps to
+    held) but filtered out of `reconcile`'s working set (band enforcement must never
+    synthesize a trade for a flex leftover — that's the flex engine's + human
+    approval's job). Off-roster BUYs are unaffected (V1 already rejected them, still
+    does with the row present).
+  - **Shipped:** Tasks A, B (B0=Option 1, B1, B2, B3), C (C1, C2). Suite +19 tests
+    (545→564), ruff clean.
 - **2026-07-10** (branch `feat/quadrant-roles`) — **Roster revision v2: role-based core,
   exempt-hold retirement, international governance (Tasks A–H).** The core moved from a
   fixed 24-ticker list to ROLES with candidate pools (`sleeve-roles.json`); deterministic

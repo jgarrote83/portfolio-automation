@@ -183,15 +183,37 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
 
     report_md, trades_obj = _split_response(raw, date_str)
 
+    # Reference gaps are built FIRST (session 2026-07-15, Task E1 needs them to
+    # derive each override's direction before validating overrides). Non-fatal:
+    # a gap-build failure must never lose the report/trades — downstream steps
+    # degrade gracefully with gaps=[] (Tier-1's absolute rules still apply).
+    gaps: list[dict] = []
+    ctx: dict = {}
+    rex_cfg = _load_reference_execution_cfg()
+    try:
+        gaps, ctx = _build_reference_gaps(snapshot)
+        ctx["date"] = date_str
+        ctx["exempt_holds"] = rex_cfg["exempt_holds"]
+    except Exception as e:  # noqa: BLE001
+        logger.error("Reference-gap build failed (non-fatal): %s", e)
+
+    vctx = dict(ctx) if ctx else {
+        "deployment_gate": (snapshot.get("regime_gate") or {}).get("status"),
+        "exempt_holds": rex_cfg["exempt_holds"],
+        "intl_leader_pick": (snapshot.get("intl_governance") or {}).get("leader_pick"),
+    }
+
     # Phase 4 — validate the override records the model emitted (Tier-2 enforcement):
     # structural gates + the de-risk/re-risk asymmetry. Rejected overrides do not
     # authorize a deviation; downsized ones have their magnitude halved. The result is
     # stamped back into trades_obj so the persisted record shows what was accepted, and
     # into OverrideHistory for the Phase-5 outcome loop. Non-fatal: a validation error
-    # must not lose the report/trades.
+    # must not lose the report/trades. `gaps` (Task E1) lets the validator DERIVE each
+    # override's direction from the sleeve's block + gap sign rather than trusting the
+    # model's self-declared `direction` — see shared/overrides.py::validate_override.
     try:
         cfg = _load_override_cfg()
-        result = validate_overrides(trades_obj.get("overrides", []), cfg)
+        result = validate_overrides(trades_obj.get("overrides", []), cfg, gaps)
         trades_obj["override_validation"] = {
             "accepted": len(result["accepted"]),
             "downsized": len(result["downsized"]),
@@ -206,83 +228,116 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
         logger.error("Override validation failed (non-fatal): %s", e)
         result = {"decisions": []}
 
-    # Finding 2 (D3) — deterministic band enforcement: reconcile the model's trades
-    # against the reference gaps. A de-risk shortfall below the required tranche is
-    # synthesized as a `source: "band_enforcement"` trade appended to trades[] (the
-    # executor already reads that list); a re-risk shortfall is only flagged (spec §6
-    # asymmetry). Enforcement decisions are stamped into the override decisions so
-    # OverrideHistory carries `enforced: true` for Phase 5. Non-fatal: an enforcement
-    # error must never lose the report/trades.
-    gaps: list[dict] = []
-    ctx: dict = {}
-    rex_cfg = _load_reference_execution_cfg()
-    try:
-        gaps, ctx = _build_reference_gaps(snapshot)
-        ctx["date"] = date_str
-        ctx["exempt_holds"] = rex_cfg["exempt_holds"]
-        if gaps:
-            recon = reconcile(
-                gaps, trades_obj.get("trades", []), result.get("decisions", []),
-                rex_cfg, ctx,
-            )
-            trades_obj["reference_execution"] = {
-                "sleeves": recon["sleeves"],
-                "summary": recon["summary"],
-                "enforcement_notional_usd": recon["enforcement_notional_usd"],
-            }
-            if recon["enforced_trades"]:
-                merged = list(trades_obj.get("trades", [])) + recon["enforced_trades"]
-                # Keep the executor's sells-before-buys contract across the merge
-                # (stable sort preserves model order within each side).
-                trades_obj["trades"] = sorted(
-                    merged, key=lambda t: str(t.get("side", "")).lower() != "sell"
-                )
-                _stamp_enforced_decisions(result.setdefault("decisions", []), recon)
-            logger.info(
-                "Reference execution: %s, enforced_notional=$%.0f",
-                recon["summary"], recon["enforcement_notional_usd"],
-            )
-        else:
-            logger.info("Reference execution: no gaps computable (reference/account absent)")
-    except Exception as e:  # noqa: BLE001
-        logger.error("Band enforcement failed (non-fatal): %s", e)
+    # --- Session 2026-07-15, Task B1: two-pass validation around reconcile -------
+    # Before this, reconcile ran on the model's RAW trades BEFORE Tier-1 validation,
+    # so a buy Tier-1 would go on to reject (e.g. a gate-closed amplifier buy) was
+    # still counted as already-spent cash while reconcile sized its own enforcement
+    # buys — 07-14: a rejected $1,927 VXUS buy starved a KMLM enforcement buy down
+    # to 57 of a true ~126 shares. Pass 1 validates the model's raw trades and drops
+    # what Tier-1 would reject BEFORE reconcile ever sees the list, so its cash_avail
+    # reflects reality. Pass 2 re-validates the FULL merged list (pass-1 survivors +
+    # any synthesized enforcement trades) so cumulative checks (V3/V4 oversell, the
+    # SGOV pre-cash tracker, the aggregate amplifier assertion, within-role budgets)
+    # see the final list, not just the enforced trades in isolation.
 
-    # #28 — Tier-1 trade validation, AFTER the reconcile merge so synthesized trades
-    # are stamped too (they must pass by construction; a rejection there is a
-    # reconcile bug). FAIL-CLOSED, deliberately unlike the non-fatal blocks above: a
-    # validator crash still writes the report+trades but sets `validation_error`,
-    # which the auto-executor refuses to submit (manual approval path unaffected).
+    # Pass 1 — Tier-1 over the model's raw trades. FAIL-CLOSED like the old single
+    # pass: a crash here means the validator never ran cleanly, so the file is
+    # quarantined and reconcile/pass-2 are skipped entirely.
+    pass1_rejected: list[dict] = []
+    survivors: list[dict] = []
     try:
-        vctx = dict(ctx) if ctx else {
-            "deployment_gate": (snapshot.get("regime_gate") or {}).get("status"),
-            "exempt_holds": rex_cfg["exempt_holds"],
-            "intl_leader_pick": (snapshot.get("intl_governance") or {}).get("leader_pick"),
-        }
-        tv = validate_trades(
+        tv1 = validate_trades(
             gaps, trades_obj.get("trades", []), result.get("decisions", []),
             rex_cfg, vctx,
         )
-        trades_obj["trades"] = tv["trades"]
-        trades_obj["trade_validation"] = {
-            "summary": tv["summary"], "rejected": tv["rejected"],
-        }
-        bad_enforced = [
-            t for t in tv["rejected"] if t.get("source") == "band_enforcement"
-        ]
-        if bad_enforced:
-            logger.error(
-                "Tier-1 validator rejected %d band_enforcement trade(s) — reconcile "
-                "bug, investigate: %s",
-                len(bad_enforced), [t.get("id") for t in bad_enforced],
-            )
-        if tv["rejected"] or tv["summary"]["clamped"]:
-            report_md += _validation_addendum(
-                tv, gaps, vctx, snapshot.get("paper_account", {}).get("positions")
-            )
-        logger.info("Trade validation: %s", tv["summary"])
+        survivors = tv1["trades"]
+        pass1_rejected = tv1["rejected"]
     except Exception:  # noqa: BLE001
-        logger.exception("Trade validation CRASHED — flagging file (fail-closed)")
+        logger.exception("Pass-1 trade validation CRASHED — flagging file (fail-closed)")
         trades_obj["validation_error"] = True
+
+    if not trades_obj.get("validation_error"):
+        # Finding 2 (D3) — reconcile against the pass-1 SURVIVORS (not the model's
+        # raw list), so a trade Tier-1 already rejected can never be mistaken for
+        # spent cash. Non-fatal: an enforcement error must never lose the report.
+        merged = survivors
+        try:
+            if gaps:
+                recon = reconcile(
+                    gaps, survivors, result.get("decisions", []), rex_cfg, ctx,
+                )
+                trades_obj["reference_execution"] = {
+                    "sleeves": recon["sleeves"],
+                    "summary": recon["summary"],
+                    "enforcement_notional_usd": recon["enforcement_notional_usd"],
+                }
+                # Task D2 (unconditional, no gate): surface non_compliant_flagged
+                # sleeves in the REPORT, not just the JSON.
+                report_md += _flagged_sleeves_addendum(recon["sleeves"])
+                if recon["enforced_trades"]:
+                    # Keep the executor's sells-before-buys contract across the
+                    # merge (stable sort preserves model order within each side).
+                    merged = sorted(
+                        survivors + recon["enforced_trades"],
+                        key=lambda t: str(t.get("side", "")).lower() != "sell",
+                    )
+                    _stamp_enforced_decisions(result.setdefault("decisions", []), recon)
+                logger.info(
+                    "Reference execution: %s, enforced_notional=$%.0f",
+                    recon["summary"], recon["enforcement_notional_usd"],
+                )
+            else:
+                logger.info("Reference execution: no gaps computable (reference/account absent)")
+        except Exception as e:  # noqa: BLE001
+            logger.error("Band enforcement failed (non-fatal): %s", e)
+
+        # Pass 2 — Tier-1 over the FULL merged list. Synthesized trades must pass
+        # by construction; a rejection there is a reconcile bug (bad_enforced
+        # tripwire, unchanged). FAIL-CLOSED like pass 1.
+        try:
+            tv2 = validate_trades(
+                gaps, merged, result.get("decisions", []), rex_cfg, vctx,
+            )
+            trades_obj["trades"] = tv2["trades"]
+            # Combine both passes' rejections, deduped by trade id (no double-
+            # stamping) — pass 1 and pass 2 operate on disjoint candidate sets in
+            # practice, but a shared id is a cheap safety net.
+            seen_ids: set = set()
+            all_rejected: list[dict] = []
+            for r in pass1_rejected + tv2["rejected"]:
+                rid = r.get("id")
+                if rid is not None and rid in seen_ids:
+                    continue
+                if rid is not None:
+                    seen_ids.add(rid)
+                all_rejected.append(r)
+            combined_summary = {
+                "passed": tv2["summary"]["passed"],
+                "clamped": tv2["summary"]["clamped"],
+                "rejected": len(all_rejected),
+            }
+            trades_obj["trade_validation"] = {
+                "summary": combined_summary, "rejected": all_rejected,
+            }
+            bad_enforced = [
+                t for t in tv2["rejected"] if t.get("source") == "band_enforcement"
+            ]
+            if bad_enforced:
+                logger.error(
+                    "Tier-1 validator rejected %d band_enforcement trade(s) — "
+                    "reconcile bug, investigate: %s",
+                    len(bad_enforced), [t.get("id") for t in bad_enforced],
+                )
+            if all_rejected or combined_summary["clamped"]:
+                report_md += _validation_addendum(
+                    {"summary": combined_summary, "trades": tv2["trades"],
+                     "rejected": all_rejected},
+                    gaps, vctx, snapshot.get("paper_account", {}).get("positions"),
+                )
+            logger.info("Trade validation: %s", combined_summary)
+        except Exception:  # noqa: BLE001
+            logger.exception("Pass-2 trade validation CRASHED — flagging file (fail-closed)")
+            trades_obj["validation_error"] = True
 
     write_report(date_str, report_md)
     write_trades(date_str, trades_obj)
@@ -299,6 +354,36 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
 # ---------------------------------------------------------------------------
 # Reference execution (Finding 2 — input assembly for shared/reference_execution.py)
 # ---------------------------------------------------------------------------
+
+def _flagged_sleeves_addendum(recon_sleeves: dict) -> str:
+    """Markdown addendum listing `reconcile()`'s `non_compliant_flagged` sleeves
+    (session 2026-07-15, Task D2) — sleeves that fell short of their required
+    tranche move and that band enforcement could not synthesize (a re-risk
+    shortfall is never auto-traded, spec §6 asymmetry: e.g. a legacy exit slow-
+    walked below tranche pace with no override filed). Unconditional, no gate —
+    empty string when nothing is flagged.
+    """
+    flagged = {
+        sym: e for sym, e in (recon_sleeves or {}).items()
+        if e.get("status") == "non_compliant_flagged"
+    }
+    if not flagged:
+        return ""
+    lines = [
+        "\n\n---\n\n### 🚩 Reference-execution shortfalls (deterministic, post-model)\n",
+        "Sleeve(s) that fell short of the required tranche move toward reference and "
+        "were NOT auto-corrected (re-risk shortfalls are never synthesized — spec §6 "
+        "asymmetry; file an honest override or trade the remainder next session):\n",
+    ]
+    for sym, e in sorted(flagged.items()):
+        reasons = "; ".join(e.get("reasons") or [])
+        lines.append(
+            f"- **{sym}**: gap {e.get('gap_pp')}pp vs reference, required move today "
+            f"{e.get('required_move_today_pp')}pp, model moved {e.get('model_move_pp')}pp"
+            f"{f' — {reasons}' if reasons else ''}"
+        )
+    return "\n".join(lines) + "\n"
+
 
 def _validation_addendum(tv: dict, gaps: list[dict] | None = None,
                          ctx: dict | None = None,
@@ -764,7 +849,11 @@ def _write_override_history(date_str: str, decisions: list[dict], snapshot: dict
                 "sleeve":              (ov.get("sleeve") or "").upper(),  # per-sleeve (V1_1)
                 "enforced":            bool(dec.get("enforced", False)),  # Finding 2 D3 stamp
                 "premise_challenged":  ov.get("premise_challenged", ""),
+                # `direction` is the EFFECTIVE (derived) direction the asymmetry bar
+                # used (Task E1); `declared_direction` is the model's original claim
+                # — both persisted so Phase C can measure the misclassification rate.
                 "direction":           ov.get("direction", ""),
+                "declared_direction":  ov.get("declared_direction", ""),
                 "magnitude_pp":        ov.get("magnitude_pp"),
                 "downsized":           bool(ov.get("_downsized", False)),
                 "evidence":            (" | ".join(str(e) for e in evidence))[:32000],
