@@ -248,6 +248,30 @@ def is_amplifier(ticker: str) -> bool:
     return t in AMPLIFIER_US or t in AMPLIFIER_INTL
 
 
+def quadrant_allocation_bucket(ticker: str) -> str:
+    """The Table-A bucket a HELD name's dollars land in (session 2026-07-17, Task D)
+    — shared by the collector's pre-trade `quadrant_allocation` block and the
+    analyzer's post-trade addendum, so the two can never disagree about which
+    bucket a symbol belongs to (a disagreement would show up as a phantom gap that
+    is really just inconsistent tagging, not a real reference deviation).
+
+    Precedence: a LEGACY_EXITS name -> ``"legacy_exits"`` (a dedicated row so a
+    wind-down position is never folded into a quadrant it no longer represents);
+    off the CORE_ROSTER entirely -> ``"off_roster"`` (a flex leftover like MU);
+    else the static `primary_quadrant()` bucket (Q1-Q4 / ``"intl"`` /
+    ``"cash_sleeve"``), or ``"unmapped"`` when that returns ``"unclassified"`` (a
+    non-selected pool member of a scorecard role, e.g. SOXX while SMH is
+    selected — visible, never silently dropped).
+    """
+    t = (ticker or "").upper()
+    if t in LEGACY_EXITS:
+        return "legacy_exits"
+    if t not in CORE_ROSTER:
+        return "off_roster"
+    pq = primary_quadrant(t)
+    return pq if pq in ("Q1", "Q2", "Q3", "Q4", "intl", "cash_sleeve") else "unmapped"
+
+
 def selected_core_members() -> tuple[str, ...]:
     """The `selected` incumbent of every role — the only names the reference
     can target. Used by the collector to guarantee they are always priced."""

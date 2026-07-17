@@ -31,6 +31,7 @@ from shared.quadrants import (
     QUADRANT_CONCENTRATE,
     active_quadrant,
     benchmark_etf_for,
+    quadrant_allocation_bucket,
 )
 from shared.reference_execution import REFERENCE_EXECUTION_DEFAULTS, reconcile
 from shared.trade_validation import validate_trades
@@ -334,6 +335,17 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
                      "rejected": all_rejected},
                     gaps, vctx, snapshot.get("paper_account", {}).get("positions"),
                 )
+            # Task D (session 2026-07-17) — deterministic post-trade quadrant view
+            # (Table A "Recommended"), applying the FINAL validated trades[] to the
+            # collector's pre-trade quadrant_allocation. Unconditional (always shown,
+            # not gated on rejections/clamps) — Recommended is reported every run.
+            try:
+                report_md += _quadrant_allocation_addendum(
+                    snapshot.get("quadrant_allocation") or {}, tv2["trades"], gaps,
+                    float(vctx.get("equity_usd") or 0),
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.error("Quadrant allocation addendum failed (non-fatal): %s", e)
             logger.info("Trade validation: %s", combined_summary)
         except Exception:  # noqa: BLE001
             logger.exception("Pass-2 trade validation CRASHED — flagging file (fail-closed)")
@@ -381,6 +393,96 @@ def _flagged_sleeves_addendum(recon_sleeves: dict) -> str:
             f"- **{sym}**: gap {e.get('gap_pp')}pp vs reference, required move today "
             f"{e.get('required_move_today_pp')}pp, model moved {e.get('model_move_pp')}pp"
             f"{f' — {reasons}' if reasons else ''}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+_QUADRANT_ALLOCATION_ORDER = (
+    "Q1", "Q2", "Q3", "Q4", "intl", "legacy_exits", "off_roster", "cash_sleeve", "unmapped",
+)
+
+
+def _quadrant_allocation_addendum(
+    quadrant_allocation: dict, trades: list[dict], gaps: list[dict], equity: float,
+) -> str:
+    """Markdown addendum: the deterministic POST-TRADE quadrant view — Table A's
+    "Recommended" column (session 2026-07-17, Task D). The collector's
+    `quadrant_allocation` block only covers the PRE-trade "Current" column (trades
+    don't exist at collect time); this applies the FINAL validated `trades[]`
+    (post pass-2 — clamped quantities, synthesized band-enforcement trades
+    included, rejected trades excluded) to it, using the SAME
+    `quadrant_allocation_bucket` the collector used, so pre- and post-trade
+    figures are never tagged inconsistently. Kills the freehand post-trade
+    quadrant arithmetic (07-17: Q2 "7.54% post-trade" quoted with zero Q2 trades
+    that session).
+
+    Conservation: every applied trade's notional is funded from (buy) or returned
+    to (sell) cash, so each bucket adjustment is mirrored by the exact opposite
+    adjustment to `cash_sleeve` — the post-trade bucket sum therefore always
+    equals the pre-trade sum (value moves between buckets, it is never created or
+    destroyed). A skipped (unpriced) trade touches neither side, preserving this
+    invariant for the applied subset. A SGOV trade's own bucket IS `cash_sleeve`,
+    so its two adjustments land on the same key and net to zero, correctly — a
+    literal-cash/SGOV swap never changes the cash sleeve's total.
+
+    Empty string when the block is unavailable or equity is unknown (nothing to
+    apply trades to) — the prompt then falls back to stating Recommended =
+    Current verbatim.
+    """
+    if not (quadrant_allocation or {}).get("available") or equity <= 0:
+        return ""
+
+    price_by_symbol: dict[str, float] = {}
+    for g in gaps or []:
+        sym = str(g.get("symbol") or "").upper()
+        try:
+            px = float(g.get("price") or 0)
+        except (TypeError, ValueError):
+            px = 0.0
+        if sym and px > 0:
+            price_by_symbol[sym] = px
+
+    post = dict(quadrant_allocation.get("buckets") or {})
+    unpriced: set[str] = set()
+    for t in trades or []:
+        sym = str(t.get("symbol") or "").upper()
+        side = str(t.get("side") or "").lower()
+        try:
+            qty = float(t.get("quantity") or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        if not sym or side not in ("buy", "sell") or qty <= 0:
+            continue
+        px = price_by_symbol.get(sym)
+        if not px:
+            unpriced.add(sym)
+            continue
+        bucket = quadrant_allocation_bucket(sym)
+        delta_pp = qty * px / equity * 100.0
+        post[bucket] = post.get(bucket, 0.0) + (delta_pp if side == "buy" else -delta_pp)
+        # Conservation: a trade moves value BETWEEN buckets, it never creates or
+        # destroys it — the buy/sell notional is funded from/returned to cash, so
+        # cash_sleeve gets the exact opposite adjustment (sell: cash up; buy: cash
+        # down). An SGOV trade's own bucket IS cash_sleeve, so its two adjustments
+        # land on the same key and self-cancel — correctly: swapping SGOV for
+        # literal cash never changes the cash sleeve's total.
+        post["cash_sleeve"] = post.get("cash_sleeve", 0.0) + (delta_pp if side == "sell" else -delta_pp)
+
+    lines = [
+        "\n\n---\n\n### Post-trade quadrant allocation (deterministic — Table A \"Recommended\")\n",
+        "Quote these figures verbatim as Table A's **Recommended** column — do not "
+        "recompute or re-sum them by hand:\n",
+        "| Bucket | Post-trade % of equity |",
+        "|---|---|",
+    ]
+    for b in _QUADRANT_ALLOCATION_ORDER:
+        if b in post:
+            lines.append(f"| {b} | {round(post[b], 2)} |")
+    if unpriced:
+        lines.append(
+            f"\n_Note: {', '.join(sorted(unpriced))} had no price available in this "
+            "run and could not be applied to this view — treat those trades' effect "
+            "on their bucket qualitatively._"
         )
     return "\n".join(lines) + "\n"
 
@@ -458,7 +560,11 @@ def _post_validation_cash(trades: list[dict], gaps: list[dict], ctx: dict,
         except (TypeError, ValueError):
             continue
         if sym and px > 0:
-            price[sym] = px   # gap-row price wins over the position-price fallback
+            # For a held name this now equals the position price already set above
+            # (Task A, 2026-07-17 — `_price` prefers paper for held names); this
+            # loop still matters as the ONLY price source for unheld reference
+            # targets, which never appear in `positions`.
+            price[sym] = px
     for t in trades or []:
         sym = str(t.get("symbol") or t.get("ticker") or "").upper()
         side = str(t.get("side") or t.get("action") or "").lower()
@@ -492,6 +598,14 @@ def _build_reference_gaps(snapshot: dict) -> tuple[list[dict], dict]:
     it. `reconcile` (band enforcement) must never synthesize a trade for one of these
     — flex exits are the flex engine's + human approval's job — so it filters
     `off_roster` rows out of its own working set.
+
+    Each row's `price` (Task A, 2026-07-17) is basis-coherent with `current_pct`: for
+    a held name it is the paper-account position's `current_price` (the same price
+    `current_pct` was computed from), falling back to the FMP EOD close only for an
+    unheld reference target (no position price exists). Before this fix FMP could win
+    outright for a held name, so an FMP-vs-paper divergence corrupted V3's landing-
+    percentage math and could phantom-clamp a legitimate full exit (2026-07-16 MU
+    incident) — see `tests/test_price_basis_coherence.py`.
     """
     ref = snapshot.get("reference_weights") or {}
     targets = ref.get("target_weights_pct") or {}
@@ -510,15 +624,27 @@ def _build_reference_gaps(snapshot: dict) -> tuple[list[dict], dict]:
     prices = snapshot.get("prices") or {}
 
     def _price(sym: str) -> float | None:
+        # Paper-account position price wins for a HELD name (session 2026-07-17,
+        # Task A) — `current_pct` above is computed from the same paper-account
+        # `market_value`, so this keeps the gap row internally coherent. The FMP
+        # EOD close is the fallback (used verbatim for an unheld reference target,
+        # which has no position price at all). Before this fix FMP won outright:
+        # V3's landing math (`delta_pp = qty * price / equity * 100`) mixed a
+        # paper-priced `current_pct` with an FMP-priced `delta_pp`, so any
+        # FMP-vs-paper divergence over ~3% on a held name phantom-clamped a
+        # legitimate full exit to a 1-share stub (2026-07-16 MU incident).
+        pos = positions.get(sym)
         row = prices.get(sym)
-        c = row.get("c") if isinstance(row, dict) else None
-        if c is None:
-            c = (positions.get(sym) or {}).get("current_price")
-        try:
-            px = float(c)
-            return px if px > 0 else None
-        except (TypeError, ValueError):
-            return None
+        fmp_c = row.get("c") if isinstance(row, dict) else None
+        candidates = [pos.get("current_price"), fmp_c] if pos else [fmp_c]
+        for c in candidates:
+            try:
+                px = float(c)
+                if px > 0:
+                    return px
+            except (TypeError, ValueError):
+                continue
+        return None
 
     gaps = []
     targets_up = {str(t).upper() for t in targets}

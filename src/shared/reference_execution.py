@@ -139,6 +139,42 @@ def allowed_residuals(override_decisions: list[dict], max_magnitude_pp: float) -
     return residual
 
 
+def effective_execution_config(cfg: dict) -> dict:
+    """The execution-config numbers exactly as `reconcile()` resolves them, in one
+    place (session 2026-07-17, Task B — #33(i) graduation). Four consecutive report
+    sessions guessed these values from the prose (e.g. "tranche_pp_max = assumed
+    5pp" against a true 10.0, "gap_band_pp = 1.0pp assumed" against a true 5.0) —
+    the 07-17 band guess alone filed three unnecessary in-band overrides (GLD/XLP/
+    TLT, all inside the real 5pp band). The collector echoes this dict verbatim
+    into the snapshot's `execution_config` block so the prompt never has to guess;
+    `reconcile` and `validate_trades` keep resolving their own copies from `cfg`
+    (unchanged) — this is a read-only mirror, never a new input to enforcement.
+
+    Accepts the same ``cfg`` shape ``reconcile``/``validate_trades`` do (top-level
+    ``override_protocol`` / ``reference_execution`` / ``sleeve_floor_pct_of_core``
+    blocks — i.e. `risk-limits.json` itself, or the analyzer's
+    `_load_reference_execution_cfg()` output).
+    """
+    ov_cfg = (cfg or {}).get("override_protocol") or {}
+    rex_cfg = {**REFERENCE_EXECUTION_DEFAULTS, **((cfg or {}).get("reference_execution") or {})}
+    return {
+        "gap_band_pp": float(ov_cfg.get("gap_band_pp", 5.0)),
+        "max_magnitude_pp": float(ov_cfg.get("max_magnitude_pp", 15.0)),
+        # Structural gate (shared/overrides.py): BOTH directions require >=1 clean
+        # evidence item or the record is rejected outright; re-risk additionally
+        # needs >= re_risk_min_evidence or it is downsized. de_risk_min_evidence is
+        # not itself a config key — it is the fixed structural floor, surfaced here
+        # so the prompt can quote both bars without guessing either.
+        "de_risk_min_evidence": 1,
+        "re_risk_min_evidence": int(ov_cfg.get("re_risk_min_evidence", 2)),
+        "tranche_pp_max": float(rex_cfg["tranche_pp_max"]),
+        "enforce": bool(rex_cfg["enforce"]),
+        "enforcement_turnover_max_pct": float(rex_cfg["enforcement_turnover_max_pct"]),
+        "min_notional_usd": float(rex_cfg["min_notional_usd"]),
+        "sleeve_floor_pct_of_core": float((cfg or {}).get("sleeve_floor_pct_of_core", 0.1)),
+    }
+
+
 def _flag(entry: dict, reason: str) -> None:
     entry["status"] = "non_compliant_flagged"
     entry["reasons"].append(reason)

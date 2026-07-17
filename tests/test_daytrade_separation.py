@@ -61,8 +61,8 @@ def test_catalyst_reconcile_ignores_lab_positions():
     """A broker position the catalyst ledger doesn't know (e.g. a FLEXD- lab
     position) is never touched by the catalyst reconcile."""
     lab_positions = [{"symbol": "ABCD", "qty": "300"}, {"symbol": "MU", "qty": "2"}]
-    new_ledger, exits, repairs = reconcile_ledger({}, lab_positions, [])
-    assert new_ledger == {} and exits == [] and repairs == []
+    new_ledger, exits, repairs, orphans = reconcile_ledger({}, lab_positions, [])
+    assert new_ledger == {} and exits == [] and repairs == [] and orphans == []
 
 
 # ── joint sleeve cap ─────────────────────────────────────────────────────────

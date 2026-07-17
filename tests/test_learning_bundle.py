@@ -6,7 +6,12 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from learning.bundle import _fit_reports_to_budget, _split_followups_open  # noqa: E402
+import learning.bundle as bundle  # noqa: E402
+from learning.bundle import (  # noqa: E402
+    _fit_reports_to_budget,
+    _split_followups_open,
+    fetch_override_history,
+)
 
 
 # --- _fit_reports_to_budget: oldest-first drop order ----------------------------------
@@ -72,3 +77,53 @@ def test_split_followups_missing_headings_falls_back_to_full_text():
 def test_split_followups_done_before_open_falls_back():
     text = "## Done\nold\n## Open\nnew\n"  # Done appears first -- malformed, fail open
     assert _split_followups_open(text) == text
+
+
+# --- fetch_override_history: _direction_suspect annotation (Task G-b) ----------------
+
+def test_pre_e1_accepted_row_flagged_suspect(monkeypatch):
+    """A pre-Task-E1 accepted override never had `declared_direction` at all —
+    the field didn't exist in the code until 2026-07-15."""
+    monkeypatch.setattr(bundle, "query_entities", lambda table: [
+        {"layer": "override", "outcome": "accepted", "sleeve": "GLD", "direction": "re_risk"},
+    ])
+    rows = fetch_override_history()
+    assert rows[0]["_direction_suspect"] is True
+
+
+def test_post_e1_accepted_row_with_declared_direction_not_suspect(monkeypatch):
+    monkeypatch.setattr(bundle, "query_entities", lambda table: [
+        {"layer": "override", "outcome": "accepted", "sleeve": "GLD",
+         "direction": "de_risk", "declared_direction": "de_risk"},
+    ])
+    rows = fetch_override_history()
+    assert rows[0]["_direction_suspect"] is False
+
+
+def test_post_e1_disagreement_still_not_suspect(monkeypatch):
+    """A post-E1 row where the model's declared direction disagreed with the
+    derived one is NOT suspect — E1 already corrected it and flagged the
+    disagreement; both fields are populated, so it's trustworthy."""
+    monkeypatch.setattr(bundle, "query_entities", lambda table: [
+        {"layer": "override", "outcome": "downsized", "sleeve": "XLP",
+         "direction": "de_risk", "declared_direction": "re_risk"},
+    ])
+    rows = fetch_override_history()
+    assert rows[0]["_direction_suspect"] is False
+
+
+def test_rejected_row_never_flagged(monkeypatch):
+    monkeypatch.setattr(bundle, "query_entities", lambda table: [
+        {"layer": "override", "outcome": "rejected", "sleeve": "TLT"},
+    ])
+    rows = fetch_override_history()
+    assert "_direction_suspect" not in rows[0]
+
+
+def test_non_override_layer_rows_untouched(monkeypatch):
+    monkeypatch.setattr(bundle, "query_entities", lambda table: [
+        {"layer": "sleeve_switch", "outcome": "accepted", "sleeve": "SEMIS"},
+        {"layer": "regime_suspect", "sleeve": "Q3"},
+    ])
+    rows = fetch_override_history()
+    assert all("_direction_suspect" not in r for r in rows)

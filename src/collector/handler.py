@@ -38,10 +38,12 @@ from shared.quadrants import (
     is_amplifier,
     primary_quadrant,
     intl_config,
+    quadrant_allocation_bucket,
     roles_config,
     selected_core_members,
     selection_config,
 )
+from shared.reference_execution import effective_execution_config
 
 logger = logging.getLogger(__name__)
 
@@ -1556,6 +1558,25 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Reference weights build failed (non-fatal)")
 
+    # --- Session 2026-07-17, Task D: quadrant_allocation (Table A "Current" column) --
+    # Non-fatal. Deterministic CURRENT-side counterpart to reference_weights.by_quadrant
+    # — kills the freehand quadrant-sum arithmetic that produced two contradictory
+    # Table A's in the 07-17 report (Q1 0.77% vs a corrected 1.46%; Q2 5.37% vs 3.72%)
+    # and a leaked "wait — let me recompute carefully" mid-table.
+    quadrant_allocation: dict = {"available": False}
+    try:
+        quadrant_allocation = _build_quadrant_allocation(
+            paper_account.get("positions") or [],
+            float(paper_account.get("equity") or 0),
+            float(paper_account.get("cash") or 0),
+        )
+        logger.info(
+            "Quadrant allocation: buckets=%s total=%s%%",
+            quadrant_allocation.get("buckets"), quadrant_allocation.get("total_pct"),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Quadrant allocation build failed (non-fatal)")
+
     # --- Sleeve selection scorecard (Task E) — describe-only role-member ranking. -
     # Proposes (never disposes) core member switches; a human commits `selected`.
     sleeve_selection: dict = {"available": False}
@@ -1576,6 +1597,20 @@ def run() -> None:
         )
     except Exception:  # noqa: BLE001
         logger.exception("Sleeve selection build failed (non-fatal)")
+
+    # --- Session 2026-07-17, Task C: role_selection (static vs runtime doctrine) --
+    # Non-fatal, independent of the sleeve_selection try above (a fresh roles_config()
+    # read so this never depends on that block's success). `sleeve_selection` only
+    # covers "scorecard" roles — the intl_leader role (selection: "rotation") never
+    # appears there, so the model has nothing to check before conflating a runtime
+    # leader_pick=null with an actual deselection (2026-07-17 AIA incident).
+    role_selection: dict = {"roles": []}
+    try:
+        role_selection = _build_role_selection(
+            roles_config(), (intl_governance or {}).get("leader_pick")
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Role selection build failed (non-fatal)")
 
     # --- Phase C: record APPLIED role switches + intl leader rotations to ----------
     # OverrideHistory (Task G) — graded later vs the incumbent counterfactual. Non-fatal.
@@ -1731,6 +1766,36 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Execution review build failed (non-fatal)")
 
+    # --- Session 2026-07-17, Task E: series_deltas (prior-vs-current macro compare) --
+    # Non-fatal. Hardens F1 catalyst adjudication — the model's own memory of a
+    # prior report's cited value is unreliable (07-17 named the wrong prior report
+    # and the wrong prior value for the same CPI print); this makes the comparison
+    # data, read back from the prior day's snapshot, not recollection.
+    series_deltas: dict = {"available": False}
+    try:
+        series_deltas = _build_series_deltas(macro_data, today)
+        if series_deltas.get("available"):
+            new_prints = [sid for sid, s in series_deltas.get("series", {}).items()
+                          if s.get("new_print")]
+            logger.info(
+                "Series deltas: prior_date=%s new_prints=%s",
+                series_deltas.get("prior_date"), new_prints or "none",
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Series deltas build failed (non-fatal)")
+
+    # --- Session 2026-07-17, Task B: execution_config (config-guessing kill) -----
+    # Non-fatal, pure echo of `shared.reference_execution.effective_execution_config`
+    # — the SAME resolution `reconcile`/`validate_trades` apply, so the prompt can
+    # quote real tranche/band/floor/min-notional/evidence-bar numbers instead of
+    # guessing them (four consecutive sessions guessed wrong; the 07-17 band guess
+    # alone filed three unnecessary in-band overrides). See #33(i).
+    execution_config: dict = {}
+    try:
+        execution_config = effective_execution_config(_load_risk_limits())
+    except Exception:  # noqa: BLE001
+        logger.exception("Execution config build failed (non-fatal)")
+
     # --- Assemble snapshot ---------------------------------------------------
     snapshot = {
         "date": today,
@@ -1766,8 +1831,10 @@ def run() -> None:
         "policy_axis": policy_axis,
         "regime_gate": regime_gate,
         "reference_weights": reference_weights,
+        "quadrant_allocation": quadrant_allocation,
         "intl_governance": intl_governance,
         "sleeve_selection": sleeve_selection,
+        "role_selection": role_selection,
         "transition_watch": transition_watch,
         "divergences": divergences,
         "flex_state": flex_state,
@@ -1776,6 +1843,8 @@ def run() -> None:
         "track_record": track_record,
         "override_record": override_record,
         "execution_review": execution_review,
+        "execution_config": execution_config,
+        "series_deltas": series_deltas,
         "news": {
             "market": market_news[:50],
             "forex": forex_news[:20],
@@ -2051,6 +2120,96 @@ def _build_execution_review(secrets: dict, today: str) -> dict:
         return {"available": False, "reason": str(e)}
 
 
+# The freshness-set macro series the analyzer actually cites in cadence/new-print
+# adjudication (mirrors `analyzer.handler._MACRO_SERIES_KEPT` minus the pure rate
+# series the analyzer already compares via `policy_axis`/`bond_signals`, and adding
+# the HY OAS credit series `divergences.credit_complacency` cites).
+_SERIES_DELTAS_TRACKED = (
+    "GDPNOW", "CPILFESL", "PCEPILFE", "CPIAUCSL", "PCEPI",
+    "DFF", "DGS2", "DFII10",
+    "DCOILWTICO", "DCOILBRENTEU", "DTWEXBGS",
+    "T5YIE", "T5YIFR", "T10YIE",
+    "BAMLH0A0HYM2",
+)
+
+
+def _obs_value(row: dict | None) -> float | None:
+    """A FRED observation's numeric value, or None for missing/non-numeric (FRED
+    marks a missing print with the literal string ".")."""
+    if not row:
+        return None
+    v = row.get("value")
+    if v in (None, ".", ""):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_series_deltas(macro_data: dict, today: str) -> dict:
+    """Deterministic prior-vs-current comparison for the freshness-set macro series
+    (session 2026-07-17, Task E — hardens the F1 catalyst-adjudication mechanism).
+
+    07-17's adjudication section fired (the mechanism works) but attributed the CPI
+    flag to the wrong prior report and compared against the wrong prior value
+    ("prior report showed 2.96%" — that was 07-14; the actual prior report showed
+    2.81%) — the model's memory of prior-report values is unreliable, so this makes
+    the comparison DATA instead of recollection. Same non-fatal "read back the prior
+    trading day's snapshot" pattern as `_build_execution_review` (looks back up to 7
+    days so a weekend/holiday gap doesn't stall it).
+
+    Per tracked series: ``{value, as_of, prior_value, prior_as_of, delta, new_print}``
+    — ``new_print`` is true whenever the value OR the as_of date changed vs. the
+    prior snapshot (an unchanged value with a bumped as_of is still a new print — the
+    prompt must never call that "no new print"). A series present today but absent
+    from the prior snapshot gets ``prior_value``/``prior_as_of``/``delta`` all
+    ``None`` and ``new_print`` left ``False`` (nothing to compare against yet, not a
+    false new-print claim). Non-fatal: no prior snapshot within 7 days, or any
+    failure, returns ``{"available": False, "reason": ...}`` — never fatal, never
+    loses the snapshot.
+    """
+    try:
+        d0 = date.fromisoformat(today)
+        prior_macro: dict | None = None
+        prior_date: str | None = None
+        for back in range(1, 8):
+            d = (d0 - timedelta(days=back)).isoformat()
+            snap = read_snapshot(d)
+            if snap:
+                prior_macro = (snap.get("macro") or {}).get("data") or {}
+                prior_date = d
+                break
+        if prior_macro is None:
+            return {"available": False, "reason": "no prior snapshot found in the last 7 days"}
+
+        series: dict[str, dict] = {}
+        for sid in _SERIES_DELTAS_TRACKED:
+            cur_rows = macro_data.get(sid) or []
+            if not cur_rows:
+                continue
+            cur_row = cur_rows[0]
+            prior_rows = prior_macro.get(sid) or []
+            prior_row = prior_rows[0] if prior_rows else None
+
+            cur_val = _obs_value(cur_row)
+            cur_asof = cur_row.get("date")
+            prior_val = _obs_value(prior_row)
+            prior_asof = prior_row.get("date") if prior_row else None
+
+            delta = round(cur_val - prior_val, 4) if (cur_val is not None and prior_val is not None) else None
+            new_print = bool(prior_row) and (cur_val != prior_val or cur_asof != prior_asof)
+            series[sid] = {
+                "value": cur_val, "as_of": cur_asof,
+                "prior_value": prior_val, "prior_as_of": prior_asof,
+                "delta": delta, "new_print": new_print,
+            }
+        return {"available": True, "prior_date": prior_date, "series": series}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Series deltas build failed (non-fatal)")
+        return {"available": False, "reason": str(e)}
+
+
 def _aggregate_by_quadrant(target_weights_pct: dict, literal_cash_pct: float) -> dict:
     """Deterministic per-quadrant aggregation of the reference `target_weights_pct`
     (Task 5). Each ticker lands in exactly one bucket via `primary_quadrant`; SGOV's
@@ -2063,6 +2222,59 @@ def _aggregate_by_quadrant(target_weights_pct: dict, literal_cash_pct: float) ->
         buckets[q] = buckets.get(q, 0.0) + float(w or 0.0)
     buckets["cash_sleeve"] += float(literal_cash_pct or 0.0)
     return {k: round(v, 2) for k, v in buckets.items()}
+
+
+def _build_quadrant_allocation(positions: list[dict], equity: float, cash_usd: float) -> dict:
+    """Deterministic Table-A "Current % of equity" view (session 2026-07-17, Task D).
+
+    Companion to `_aggregate_by_quadrant` (the Reference column) — uses the SAME
+    static `primary_quadrant()` bucketing, so Current and Reference are always
+    apples-to-apples per bucket: a nonzero gap in a dual-quadrant role's bucket
+    (e.g. VDE/energy, tagged Q2 by `primary_quadrant` regardless of the current
+    regime) reflects a real reference gap, never an artifact of the two columns
+    using different tagging rules for the same name.
+
+    Every held name lands in EXACTLY one bucket: Q1-Q4 (per `primary_quadrant`),
+    `intl` (the two rotation roles), `legacy_exits` (a held LEGACY_EXITS name —
+    a dedicated row so a wind-down position is never silently folded into a
+    quadrant it no longer represents), `off_roster` (held but outside CORE_ROSTER
+    and not a legacy exit — a flex leftover like MU), or `cash_sleeve` (SGOV +
+    literal cash). A name `primary_quadrant` cannot classify despite being in
+    CORE_ROSTER (should not happen by construction) lands in `unmapped` rather
+    than vanishing silently. Buckets sum to ~100% of equity within rounding.
+    """
+    buckets = {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "intl": 0.0,
+               "legacy_exits": 0.0, "off_roster": 0.0, "cash_sleeve": 0.0,
+               "unmapped": 0.0}
+    contributions: dict[str, list] = {k: [] for k in buckets}
+    if equity <= 0:
+        return {
+            "available": False, "buckets": buckets, "contributions": contributions,
+            "cash_literal_pct": 0.0, "total_pct": 0.0,
+        }
+
+    for pos in positions or []:
+        sym = str(pos.get("ticker") or "").upper()
+        if not sym:
+            continue
+        try:
+            mv = float(pos.get("market_value") or 0)
+        except (TypeError, ValueError):
+            mv = 0.0
+        pct = round(mv / equity * 100.0, 4)
+        bucket = quadrant_allocation_bucket(sym)
+        buckets[bucket] = round(buckets[bucket] + pct, 4)
+        contributions[bucket].append({"symbol": sym, "pct_of_equity": pct})
+
+    cash_pct = round(float(cash_usd or 0) / equity * 100.0, 4)
+    buckets["cash_sleeve"] = round(buckets["cash_sleeve"] + cash_pct, 4)
+    return {
+        "available": True,
+        "buckets": buckets,
+        "contributions": contributions,
+        "cash_literal_pct": cash_pct,
+        "total_pct": round(sum(buckets.values()), 4),
+    }
 
 
 def _build_regional_rotation(fmp: FMPClient, macro_data: dict) -> dict:
@@ -3591,6 +3803,50 @@ def _build_sleeve_selection(roles: list[dict], metrics_by_ticker: dict,
         },
         new_state,
     )
+
+
+def _build_role_selection(roles: list[dict], intl_leader_pick: str | None) -> dict:
+    """Static `selected` incumbent per role, EVERY role (session 2026-07-17, Task C)
+    — `sleeve_selection` (Task E, above) only ranks "scorecard" roles' candidate
+    pools, so a "rotation" role like `intl_leader` never appears there at all. That
+    left the model nothing to check before conflating `intl_governance`'s RUNTIME
+    `leader_pick` going null (normal daily de-rotation modulation — the lead faded,
+    not a deselection) with an actual deselection of the role's `selected` member
+    (2026-07-17: the model proposed selling AIA's 1-share floor because
+    `leader_pick` went null, which the Tier-1 validator correctly rejected — the
+    static `selected` only changes via a committed `sleeve-roles.json` edit,
+    triggered by a human disposing of a `switch_signal`/`leader_pick` rotation
+    proposal, never automatically).
+
+    Describe-only, like `sleeve_selection` — never trades, never edits `selected`.
+    """
+    out = []
+    for r in roles:
+        entry = {
+            "role_id": r.get("role_id"),
+            "selected": (r.get("selected") or "").upper(),
+            "selection": r.get("selection"),
+        }
+        if r.get("role_id") == "intl_leader":
+            entry["leader_pick"] = intl_leader_pick
+            entry["note"] = (
+                "`selected` changes ONLY via a committed sleeve-roles.json edit "
+                "(a human disposing of a switch_signal/rotation proposal); "
+                "`leader_pick` is runtime rotation modulation (intl_governance) and "
+                "can go null/0 without deselecting `selected` — a null leader_pick "
+                "alone is never grounds to propose selling the selected member's "
+                "floor position."
+            )
+        out.append(entry)
+    return {
+        "roles": out,
+        "_note": (
+            "Describe-only, mirrors sleeve_selection's non-authorization doctrine. "
+            "The static `selected` member of every role keeps its floor regardless "
+            "of runtime modulation (leader_pp=0, leader_pick=null, switch_signal "
+            "true) — only a committed config change deselects it."
+        ),
+    }
 
 
 def _sleeve_selection_metrics(fmp: FMPClient, roles: list[dict]) -> dict:
