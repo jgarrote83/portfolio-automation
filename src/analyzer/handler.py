@@ -416,6 +416,15 @@ def _quadrant_allocation_addendum(
     quadrant arithmetic (07-17: Q2 "7.54% post-trade" quoted with zero Q2 trades
     that session).
 
+    Conservation: every applied trade's notional is funded from (buy) or returned
+    to (sell) cash, so each bucket adjustment is mirrored by the exact opposite
+    adjustment to `cash_sleeve` — the post-trade bucket sum therefore always
+    equals the pre-trade sum (value moves between buckets, it is never created or
+    destroyed). A skipped (unpriced) trade touches neither side, preserving this
+    invariant for the applied subset. A SGOV trade's own bucket IS `cash_sleeve`,
+    so its two adjustments land on the same key and net to zero, correctly — a
+    literal-cash/SGOV swap never changes the cash sleeve's total.
+
     Empty string when the block is unavailable or equity is unknown (nothing to
     apply trades to) — the prompt then falls back to stating Recommended =
     Current verbatim.
@@ -451,6 +460,13 @@ def _quadrant_allocation_addendum(
         bucket = quadrant_allocation_bucket(sym)
         delta_pp = qty * px / equity * 100.0
         post[bucket] = post.get(bucket, 0.0) + (delta_pp if side == "buy" else -delta_pp)
+        # Conservation: a trade moves value BETWEEN buckets, it never creates or
+        # destroys it — the buy/sell notional is funded from/returned to cash, so
+        # cash_sleeve gets the exact opposite adjustment (sell: cash up; buy: cash
+        # down). An SGOV trade's own bucket IS cash_sleeve, so its two adjustments
+        # land on the same key and self-cancel — correctly: swapping SGOV for
+        # literal cash never changes the cash sleeve's total.
+        post["cash_sleeve"] = post.get("cash_sleeve", 0.0) + (delta_pp if side == "sell" else -delta_pp)
 
     lines = [
         "\n\n---\n\n### Post-trade quadrant allocation (deterministic — Table A \"Recommended\")\n",
