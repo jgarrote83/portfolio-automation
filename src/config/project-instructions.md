@@ -971,6 +971,9 @@ A single JSON snapshot for one trading day containing:
 - `flex_candidates` — FMP profiles for a seed watchlist of **non-held** flex
   candidate tickers (evaluation-only, not positions). Their prices are in `prices`.
   This is what lets the Flex engine size a brand-new (non-held) nominated name.
+  Each entry carries a `source` field: `"static"` (came from `flex-candidates.json`)
+  or `"dynamic"` (came from the previous run's `watch_candidates` emission — see
+  below). G2 and the gatekeeper evaluate both identically; `source` is informational.
 - `earnings_calendar` — upcoming earnings dates (next ~14 days), **pre-filtered by the
   collector to the book's universe** (held ∪ every role's `selected` ∪ flex candidates ∪
   held legacy exits) — B2. So a held name's confirmed date is always present when it
@@ -1335,6 +1338,13 @@ Then the numbered sections, in this order:
    The **Recommended** column of Table A = Reference ± the overrides you filed. State one
    line: "today's trades move Current toward Reference" — or, if not, name the specific
    override(s) and confirm they respect the asymmetry.
+
+   **Override-determination hygiene (Task C):** resolve every override determination
+   **before** writing the Recommendations section and the trades JSON. The final report
+   states only the final decision — override filed, or override not filed + a one-line
+   reason. Mid-paragraph reversals ("Actually, on reflection…") must NOT appear in the
+   artifact. If you are still working out whether the evidence clears the bar, do that
+   work in the Section 2 analysis — commit to the answer before you write §9 prose.
 3. **Geopolitical overlay** — the most material 1–3 items from the last ~30 days
    that affect supply chains, energy, defense, or trade.
 4. **Portfolio review** — table of current holdings with weight, day P/L, total P/L,
@@ -1405,6 +1415,26 @@ Then the numbered sections, in this order:
    Include every position you propose to change. Recommended weights should sum
    roughly to 100% across the book.
 9. **Recommendations** — prose summary of the trades proposed in Part 2.
+
+   **Narrative-vs-addendum consistency (Task D):** any claim about post-trade totals
+   (cash sleeve %, quadrant weights, sleeve landing) must **quote the deterministic
+   post-trade addendum figure verbatim**. A per-trade partial statement ("the SGOV
+   sweep leaves the sleeve unchanged") must be **explicitly scoped to that single
+   trade** — never generalised to the sleeve total. When the addendum has not yet
+   run (you are writing §9 prose before Part 2 is parsed), hedge accordingly or omit
+   the total claim.
+
+   **Dynamic watch_candidates (Task A4):** You MAY emit an optional top-level
+   `watch_candidates` array in the trades JSON — up to 6 entries of
+   `{"symbol": "TICKER", "reason": "one line"}` — when you surface a name you **lack
+   snapshot data for** and want to evaluate next run (a fresh congressional cluster,
+   a theme tier-2/3 beneficiary, a sector-rotation idea). Data arrives the NEXT
+   collector run; the name becomes actionable the run after that (2-day latency,
+   accepted). Do NOT waste slots on: names already in `flex_candidates`, held names,
+   any core role-pool member (CORE_ROSTER), non-re-enterable legacy exits
+   (AMZN/GOOGL/DBA/TIP/XSD), or malformed symbols — the collector silently drops
+   them. Persistence is **last-emission-only**: re-emit a name each run to keep it
+   in the funnel; a name you stop emitting falls out after one run.
 
 ### Part 2: Trades JSON (below the marker)
 

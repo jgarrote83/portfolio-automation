@@ -3,10 +3,20 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-07-22 (Flex funnel v2 + 07-22 report-hygiene batch,
-branch `feat/20260722-flex-dynamic-candidates`).** See entry **#45** below for the full
-session summary. #8 v2 (dynamic `watch_candidates`) is now Done. Pending: PR review of
-decision gates A-G1 (persistence model) and B-G1 (gate-zeroed gap row) before merge.
+**▶ START HERE — last session 2026-07-22 post-merge (prompt-completion, branch `fix/20260722-prompt-completion`).**
+PR #28 merged to master (`7be613a`); decision gates A-G1 (last-emission-only persistence)
+and B-G1 (gate-zeroed VXUS gap row) shipped as defaults. This PR lands three deferred
+prompt tasks: A4 (`watch_candidates` emission contract), C (override-paragraph hygiene),
+D (narrative-vs-addendum consistency). See entries **#45** + **#44** below.
+
+**▶ Prior session 2026-07-22 (Flex funnel v2 + 07-22 report-hygiene batch, PR #28, merged `7be613a`).**
+#8 v2 (dynamic `watch_candidates`) + prompt-hygiene findings F1–F5 shipped. See entry **#45**.
+
+**▶ Prior session 2026-07-21 (flex reactivation + deferred findings 4–8, PR #27, merged `fba431b`).**
+Reactivated the Flex engine (G1 borderline tiebreak, D2 non-selected floor zeroing, D3 roster
+separation set), landed deferred 07-13 findings 4–8. Suite 690 green. See entry **#44**.
+
+**▶ Prior session 2026-07-02 (outage diagnosis + streaming hotfix, PR #7;
 merged `abd1538`, deployed, live-verified).** The 2026-07-02 morning run produced NO
 report (`/today` stuck on 07-01). Root cause found and FIXED:
 - **Root cause:** `shared/clients/foundry.py` called Claude **non-streaming** — zero bytes
@@ -1353,6 +1363,11 @@ ticks — is covered by the new F2 orphan sweep + the very next tick's repair).
 - **Task B (F1, B-2):** When `regime_gate.status == "closed"`, `_build_reference_gaps` emits a gate-zeroed gap row for the `intl_broad` selected name (VXUS) at `reference_pct: 0.0, gate_zeroed: True` if absent from the normal universe — inert to reconcile (gap=0, held_qty=0). Confirmed by test. C0 doctrine caveat added to prompt (B-1). Decision gate **B-G1** (default = ship B-2) flagged in PR.
 - **Tasks C-F (prompt-only, F2-F5):** C — override determination resolved before Recommendations section, no mid-paragraph reversals; D — post-trade totals must quote deterministic addendum; E — legacy re-entry wording fixed ("core re-entry prohibited; INTC/MCK/PPA/EUAD flex-nominatable while flat"); F — when `execution_review.date` is not prior trading session, say so explicitly.
 - **Suite:** 651 + 31 new = 682 green, ruff clean. Empirical probes passed (A sanitization + B-2 gate-zeroed row).
+- **Post-merge completion (2026-07-22, `fix/20260722-prompt-completion`):** PR #28 merged
+  (`7be613a`); deferred prompt tasks landed here: A4 (`watch_candidates` emission contract
+  added to `project-instructions.md` — without it the dynamic funnel is dead code); C
+  (override-determination hygiene rule); D (narrative-vs-addendum consistency rule). START
+  HERE region repaired (splice artifact removed, 07-21 prior-session block restored).
 ### 44. 2026-07-21 audit: flex reactivation + deferred findings 4–8 — ✅ DONE, branch `fix/20260721-flex-reactivation-audit`
 Two post-PR-#24 reports (2026-07-20/21) validated the merged fixes and surfaced a new
 set. Headline: the Flex engine was structurally offline (G1 hard-blocks every entry
