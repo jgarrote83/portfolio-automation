@@ -22,7 +22,7 @@ from flex.entry import build_flex_entry
 from flex.exit_state import build_flex_exit_state
 from flex.ledger import new_entry, read_ledger, write_ledger
 from flex.reconcile import reconcile_ledger
-from flex.regime import CORE_TICKERS
+from flex.regime import flex_separation_set
 from shared.clients.alpaca import AlpacaClient
 from shared.keyvault import load_secrets
 from shared.quadrants import active_quadrant
@@ -91,17 +91,16 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
         is_open = False
     if not is_open:
         decisions["orders_suppressed"].append({"reason": "market_closed"})
-        _persist(today, decisions, quadrant="", ledger=ledger, executions=executions)
+        _persist(today, decisions, quadrant="", ledger=ledger, executions=executions,
+                 quadrant_basis="market_closed")
         return {"status": "closed", "date": today, "reconcile": decisions["reconcile"]}
 
     # ── STEP 2 — quadrant (deterministic shared input) + nominations ─────────
     snapshot = read_json_blob("daily-snapshots", f"{today}.json") or {}
-    quadrant = active_quadrant(
-        ((snapshot.get("growth_axis") or {}).get("direction")),
-        ((snapshot.get("inflation_axis") or {}).get("direction")),
-    )
+    quadrant, quadrant_basis = _resolve_quadrant(snapshot)
     daytrade_syms = _daytrade_ledger_symbols()
-    nominations = _flex_nominations(read_trades(today), exclude=daytrade_syms)
+    held_syms = frozenset(str(p.get("symbol") or "").upper() for p in positions if p.get("symbol"))
+    nominations = _flex_nominations(read_trades(today), held_symbols=held_syms, exclude=daytrade_syms)
     minutes = _session_minutes(client, today, now_et)
 
     # ── STEP 3 — fetch bars for held ∪ nominated symbols ─────────────────────
@@ -138,7 +137,7 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
         e = build_flex_entry(
             cand, minute_bars.get(sym, []), daily_bars.get(sym, []),
             quadrant, equity, minutes if minutes is not None else -1, cfg,
-            sleeve_room_usd=sleeve_room,
+            sleeve_room_usd=sleeve_room, quadrant_basis=quadrant_basis,
         )
         decisions["entries"].append(e)
         if e["entry_trigger"] == "pass" and not dry_run:
@@ -148,9 +147,10 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
 
     # ── STEP 6/7 — persist ───────────────────────────────────────────────────
     write_ledger(ledger)
-    _persist(today, decisions, quadrant=quadrant, ledger=ledger, executions=executions)
+    _persist(today, decisions, quadrant=quadrant, ledger=ledger, executions=executions,
+             quadrant_basis=quadrant_basis)
     return {
-        "status": "ok", "date": today, "quadrant": quadrant,
+        "status": "ok", "date": today, "quadrant": quadrant, "quadrant_basis": quadrant_basis,
         "held": len(ledger), "entries_evaluated": len(decisions["entries"]),
         "orders_issued": len(decisions["orders_issued"]),
     }
@@ -357,17 +357,41 @@ def _issued(decisions, executions, symbol, kind, order) -> None:
     executions.append({**rec, "submitted_at": _now_utc_iso()})
 
 
-def _flex_nominations(trades_doc, exclude: frozenset[str] = frozenset()) -> list[dict]:
-    """Nominations minus core names and ``exclude`` (the DayTrade Lab's open
-    symbols — three-way separation, DayTrade_Lab spec §1)."""
+def _resolve_quadrant(snapshot: dict) -> tuple[str, str]:
+    """The quadrant in force for flex entries + its basis.
+
+    Prefers the collector's precomputed ``flex_quadrant`` block (which resolves a
+    borderline regime via the 5-day benchmark tiebreak — decision D1). Falls back
+    to the strict ``active_quadrant(axes)`` when the block is absent or malformed,
+    so old snapshots behave exactly as before (fail-closed, backward compatible)."""
+    fq = snapshot.get("flex_quadrant")
+    if isinstance(fq, dict) and fq.get("basis") and fq.get("resolved") is not None:
+        return str(fq.get("resolved") or ""), str(fq.get("basis") or "")
+    q = active_quadrant(
+        ((snapshot.get("growth_axis") or {}).get("direction")),
+        ((snapshot.get("inflation_axis") or {}).get("direction")),
+    )
+    return q, ("active" if q else "unresolved")
+
+
+def _flex_nominations(trades_doc, held_symbols: frozenset[str] = frozenset(),
+                      exclude: frozenset[str] = frozenset()) -> list[dict]:
+    """Nominations minus the flex separation set and ``exclude`` (the DayTrade
+    Lab's open symbols — three-way separation, DayTrade_Lab spec §1).
+
+    The separation set (`flex_separation_set`) is derived from the LIVE role config
+    plus legacy-exit doctrine (decision D3), not a stale fixed roster — so every
+    current pool member is blocked while re-enterable legacy names (INTC/MCK/PPA/
+    EUAD) are nominatable once flat."""
     if not isinstance(trades_doc, dict):
         return []
+    separation = flex_separation_set(frozenset(held_symbols))
     noms = trades_doc.get("flex_nominations") or []
     out = []
     for n in noms:
         if isinstance(n, dict) and n.get("symbol"):
             sym = str(n["symbol"]).upper()
-            if sym not in CORE_TICKERS and sym not in exclude:
+            if sym not in separation and sym not in exclude:
                 out.append({**n, "symbol": sym})
     return out
 
@@ -469,9 +493,9 @@ def _symbols_notional(positions, symbols) -> float:
     return total
 
 
-def _persist(today, decisions, quadrant, ledger, executions) -> None:
+def _persist(today, decisions, quadrant, ledger, executions, quadrant_basis: str = "") -> None:
     flex_state = {
-        "as_of": today, "quadrant": quadrant,
+        "as_of": today, "quadrant": quadrant, "quadrant_basis": quadrant_basis,
         "reconcile": decisions.get("reconcile", {}),
         "exits": decisions.get("exits", []),
         "entries": decisions.get("entries", []),
