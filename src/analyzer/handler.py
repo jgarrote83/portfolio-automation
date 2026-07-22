@@ -672,6 +672,40 @@ def _build_reference_gaps(snapshot: dict) -> tuple[list[dict], dict]:
             "held_qty": held_qty,   # V4 sell-clamp input for the Tier-1 validator
             "off_roster": sym in off_roster_held,
         })
+
+    # Task B-2 (2026-07-22): when the regime gate is CLOSED, emit a gap row for the
+    # intl_broad selected name (VXUS) if it is absent from the universe — the reference
+    # builder zeroes its target under a closed gate (2026-07-15 decision C0) and if the
+    # name is also unheld, it falls out of the universe entirely, leaving the prompt's
+    # Table A intl row blank. The row has reference=0 / current=0 / held_qty=0, so
+    # gap=0 → reconcile synthesizes no enforcement trade (provably inert). The
+    # gate_zeroed flag lets the prompt distinguish "gated to 0 by C0" from "genuinely
+    # not in the book". off_roster=False so reconcile's filter passes it through
+    # (harmless at gap=0) without mis-tagging a core name as a flex leftover.
+    gate_status = (snapshot.get("regime_gate") or {}).get("status")
+    if gate_status == "closed":
+        intl_broad_sym: str | None = None
+        for r in (snapshot.get("role_selection") or {}).get("roles", []):
+            if r.get("role_id") == "intl_broad":
+                candidate = (r.get("selected") or "").upper()
+                if candidate:
+                    intl_broad_sym = candidate
+                break
+        if intl_broad_sym and intl_broad_sym not in universe:
+            gaps.append({
+                "symbol": intl_broad_sym,
+                "current_pct": 0.0,
+                "reference_pct": 0.0,
+                "price": _price(intl_broad_sym),
+                "held_qty": 0.0,
+                "off_roster": False,
+                "gate_zeroed": True,
+            })
+            logger.debug(
+                "Reference gaps: added gate-zeroed row for %s (closed gate, C0 doctrine)",
+                intl_broad_sym,
+            )
+
     ctx = {
         "deployment_gate": (snapshot.get("regime_gate") or {}).get("status"),
         "equity_usd": equity,
@@ -850,6 +884,46 @@ def _split_response(raw: str, date_str: str) -> tuple[str, dict]:
     if not isinstance(trades_obj, dict) or "trades" not in trades_obj:
         logger.warning("Trades block malformed — defaulting to empty list")
         trades_obj = {"trades": []}
+
+    # A1 (2026-07-22): sanitize optional watch_candidates — drop malformed entries
+    # with a log line, never fatal. The executor and both trade-validator passes
+    # ignore this key entirely (they only read trades[]/validation_error), so a bad
+    # watch list must not cost the day's trades file.
+    raw_wc = trades_obj.get("watch_candidates")
+    if raw_wc is not None:
+        if not isinstance(raw_wc, list):
+            logger.warning(
+                "watch_candidates for %s: removed non-list value (type=%s)",
+                date_str, type(raw_wc).__name__,
+            )
+            trades_obj.pop("watch_candidates", None)
+        else:
+            cleaned: list[dict] = []
+            for item in raw_wc:
+                if not isinstance(item, dict):
+                    logger.warning(
+                        "watch_candidates for %s: dropped non-dict entry %r", date_str, item
+                    )
+                    continue
+                sym = item.get("symbol")
+                if not isinstance(sym, str) or not sym.strip():
+                    logger.warning(
+                        "watch_candidates for %s: dropped entry with missing/invalid symbol %r",
+                        date_str, item,
+                    )
+                    continue
+                reason = item.get("reason")
+                cleaned.append({
+                    "symbol": sym.strip().upper(),
+                    "reason": str(reason) if isinstance(reason, str) else "",
+                })
+            if len(cleaned) > 6:
+                logger.warning(
+                    "watch_candidates for %s: trimmed from %d to 6 entries",
+                    date_str, len(cleaned),
+                )
+                cleaned = cleaned[:6]
+            trades_obj["watch_candidates"] = cleaned
 
     trades_obj.setdefault("generated_at", datetime.now(timezone.utc).isoformat())
     trades_obj.setdefault("date", date_str)

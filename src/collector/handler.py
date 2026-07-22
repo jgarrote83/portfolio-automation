@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from shared.storage import (
     read_json_blob,
     read_perf_series,
     read_snapshot,
+    read_trades,
     upsert_entity,
     write_perf_quadrant_config,
     write_perf_series,
@@ -128,6 +130,11 @@ _FLEX_REVIEW_DEFAULTS = {
 # Cap on non-held flex candidates fetched per run — protects the FMP 250 req/day
 # budget (each candidate costs ~2 calls: profile + EOD price). See FOLLOWUPS #8.
 _FLEX_CANDIDATES_MAX = 20
+# Dynamic watch_candidates: per-emission cap (prompt-enforced) and walk-back window.
+_WATCH_CANDIDATES_EMISSION_CAP = 6
+_DYNAMIC_WALKBACK_DAYS = 7
+# Regex for sanitizing dynamic candidate symbols (uppercase-first, 1–10 chars).
+_WATCH_CANDIDATE_RE = re.compile(r'^[A-Z][A-Z0-9.\-]{0,9}$')
 _ETF_WATCHLIST = ["IDVO", "IDMO", "AIA"]
 # Phase C §5: horizons (calendar days) at which a recommendation's outcome vs SPY
 # is stamped onto its TradeHistory row.
@@ -181,25 +188,106 @@ _SHOCK_KEYWORDS: dict[str, list[str]] = {
 }
 
 
-def _load_flex_candidates(exclude: set[str]) -> list[str]:
-    """Non-held flex candidate tickers from config/flex-candidates.json.
+def _load_flex_candidates(
+    exclude: set[str],
+    today: str,
+) -> tuple[list[str], dict[str, str]]:
+    """Non-held flex candidate tickers: static seed + analyzer-emitted dynamics.
 
-    Deduped against current holdings (``exclude``) and capped so a single config
-    edit can't blow the FMP budget. Missing/malformed file → empty list (the
-    collector must never die over an optional enrichment). See FOLLOWUPS #8.
+    Returns ``(tickers, provenance_map)`` where ``provenance_map`` maps each
+    ticker to ``"static"`` or ``"dynamic"``.
+
+    Static seed: ``config/flex-candidates.json`` (existing behavior); capped at
+    ``_FLEX_CANDIDATES_MAX`` total. Dynamic names: sourced from the MOST RECENT
+    ``daily-trades/{date}.json`` found walking back up to ``_DYNAMIC_WALKBACK_DAYS``
+    calendar days (reuses the ``_build_execution_review`` walk-back pattern).
+
+    Sanitization of dynamic names (each drop logged at INFO):
+    - Uppercased; must match ``^[A-Z][A-Z0-9.\\-]{0,9}$``
+    - Not currently held (in ``exclude``)
+    - Not in ``flex.regime.flex_separation_set(exclude)`` (core roster separation)
+    - Not a ``LEGACY_EXITS`` name that is NOT ``FLEX_REENTERABLE``
+    - Not already present (dedup)
+
+    Static names always take priority; dynamic names fill the remainder up to
+    ``_FLEX_CANDIDATES_MAX`` (cap=20). Persistence is LAST-EMISSION-ONLY — the
+    dynamic list is exactly the newest trades file's emission; re-emit a name to
+    keep it in the funnel (A-G1 default: simplest, no stale ledger). See FOLLOWUPS #8 v2.
     """
+    from flex.regime import FLEX_REENTERABLE, flex_separation_set
+
+    # --- Static seed ---------------------------------------------------------
+    static_names: list[str] = []
     try:
         with open(_FLEX_CANDIDATES_FILE) as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        logger.warning("flex-candidates.json missing or invalid — no candidates this run")
-        return []
-    out: list[str] = []
+        logger.warning("flex-candidates.json missing or invalid — no static candidates this run")
+        data = {}
     for raw in data.get("candidates", []):
         t = (raw or "").upper().strip()
-        if t and t not in exclude and t not in out:
-            out.append(t)
-    return out[:_FLEX_CANDIDATES_MAX]
+        if t and t not in exclude and t not in static_names:
+            static_names.append(t)
+
+    # --- Dynamic names from most recent trades file (walk back up to 7 days) --
+    d0 = date.fromisoformat(today)
+    dynamic_doc: dict | None = None
+    for back in range(1, _DYNAMIC_WALKBACK_DAYS + 1):
+        d_str = (d0 - timedelta(days=back)).isoformat()
+        doc = read_trades(d_str)
+        if isinstance(doc, dict):
+            dynamic_doc = doc
+            break
+
+    separation = flex_separation_set(exclude)
+    dynamic_names: list[str] = []
+    if dynamic_doc is not None:
+        raw_wc = dynamic_doc.get("watch_candidates")
+        if isinstance(raw_wc, list):
+            for item in raw_wc[:_WATCH_CANDIDATES_EMISSION_CAP * 2]:  # budget guard
+                if not isinstance(item, dict):
+                    continue
+                raw_sym = item.get("symbol") or ""
+                if not isinstance(raw_sym, str):
+                    logger.info(
+                        "flex_candidates dynamic: dropped non-string symbol %r", raw_sym
+                    )
+                    continue
+                sym = raw_sym.upper().strip()
+                if not sym:
+                    continue
+                if not _WATCH_CANDIDATE_RE.match(sym):
+                    logger.info(
+                        "flex_candidates dynamic: dropped '%s' — invalid symbol format", sym
+                    )
+                    continue
+                if sym in exclude:
+                    logger.info(
+                        "flex_candidates dynamic: dropped '%s' — currently held", sym
+                    )
+                    continue
+                if sym in separation:
+                    logger.info(
+                        "flex_candidates dynamic: dropped '%s' — core roster separation", sym
+                    )
+                    continue
+                if sym in LEGACY_EXITS and sym not in FLEX_REENTERABLE:
+                    logger.info(
+                        "flex_candidates dynamic: dropped '%s' — non-reenterable legacy exit", sym
+                    )
+                    continue
+                if sym in static_names or sym in dynamic_names:
+                    continue  # deduplicate silently
+                dynamic_names.append(sym)
+
+    # --- Merge: static priority, cap at _FLEX_CANDIDATES_MAX -----------------
+    combined = static_names + dynamic_names
+    combined = combined[:_FLEX_CANDIDATES_MAX]
+    provenance: dict[str, str] = {
+        sym: ("static" if sym in static_names else "dynamic")
+        for sym in combined
+    }
+    return combined, provenance
 
 
 def _load_fomc_stance() -> dict:
@@ -1258,16 +1346,29 @@ def run() -> None:
     tickers = [p["ticker"] for p in positions if p.get("ticker")]
     logger.info("Portfolio tickers (%d): %s", len(tickers), tickers)
 
-    # Non-held flex candidates (static seed) — the analyzer's gatekeeper G2 needs
-    # their fundamentals + price in the snapshot to evaluate a new flex name
-    # beyond WATCH. Deduped against holdings. FOLLOWUPS #8.
-    flex_candidate_tickers = _load_flex_candidates(exclude=set(tickers))
-    logger.info("Flex candidates (%d): %s", len(flex_candidate_tickers), flex_candidate_tickers)
+    # Non-held flex candidates: static seed + analyzer-emitted dynamic watch_candidates
+    # (FOLLOWUPS #8 v2). The dynamic list is the PREVIOUS run's watch_candidates array
+    # (2-day latency: name → data next run → actionable run after). The analyzer's
+    # gatekeeper G2 needs FMP profile + EOD price for each candidate.
+    flex_candidate_tickers, _flex_provenance = _load_flex_candidates(
+        exclude=set(tickers), today=today,
+    )
+    logger.info(
+        "Flex candidates (%d: %d static, %d dynamic): %s",
+        len(flex_candidate_tickers),
+        sum(1 for v in _flex_provenance.values() if v == "static"),
+        sum(1 for v in _flex_provenance.values() if v == "dynamic"),
+        flex_candidate_tickers,
+    )
 
     # --- FMP -----------------------------------------------------------------
     fmp = FMPClient(secrets["FmpApiKey"])
     profiles = fmp.get_profiles(tickers)
     flex_candidate_profiles = fmp.get_profiles(flex_candidate_tickers) if flex_candidate_tickers else []
+    # Tag each profile with its source (A3 provenance — "static" or "dynamic")
+    for p in flex_candidate_profiles:
+        sym = (p.get("symbol") or "").upper()
+        p["source"] = _flex_provenance.get(sym, "static")
 
     from_2w = (date.today() - timedelta(days=1)).isoformat()
     to_2w   = (date.today() + timedelta(days=14)).isoformat()
