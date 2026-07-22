@@ -3,18 +3,10 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-07-21 (flex reactivation + deferred findings 4–8,
-branch `fix/20260721-flex-reactivation-audit`, PR open, NO auto-merge).** Reactivated
-the structurally-offline Flex engine (G1 borderline 5-day tiebreak D1; separation set
-rederived from the live roster D3), zeroed non-selected reference floors (D2), and
-landed the deferred 07-13 audit findings 4–8 (earnings filter, functional_coverage,
-freshness/growth_axis.as_of, excess_attribution, prompt C1–C5). Full detail = **entry
-#44** below. Suite 690 green, ruff clean, empirical probe passed. **D2/D3 are audit
-recommendations — flagged in the PR body for veto before merge.** Next: watch the first
-post-merge daily run confirm `flex_quadrant` resolves Q3 and a seeded Q3/Q4 flex name
-can now reach entry; #8 v2 (dynamic candidate list) remains the only open flex-funnel piece.
-
-**▶ START HERE — last session 2026-07-02 (outage diagnosis + streaming hotfix, PR #7;
+**▶ START HERE — last session 2026-07-22 (Flex funnel v2 + 07-22 report-hygiene batch,
+branch `feat/20260722-flex-dynamic-candidates`).** See entry **#45** below for the full
+session summary. #8 v2 (dynamic `watch_candidates`) is now Done. Pending: PR review of
+decision gates A-G1 (persistence model) and B-G1 (gate-zeroed gap row) before merge.
 merged `abd1538`, deployed, live-verified).** The 2026-07-02 morning run produced NO
 report (`/today` stuck on 07-01). Root cause found and FIXED:
 - **Root cause:** `shared/clients/foundry.py` called Claude **non-streaming** — zero bytes
@@ -467,23 +459,22 @@ results. Sub-steps, shippable independently:
   (priority #1 above) + the v1 caveats in the spec (price-return only, core-layer
   taxonomy deferred).
 
-### 8. Collector: fetch data for flex candidate names — static v1 ✅ DONE 2026-06-15
+### 8. Collector: fetch data for flex candidate names — static v1 ✅ DONE 2026-06-15 / v2 ✅ DONE 2026-07-22 (`feat/20260722-flex-dynamic-candidates`)
 **Static v1 shipped:** `config/flex-candidates.json` (seed: ETN, NEE, XLU, MU) is
 loaded by the collector (`_load_flex_candidates`), deduped vs holdings, capped at
 20, and its tickers get FMP profiles (→ new `flex_candidates` snapshot block) +
 EOD prices (merged into `prices`). Gatekeeper G2 + the inputs list now point at
 `flex_candidates`, so a seeded non-held name can clear G2 and reach BUY. Edit the
 config to pin more names.
-- **v2 (remaining, MEDIUM):** make the candidate list **dynamic** — have the
-  analyzer emit a `watch_candidates` array in the trades JSON and have the
-  collector merge the previous run's list, so the AI self-requests data for names
-  it surfaces (e.g. a fresh congressional cluster) without a manual config edit.
-  2-day latency (name → data next run → actionable run after); acceptable.
-  **Note (2026-07-21, entry #44):** A1/A2 unblocked the STATIC funnel — the G1
-  borderline freeze and the stale separation set are gone, so a seeded Q3/Q4
-  candidate can now clear G1 and reach entry. v2 (dynamic self-nomination) is the
-  only remaining piece and stays open here.
-- Shares the `get_historical_price_light` path with Phase C §5 outcome stamping.
+- **v2 ✅ DONE 2026-07-22 (`feat/20260722-flex-dynamic-candidates`):** The analyzer now
+  emits a `watch_candidates` array in the trades JSON (≤6 entries, `{symbol, reason}`);
+  the collector merges the PREVIOUS run's list with the static seed so the AI self-requests
+  data for names it surfaces. Sanitization rules drop: invalid symbol format, currently held,
+  core-roster separation-set members (new `flex.regime.flex_separation_set(held)`), non-
+  reenterable LEGACY_EXITS; INTC/MCK/PPA/EUAD (FLEX_REENTERABLE) are carved out when flat.
+  Static names have priority; cap stays at 20. Each `flex_candidates` profile gains a
+  `source: "static"|"dynamic"` field. Persistence = last-emission-only (A-G1 default).
+  31 new tests, ruff clean. Probes confirmed. See #45 for full details.
 
 ### 9. Collector: data tier for the deferred gatekeeper gates (LOW — after #8)
 The gatekeeper explicitly defers signals we don't collect: balance-sheet
@@ -1353,6 +1344,15 @@ ticks — is covered by the new F2 orphan sweep + the very next tick's repair).
   position/stale-order state (expected already resolved by the merged executor fix
   at the 07-17 09:35 ET run — confirm via the next `execution_review`).
 
+---
+
+## Done
+### 45. 2026-07-22 session: Flex funnel v2 (dynamic `watch_candidates`) + report-hygiene batch — Done, branch `feat/20260722-flex-dynamic-candidates` (PR pending review)
+#8 v2 (dynamic analyzer-emitted `watch_candidates`) + prompt-hygiene findings F1-F5 shipped in one branch.
+- **Task A (#8 v2):** Analyzer emits `watch_candidates[]` (<=6 entries, `{symbol, reason}`). Collector merges previous run's list (walk-back 7 days) with static seed; sanitization drops invalid symbol format, currently held, core-roster `flex_separation_set(held)` members (new `flex.regime.FLEX_REENTERABLE` + `flex.regime.flex_separation_set`), non-reenterable LEGACY_EXITS; INTC/MCK/PPA/EUAD survive when flat. Static names have priority; cap stays 20. Each `flex_candidates` profile gains `source: "static"|"dynamic"`. Executor `_extract_trades`/`_validation_refusal` provably unaffected (test added). Decision gate **A-G1** (default = last-emission-only persistence) flagged in PR for veto.
+- **Task B (F1, B-2):** When `regime_gate.status == "closed"`, `_build_reference_gaps` emits a gate-zeroed gap row for the `intl_broad` selected name (VXUS) at `reference_pct: 0.0, gate_zeroed: True` if absent from the normal universe — inert to reconcile (gap=0, held_qty=0). Confirmed by test. C0 doctrine caveat added to prompt (B-1). Decision gate **B-G1** (default = ship B-2) flagged in PR.
+- **Tasks C-F (prompt-only, F2-F5):** C — override determination resolved before Recommendations section, no mid-paragraph reversals; D — post-trade totals must quote deterministic addendum; E — legacy re-entry wording fixed ("core re-entry prohibited; INTC/MCK/PPA/EUAD flex-nominatable while flat"); F — when `execution_review.date` is not prior trading session, say so explicitly.
+- **Suite:** 651 + 31 new = 682 green, ruff clean. Empirical probes passed (A sanitization + B-2 gate-zeroed row).
 ### 44. 2026-07-21 audit: flex reactivation + deferred findings 4–8 — ✅ DONE, branch `fix/20260721-flex-reactivation-audit`
 Two post-PR-#24 reports (2026-07-20/21) validated the merged fixes and surfaced a new
 set. Headline: the Flex engine was structurally offline (G1 hard-blocks every entry
@@ -1411,9 +1411,7 @@ nomination filter used a stale pre-roster-revision ticker set, and the reference
   mass, earnings filtered). **No auto-merge — human review before merge; D2/D3 flagged
   in the PR body for veto.**
 
----
 
-## Done
 - **2026-07-13** (PR #24, branch `fix/20260713-audit-price-universe-validator`, merged
   2026-07-13) — **2026-07-13 daily-report audit: price universe, intl-pool floor,
   off-roster validation seam.** The 07-13 report exposed three systemic gaps, all

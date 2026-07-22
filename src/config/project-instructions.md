@@ -61,6 +61,11 @@ anywhere in the report. **You must never assume a prior day's proposed trade
 executed** — check `execution_review` before repeating or building on it:
 - If `execution_review.available` is `false`, say so in one line (no prior-day
   execution data to check) and proceed normally.
+- **When `execution_review.date` is not the prior trading session** (because the prior
+  session proposed no trades and the `no_trades` path deliberately writes no executions
+  file, so the 7-day walkback found an older file), say so explicitly — e.g. *"2026-07-21
+  proposed no trades; reviewing the last executed session, 2026-07-20"* — never present
+  the older date without comment as if it were yesterday's session.
 - If `failed` or `unfilled` is non-empty, surface each entry (`symbol`, `side`,
   `qty`, `status`, `error`) under the Data Integrity Warning heading — this is
   exactly the kind of "quiet failure" that heading exists to catch.
@@ -102,8 +107,7 @@ XSD, PPA, EUAD are **held names being wound down** (the AMZN/GOOGL exempt-hold d
 retired — QQQ retains the mega-cap exposure at index weight). Their reference target is **0**;
 you liquidate them in tranches (see "Execute toward the reference"), and the validator
 **allows a legacy name to be sold to zero** (floor bypassed) but **rejects any buy** of one
-("legacy exit — core re-entry closed (flex only)"). INTC/MCK/PPA/EUAD may be re-entered later
-as *flex* theses, never as core.
+("legacy exit — core re-entry prohibited"). **INTC/MCK/PPA/EUAD have core re-entry prohibited but are flex-nominatable while flat** — they are seeded in the static `flex_candidates` list and may re-enter as flex catalyst theses, subject to regime fit and the gatekeeper like any other flex candidate. AMZN/GOOGL/DBA/TIP/XSD are not re-enterable (neither core nor flex).
 
 **Intl pool unwinds (distinct from legacy exits — never label these `[LEGACY EXIT]`):** a
 held pool member that is not its role's `selected` incumbent (nor, for `intl_leader`, the
@@ -591,6 +595,13 @@ compute the intl tilt yourself — you **echo** the block and execute toward its
   % of equity. **`broad_pp`** goes to the `intl_broad` selected (VXUS); **`leader_pp`**
   goes to **`leader_pick`** (the `intl_leader` slot). `reference_weights` already carries
   these as the intl targets — execute toward them like any sleeve.
+  **C0 doctrine (2026-07-15):** while `regime_gate.status == "closed"`, `reference_weights`
+  zeroes the `intl_broad` base target (self-healing — restores automatically the day the gate
+  opens; a held VXUS position keeps its ≥1-share floor regardless of the zero reference).
+  The gap table renders ONLY deterministic rows present in `reference_weights`/`paper_account`
+  — **do NOT invent an intl Reference row from `intl_governance.broad_pp`**; narrate it instead
+  as *"sized {broad_pp}pp by governance, gated to 0 in the reference while the gate is
+  closed"* so the reader understands a pending build when the gate reopens.
 - The ladder (composite ≤3 → base only; 4–6 → base +1pp leader; ≥7 → base +3pp, up to 2
   leaders) is **already applied** in the block, as are the **DXY anti-chase** (headwind →
   leader 0; neutral → halved) and the **gate modifier** (a CLOSED gate **halves** the
