@@ -41,10 +41,12 @@ from shared.quadrants import (
     primary_quadrant,
     intl_config,
     quadrant_allocation_bucket,
+    role_of,
     roles_config,
     selected_core_members,
     selection_config,
 )
+from flex.regime import resolve_quadrant
 from shared.reference_execution import effective_execution_config
 
 logger = logging.getLogger(__name__)
@@ -66,6 +68,9 @@ _RISK_LIMITS_FILE = _SRC / "config" / "risk-limits.json"
 _CORE_SINGLE_STOCKS: tuple[str, ...] = ()
 # Literal-cash buffer kept inside the cash sleeve (rest of the sleeve is SGOV).
 _CASH_BUFFER_PCT = 1.5
+# Trailing window (trading days) for the flex borderline-quadrant tiebreak (D1,
+# 2026-07-21). A named constant, deliberately NOT an env knob in v1.
+_FLEX_TIEBREAK_WINDOW_D = 5
 
 _DIVERGENCE_CONFIG_FILE = _SRC / "config" / "divergence-config.json"
 _SPY_SMA_WINDOW = 200  # long-trend filter for the price-vs-regime divergence (spec §6)
@@ -554,6 +559,19 @@ def _build_price_universe(tickers: list[str], flex_candidate_tickers: list[str])
     ))
 
 
+def _filter_earnings_to_universe(rows: list[dict], universe) -> list[dict]:
+    """Keep only earnings-calendar rows whose symbol is in the book's universe
+    (held ∪ every role's `selected` ∪ flex candidates ∪ currently-held legacy exits).
+
+    FMP's earnings-calendar endpoint returns the MARKET-WIDE calendar; writing it
+    unfiltered both buries held names' confirmed dates and pads the snapshot with
+    irrelevant names (deferred finding 4, 2026-07-13: the 07-14/15 reports claimed
+    'no held positions report within 14 days' while GOOGL reported 07-22; the 07-21
+    report listed MCD/MPC/REZI/HALO — none held). Row schema preserved."""
+    keep = {str(s).upper() for s in (universe or ())}
+    return [r for r in (rows or []) if str(r.get("symbol") or "").upper() in keep]
+
+
 def _roster_closes(prices: dict | None) -> dict:
     """EOD closes for the fixed core roster (the quadrant-basket members)."""
     out = {}
@@ -581,6 +599,72 @@ def _perf_point(
     if favored is not None:
         point["favored_bucket"] = favored
     return point
+
+
+def _excess_attribution(series: list[dict], window) -> dict | None:
+    """Two-term decomposition of the vs-SPY excess into a cash-sleeve contribution and
+    an invested-book contribution (B5, deferred finding 5).
+
+    Reports habitually blame the SPY lag on "cash drag" with the sign backwards: when
+    SPY is NEGATIVE since inception, flat T-bills ADD excess, so the lag lives entirely
+    in the invested book (2026-07-21). This lands the blame on the right side:
+    ``cash_contribution = avg_cash_weight × (r_cash − r_spy)``; ``invested_contribution
+    = excess − cash_contribution`` (exact residual, so the two always sum to the excess).
+    Approximate by construction (average weights, not a daily attribution) — the sign
+    and rough magnitude are the point. ``window`` is ``"inception"`` or an int of days."""
+    if len(series) < 2:
+        return None
+    last = series[-1]
+    latest = last["date"]
+    if window == "inception":
+        start = series[0]
+        window_label = "inception"
+    else:
+        target = (date.fromisoformat(latest) - timedelta(days=int(window))).isoformat()
+        start = None
+        for p in series:
+            if p["date"] <= target:
+                start = p
+        if start is None:
+            return None
+        window_label = f"{int(window)}d"
+
+    eq0, eqN = start["equity"], last["equity"]
+    spy0, spyN = start["spy_close"], last["spy_close"]
+    if not eq0 or not spy0:
+        return None
+    r_book = (eqN / eq0 - 1.0) * 100.0
+    r_spy = (spyN / spy0 - 1.0) * 100.0
+    excess = r_book - r_spy
+
+    sgov0 = (start.get("closes") or {}).get("SGOV")
+    sgovN = (last.get("closes") or {}).get("SGOV")
+    if sgov0 and sgovN:
+        r_cash = (sgovN / sgov0 - 1.0) * 100.0
+        cash_src = "SGOV price return"
+    else:
+        r_cash = 0.0
+        cash_src = "cash return unavailable → treated as 0"
+
+    window_points = [p for p in series if p["date"] >= start["date"]]
+    cashes = [p.get("cash_pct") for p in window_points if p.get("cash_pct") is not None]
+    avg_cash = sum(cashes) / len(cashes) if cashes else 0.0
+    cash_contribution = (avg_cash / 100.0) * (r_cash - r_spy)
+    invested_contribution = excess - cash_contribution
+    return {
+        "window": window_label,
+        "excess_pp": round(excess, 3),
+        "cash_contribution_pp": round(cash_contribution, 3),
+        "invested_contribution_pp": round(invested_contribution, 3),
+        "avg_cash_pct": round(avg_cash, 2),
+        "avg_invested_pct": round(100.0 - avg_cash, 2),
+        "method": (
+            "two-term decomposition: avg cash weight × (r_cash − r_spy) for the cash "
+            "term, invested = excess − cash term (exact residual). "
+            f"Cash sleeve return = {cash_src}. Approximate — sign and rough magnitude "
+            "are the point, not precision."
+        ),
+    }
 
 
 def _build_performance(series: list[dict]) -> dict:
@@ -637,6 +721,10 @@ def _build_performance(series: list[dict]) -> dict:
         "return_since_inception_pct": round(ret, 3),
         "spy_return_since_inception_pct": round(spy_ret, 3),
         "excess_vs_spy_pp": round(ret - spy_ret, 3),
+        "excess_attribution": {
+            "inception": _excess_attribution(series, "inception"),
+            "30d": _excess_attribution(series, 30),
+        },
         "rolling": rolling,
         "max_drawdown_pct": round(max_dd, 3),
         "note": (
@@ -1375,6 +1463,14 @@ def run() -> None:
     from_30d = (date.today() - timedelta(days=30)).isoformat()
 
     earnings           = fmp.get_earnings_calendar(from_2w, to_2w)
+    # B2 (deferred finding 4): filter the market-wide calendar to the book's universe
+    # so held names' dates surface and irrelevant names don't. No extra FMP calls.
+    _earn_universe = (set(tickers) | set(selected_core_members())
+                      | set(flex_candidate_tickers) | (set(tickers) & set(LEGACY_EXITS)))
+    _earn_pre = len(earnings)
+    earnings           = _filter_earnings_to_universe(earnings, _earn_universe)
+    logger.info("Earnings calendar filtered to book universe: %d → %d rows",
+                _earn_pre, len(earnings))
     stock_news         = fmp.get_stock_news(tickers, limit=30)
     etf_holdings: dict = {etf: fmp.get_etf_holdings(etf) for etf in _ETF_WATCHLIST}
     etf_country: dict  = {etf: fmp.get_etf_country_weights(etf) for etf in _ETF_WATCHLIST}
@@ -1678,14 +1774,32 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Quadrant allocation build failed (non-fatal)")
 
+    # --- B3 (deferred finding 7): functional_coverage (Table B — secondary roles ---
+    # counted; NOT additive to 100%). Echoed verbatim so the model stops mis-summing it.
+    functional_coverage: dict = {"available": False}
+    try:
+        functional_coverage = _build_functional_coverage(
+            paper_account.get("positions") or [],
+            float(paper_account.get("equity") or 0),
+        )
+        logger.info(
+            "Functional coverage: Q totals=%s sgov=%s committed_q4=%s",
+            {q: v.get("total_pct") for q, v in (functional_coverage.get("quadrants") or {}).items()},
+            (functional_coverage.get("sgov_note_inputs") or {}).get("sgov_pct"),
+            (functional_coverage.get("sgov_note_inputs") or {}).get("committed_q4_pct"),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Functional coverage build failed (non-fatal)")
+
     # --- Sleeve selection scorecard (Task E) — describe-only role-member ranking. -
     # Proposes (never disposes) core member switches; a human commits `selected`.
     sleeve_selection: dict = {"available": False}
     _prev_streak: dict = {}
     _new_streak: dict = {}
+    _sleeve_closes_cache: dict[str, dict[str, float]] = {}
     try:
         _roles = roles_config()
-        _metrics = _sleeve_selection_metrics(fmp, _roles)
+        _metrics = _sleeve_selection_metrics(fmp, _roles, cache=_sleeve_closes_cache)
         _prev_streak = _load_sleeve_streak_state()
         sleeve_selection, _new_streak = _build_sleeve_selection(
             _roles, _metrics, _prev_streak, selection_config()
@@ -1712,6 +1826,21 @@ def run() -> None:
         )
     except Exception:  # noqa: BLE001
         logger.exception("Role selection build failed (non-fatal)")
+
+    # --- Flex quadrant (D1, 2026-07-21): borderline 5-day benchmark tiebreak so an
+    # indeterminate active_quadrant never freezes the flex sleeve. Reuses the closes
+    # cache the sleeve scorecard just populated (QQQ/XLI/GLD/TLT are pool members) —
+    # zero extra FMP calls. Non-fatal: on failure the engine falls back to strict axes.
+    flex_quadrant: dict = {}
+    try:
+        flex_quadrant = _build_flex_quadrant(growth_axis, inflation_axis, _sleeve_closes_cache)
+        logger.info(
+            "Flex quadrant: resolved=%s basis=%s bucket=%s",
+            flex_quadrant.get("resolved"), flex_quadrant.get("basis"),
+            flex_quadrant.get("favored_bucket"),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Flex quadrant build failed (non-fatal)")
 
     # --- Phase C: record APPLIED role switches + intl leader rotations to ----------
     # OverrideHistory (Task G) — graded later vs the incumbent counterfactual. Non-fatal.
@@ -1885,6 +2014,18 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Series deltas build failed (non-fatal)")
 
+    # --- B4 (2026-07-21): freshness (deterministic Data-Freshness table) ----------
+    # Non-fatal. The model echoes this verbatim; it must never re-derive a date or
+    # staleness (the GDPNow as-of flip-flop). GDPNow dated by vintage recency.
+    freshness: dict = {"available": False}
+    try:
+        freshness = _build_freshness(macro_data, growth_axis, today)
+        _stale = [sid for sid, s in (freshness.get("series") or {}).items() if s.get("stale")]
+        logger.info("Freshness: %d series tracked, stale=%s",
+                    len(freshness.get("series") or {}), _stale or "none")
+    except Exception:  # noqa: BLE001
+        logger.exception("Freshness build failed (non-fatal)")
+
     # --- Session 2026-07-17, Task B: execution_config (config-guessing kill) -----
     # Non-fatal, pure echo of `shared.reference_execution.effective_execution_config`
     # — the SAME resolution `reconcile`/`validate_trades` apply, so the prompt can
@@ -1933,11 +2074,13 @@ def run() -> None:
         "regime_gate": regime_gate,
         "reference_weights": reference_weights,
         "quadrant_allocation": quadrant_allocation,
+        "functional_coverage": functional_coverage,
         "intl_governance": intl_governance,
         "sleeve_selection": sleeve_selection,
         "role_selection": role_selection,
         "transition_watch": transition_watch,
         "divergences": divergences,
+        "flex_quadrant": flex_quadrant,
         "flex_state": flex_state,
         "performance": performance,
         "quadrant_performance": quadrant_performance,
@@ -1946,6 +2089,7 @@ def run() -> None:
         "execution_review": execution_review,
         "execution_config": execution_config,
         "series_deltas": series_deltas,
+        "freshness": freshness,
         "news": {
             "market": market_news[:50],
             "forex": forex_news[:20],
@@ -2233,6 +2377,50 @@ _SERIES_DELTAS_TRACKED = (
     "BAMLH0A0HYM2",
 )
 
+# B4 (2026-07-21): per-series staleness thresholds + dating convention for the
+# deterministic `freshness` block. Monthly macro (CPI/PCE) is dated by observation
+# month and stays "fresh" ~45d (monthly cadence + release lag); daily series use the
+# 5d threshold; GDPNow uses VINTAGE recency (the realtime asof), not observation age.
+_FRESHNESS_MONTHLY = frozenset({"CPILFESL", "PCEPILFE", "CPIAUCSL", "PCEPI"})
+_FRESHNESS_DAILY_THRESHOLD_D = 5
+_FRESHNESS_MONTHLY_THRESHOLD_D = 45
+_FRESHNESS_GDPNOW_THRESHOLD_D = 7
+
+
+def _build_freshness(macro_data: dict, growth_axis: dict, today: str) -> dict:
+    """Deterministic Data-Freshness table (B4): per tracked series
+    ``{value, as_of, days_stale, stale, convention, threshold_days}``. The model
+    echoes this verbatim and NEVER re-derives a date or staleness — the flip-flopping
+    freshness table (GDPNow "3d" one day, "81d" the next for the SAME value) came from
+    the model picking observation-date vs vintage-date differently each run. GDPNow is
+    dated by vintage recency (``growth_axis.as_of``); everything else by observation
+    date with a cadence-appropriate threshold. Non-fatal in the caller."""
+    out: dict[str, dict] = {}
+    for sid in _SERIES_DELTAS_TRACKED:
+        if sid == "GDPNOW":
+            value = (growth_axis or {}).get("gdpnow_latest")
+            as_of = (growth_axis or {}).get("as_of")
+            convention = "vintage_date"
+            threshold = _FRESHNESS_GDPNOW_THRESHOLD_D
+        else:
+            rows = macro_data.get(sid) or []
+            row = rows[0] if rows else None
+            value = _obs_value(row)
+            as_of = row.get("date") if row else None
+            convention = "observation_date"
+            threshold = (_FRESHNESS_MONTHLY_THRESHOLD_D if sid in _FRESHNESS_MONTHLY
+                         else _FRESHNESS_DAILY_THRESHOLD_D)
+        ds = _days_stale(as_of, today)
+        out[sid] = {
+            "value": value,
+            "as_of": as_of,
+            "days_stale": ds,
+            "stale": bool(ds is not None and ds > threshold),
+            "convention": convention,
+            "threshold_days": threshold,
+        }
+    return {"available": True, "series": out}
+
 
 def _obs_value(row: dict | None) -> float | None:
     """A FRED observation's numeric value, or None for missing/non-numeric (FRED
@@ -2323,6 +2511,78 @@ def _aggregate_by_quadrant(target_weights_pct: dict, literal_cash_pct: float) ->
         buckets[q] = buckets.get(q, 0.0) + float(w or 0.0)
     buckets["cash_sleeve"] += float(literal_cash_pct or 0.0)
     return {k: round(v, 2) for k, v in buckets.items()}
+
+
+def _build_functional_coverage(positions: list[dict], equity: float) -> dict:
+    """Deterministic Table-B "functional coverage" view (B3, deferred finding 7).
+
+    Table B counts each held name in EVERY quadrant its role's ``quadrants`` list
+    covers (a dual-quadrant name like VDE/energy counts in both Q2 and Q3), so it is
+    NOT additive to 100%. It was the last quadrant table left to the model to compute
+    per-prompt, and the arithmetic was broken on both 2026-07-20/21 (07-21 claimed Q3
+    68.72% vs 79.59% summed from its own listed names). Now precomputed and echoed
+    verbatim, exactly like Table A (`_build_quadrant_allocation`).
+
+    Rules: bucket via ``role_of`` + the role's ``quadrants`` list; SGOV (the cash role)
+    counts in Q4 (primary duration proxy) AND Q3 (secondary), per the prompt doctrine;
+    intl-role (``rotation``) holdings go to the ``intl`` row only; a held off-roster /
+    legacy name (no covering role) is excluded with a note, never silently dropped.
+    ``committed_q4_pct`` = holdings in Q4-EXCLUSIVE roles (duration_long/duration_mid/
+    defensive_equity, i.e. quadrants == ['Q4']) so the SGOV intent annotation can quote
+    a deterministic 'truly committed to Q4' figure separate from SGOV's optionality."""
+    if equity <= 0:
+        return {"available": False, "reason": "no equity"}
+    roles_by_id = {r["role_id"]: r for r in roles_config()}
+    quadrants: dict[str, dict] = {
+        q: {"total_pct": 0.0, "names": []} for q in ("Q1", "Q2", "Q3", "Q4", "intl")
+    }
+    excluded: list[dict] = []
+    committed_q4 = 0.0
+    sgov_pct = 0.0
+
+    def _add(bucket: str, sym: str, pct: float) -> None:
+        quadrants[bucket]["total_pct"] = round(quadrants[bucket]["total_pct"] + pct, 4)
+        quadrants[bucket]["names"].append({"ticker": sym, "pct": pct})
+
+    for pos in positions or []:
+        sym = str(pos.get("ticker") or "").upper()
+        if not sym:
+            continue
+        try:
+            mv = float(pos.get("market_value") or 0)
+        except (TypeError, ValueError):
+            mv = 0.0
+        pct = round(mv / equity * 100.0, 4)
+        rid = role_of(sym)
+        if rid is None:
+            excluded.append({"ticker": sym, "pct": pct,
+                             "reason": "off_roster_or_legacy — no role covers this name"})
+            continue
+        quads = roles_by_id.get(rid, {}).get("quadrants")
+        if quads == "rotation":
+            _add("intl", sym, pct)
+        elif quads == "cash":
+            sgov_pct = round(sgov_pct + pct, 4)
+            _add("Q4", sym, pct)   # primary — duration proxy
+            _add("Q3", sym, pct)   # secondary
+        elif isinstance(quads, list):
+            for q in quads:
+                if q in quadrants:
+                    _add(q, sym, pct)
+            if quads == ["Q4"]:
+                committed_q4 = round(committed_q4 + pct, 4)
+        else:
+            excluded.append({"ticker": sym, "pct": pct,
+                             "reason": f"unrecognized role quadrants: {quads}"})
+
+    return {
+        "available": True,
+        "quadrants": {q: {"total_pct": round(v["total_pct"], 2), "names": v["names"]}
+                      for q, v in quadrants.items()},
+        "excluded": excluded,
+        "sgov_note_inputs": {"sgov_pct": round(sgov_pct, 2),
+                             "committed_q4_pct": round(committed_q4, 2)},
+    }
 
 
 def _build_quadrant_allocation(positions: list[dict], equity: float, cash_usd: float) -> dict:
@@ -3180,6 +3440,75 @@ def _gdpnow_vintage_rows(rows: list, obs_date: str) -> list[dict]:
     ]
 
 
+def _r5_from_closes(close_map: dict[str, float]) -> float | None:
+    """Point-to-point % return over the last ``_FLEX_TIEBREAK_WINDOW_D`` trading
+    days from a ``{date: close}`` map (latest close vs the close 5 trading days
+    earlier). ``None`` when there is not enough history."""
+    if not close_map:
+        return None
+    dates = sorted(close_map)
+    if len(dates) < _FLEX_TIEBREAK_WINDOW_D + 1:
+        return None
+    latest = close_map[dates[-1]]
+    prior = close_map[dates[-1 - _FLEX_TIEBREAK_WINDOW_D]]
+    if not prior:
+        return None
+    return round((latest / prior - 1.0) * 100.0, 4)
+
+
+def _build_flex_quadrant(growth_axis: dict, inflation_axis: dict,
+                         closes_cache: dict[str, dict[str, float]] | None) -> dict:
+    """Deterministic resolution of the quadrant the FLEX engine treats as in force
+    (decision D1, 2026-07-21). An indeterminate ``active_quadrant`` must NOT freeze
+    the flex sleeve: when the favored bucket is a 2-quadrant union (e.g. Q3/Q4) it
+    resolves to the member with the better trailing 5-trading-day benchmark return.
+
+    Zero extra FMP calls: the four ``QUADRANT_BENCHMARK_ETF`` names (QQQ/XLI/GLD/TLT)
+    are all scorecard pool members, so their closes are already in ``closes_cache``
+    (the cache ``_sleeve_selection_metrics`` populated). A benchmark missing from the
+    cache → ``resolved: ""``, ``basis: "unresolved"`` (fail-closed). Non-fatal in the
+    caller. See ``flex.regime.resolve_quadrant`` for the resolution rules."""
+    g = (growth_axis or {}).get("direction")
+    i = (inflation_axis or {}).get("direction")
+    bucket = favored_bucket(g, i)
+    cache = closes_cache or {}
+
+    bench_returns_5d: dict[str, dict] = {}
+    bench_r5: dict[str, float] = {}
+    for q in bucket:
+        etf = benchmark_etf_for(q)
+        r5 = _r5_from_closes(cache.get(etf) or cache.get(etf.upper()) or {})
+        bench_returns_5d[q] = {"etf": etf, "r5": r5}
+        if r5 is not None:
+            bench_r5[q] = r5
+
+    resolved, basis = resolve_quadrant(g, i, bench_r5 or None)
+
+    if basis == "unresolved" and not bucket:
+        note = "No directional read (growth flat/unknown) — flex fails closed."
+    elif basis == "unresolved":
+        missing = [q for q in bucket if q not in bench_r5]
+        note = (f"Borderline {bucket} but the trailing {_FLEX_TIEBREAK_WINDOW_D}d "
+                f"benchmark return is unavailable for {missing or bucket} — "
+                "fail-closed, never guess.")
+    elif basis == "borderline_5d_tiebreak":
+        note = (f"Borderline {bucket}: resolved to {resolved} on the better trailing "
+                f"{_FLEX_TIEBREAK_WINDOW_D}d benchmark return.")
+    elif basis == "favored_single":
+        note = f"Single-quadrant favored bucket {bucket} → {resolved}."
+    else:
+        note = f"Both axes pinned → active quadrant {resolved}."
+
+    return {
+        "resolved": resolved,
+        "basis": basis,
+        "favored_bucket": bucket,
+        "benchmark_returns_5d": bench_returns_5d,
+        "window_trading_days": _FLEX_TIEBREAK_WINDOW_D,
+        "note": note,
+    }
+
+
 def _build_growth_axis(macro_data: dict) -> dict:
     """Deterministic growth-direction read — the quadrant *growth axis*, computed in
     Python so the analyzer ECHOES it (mirrors bond_signals/labor_signals) rather than
@@ -3197,14 +3526,19 @@ def _build_growth_axis(macro_data: dict) -> dict:
     confidence) only with <3 vintages in both; 'indeterminate' only with no GDPNow
     at all.
     """
-    def _vals(key: str) -> list[float]:
+    def _rows(key: str) -> list[dict]:
         return [
-            float(r["value"]) for r in (macro_data.get(key) or [])
+            r for r in (macro_data.get(key) or [])
             if r.get("value") not in (None, ".", "")
-        ]  # oldest-first
+        ]  # oldest-first, each {date, asof, value}
+
+    def _vals(key: str) -> list[float]:
+        return [float(r["value"]) for r in _rows(key)]  # oldest-first
 
     traj = _vals("GDPNOW_VINTAGES")
     prior = _vals("GDPNOW_VINTAGES_PRIOR")   # the just-ended quarter
+    traj_rows = _rows("GDPNOW_VINTAGES")
+    prior_rows = _rows("GDPNOW_VINTAGES_PRIOR")
 
     BAND = 0.1
     PRIOR_TAIL_N = 6   # ~3 weeks of vintages — the recent slope, not the whole quarter
@@ -3212,6 +3546,7 @@ def _build_growth_axis(macro_data: dict) -> dict:
     basis = "within_quarter_vintages"
     note = ""
     used = traj
+    used_rows = traj_rows
     if len(traj) >= 3:
         first, last = traj[0], traj[-1]
         latest = last
@@ -3220,6 +3555,7 @@ def _build_growth_axis(macro_data: dict) -> dict:
         # ~weeks while the Atlanta Fed is still revising the just-ended quarter —
         # read that trajectory's tail instead of degrading to the coarse fallback.
         used = prior[-PRIOR_TAIL_N:]
+        used_rows = prior_rows[-PRIOR_TAIL_N:]
         first, last = used[0], used[-1]
         latest = last
         confidence = "medium"
@@ -3242,6 +3578,7 @@ def _build_growth_axis(macro_data: dict) -> dict:
                 "direction": "indeterminate",
                 "confidence": "none",
                 "basis": "no_gdpnow_data",
+                "as_of": None,
                 "gdpnow_latest": None,
                 "gdpnow_trajectory": traj,
                 "gdpnow_vintage_count": len(traj),
@@ -3275,10 +3612,17 @@ def _build_growth_axis(macro_data: dict) -> dict:
             "low confidence."
         )
 
+    # Freshness for GDPNow is *vintage recency* (the realtime `asof` of the newest
+    # vintage row actually used), NOT the observation-quarter start date — the vintage
+    # rows carry both, and letting the model pick produced the 07-20/21 as-of flip
+    # (same value dated "2026-07-17, 3d" then "2026-04-01, 81d"). B4, 2026-07-21.
+    as_of = used_rows[-1].get("asof") if used_rows else None
+
     return {
         "direction": direction,
         "confidence": confidence,
         "basis": basis,
+        "as_of": as_of,
         "gdpnow_latest": round(latest, 2),
         "gdpnow_trajectory": [round(v, 2) for v in used],   # oldest -> newest
         "gdpnow_vintage_count": len(used),
@@ -3950,10 +4294,15 @@ def _build_role_selection(roles: list[dict], intl_leader_pick: str | None) -> di
     }
 
 
-def _sleeve_selection_metrics(fmp: FMPClient, roles: list[dict]) -> dict:
+def _sleeve_selection_metrics(fmp: FMPClient, roles: list[dict],
+                              cache: dict[str, dict[str, float]] | None = None) -> dict:
     """Fetch EOD closes for every scorecard-role pool member + benchmark (cached, one
-    FMP call each) and reduce to {ticker: {r60, r120, r252, corr_bench_120d}}."""
-    cache: dict[str, dict[str, float]] = {}
+    FMP call each) and reduce to {ticker: {r60, r120, r252, corr_bench_120d}}.
+
+    ``cache`` (a ``{ticker: {date: close}}`` dict) may be passed by the caller so the
+    populated closes are reused downstream (e.g. ``_build_flex_quadrant``'s benchmark
+    5d returns) at zero extra FMP cost. Populated in place; own dict if omitted."""
+    cache = cache if cache is not None else {}
 
     def _closes(t: str) -> dict[str, float]:
         if t not in cache:
@@ -4419,6 +4768,26 @@ def _build_reference_weights(
     for t in intl_pool:
         if t in core_target:
             core_target[t] = 0.0
+
+    # B1 (decision D2, 2026-07-21): zero every NON-SELECTED pool member, completing the
+    # PR #24 Option-1 doctrine. Step 4 floored every CORE_ROSTER name, but only a role's
+    # `selected` incumbent is a reference target — the other pool members (SOXX/PAVE/XLB/
+    # GLDM/IAU/IHE/STIP/DBMF/CTA/SPLV while SMH/XLI/COWZ/GLD/VTIP/KMLM/XLV/USMV are
+    # selected) each kept the 0.1%-of-core floor ≈ 0.092% of equity ≈ 1.01% of the
+    # reference that is permanently UNFILLABLE (V1.5 rejects their buys; the V3 floor-
+    # bypass sells them to zero if ever held). That surfaced as a phantom `unclassified`
+    # bucket in `by_quadrant` and a structural pad on the apparent cash overweight. The
+    # selected member keeps its floor, so a future `selected` commit (e.g. XLV→IHE)
+    # transfers the floor+reference to the new incumbent on the next collector run —
+    # the mechanism follows the config, not the ticker. Rotation roles already zeroed.
+    _selected_incumbents = {(r.get("selected") or "").upper() for r in roles_config()}
+    for _r in roles_config():
+        if _r.get("quadrants") == "rotation":
+            continue
+        for _m in _r.get("pool", ()):
+            _mu = str(_m).upper()
+            if _mu not in _selected_incumbents and _mu in core_target:
+                core_target[_mu] = 0.0
 
     # Soft single-name cap applies only to SINGLE STOCKS (idiosyncratic risk), NOT to
     # diversified ETF sleeves — a high-conviction quadrant is *meant* to push one ETF

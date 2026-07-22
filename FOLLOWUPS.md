@@ -1353,6 +1353,65 @@ ticks — is covered by the new F2 orphan sweep + the very next tick's repair).
 - **Task B (F1, B-2):** When `regime_gate.status == "closed"`, `_build_reference_gaps` emits a gate-zeroed gap row for the `intl_broad` selected name (VXUS) at `reference_pct: 0.0, gate_zeroed: True` if absent from the normal universe — inert to reconcile (gap=0, held_qty=0). Confirmed by test. C0 doctrine caveat added to prompt (B-1). Decision gate **B-G1** (default = ship B-2) flagged in PR.
 - **Tasks C-F (prompt-only, F2-F5):** C — override determination resolved before Recommendations section, no mid-paragraph reversals; D — post-trade totals must quote deterministic addendum; E — legacy re-entry wording fixed ("core re-entry prohibited; INTC/MCK/PPA/EUAD flex-nominatable while flat"); F — when `execution_review.date` is not prior trading session, say so explicitly.
 - **Suite:** 651 + 31 new = 682 green, ruff clean. Empirical probes passed (A sanitization + B-2 gate-zeroed row).
+### 44. 2026-07-21 audit: flex reactivation + deferred findings 4–8 — ✅ DONE, branch `fix/20260721-flex-reactivation-audit`
+Two post-PR-#24 reports (2026-07-20/21) validated the merged fixes and surfaced a new
+set. Headline: the Flex engine was structurally offline (G1 hard-blocks every entry
+while the quadrant is indeterminate — which it has been since 2026-07-02), the
+nomination filter used a stale pre-roster-revision ticker set, and the reference floored
+~1.01% of equity in names the validator forbids buying. Decisions (2026-07-21, Jorge):
+**D1** borderline quadrant resolves via a 5-day benchmark tiebreak (not a freeze);
+**D2** zero non-selected pool-member reference floors (completes PR #24 Option 1);
+**D3** flex separation set derives from `sleeve-roles.json` pools + legacy doctrine.
+- **A1 (D1) — borderline 5-day tiebreak.** New pure `flex.regime.resolve_quadrant`
+  (basis `active`/`borderline_5d_tiebreak`/`favored_single`/`unresolved`) + collector
+  `_build_flex_quadrant` → new `flex_quadrant` snapshot block (5d benchmark returns
+  reuse the sleeve-scorecard closes cache — zero extra FMP calls; QQQ/XLI/GLD/TLT are
+  pool members). The engine reads `flex_quadrant.resolved`, falling back to strict axes
+  when absent (old snapshots). Exit logic unchanged (unknown quadrant never forces an
+  exit). Prompt: `flex_quadrant` input + the `_SECTOR_QUADRANTS` map reproduced (fixes
+  the 07-20 "NEE/XLU better in Q1/Q2" error). Window constant 5, not an env knob.
+- **A2 (D3) — flex separation set.** Deleted the retired fixed-24 `CORE_TICKERS`; new
+  `flex.regime.flex_separation_set(held)` (every role pool member + non-re-enterable
+  legacy + any held legacy) and `FLEX_REENTERABLE = {INTC, MCK, PPA, EUAD}` per the
+  quadrants.py doctrine. `_flex_nominations` now takes the broker-held set.
+- **B1 (D2) — non-selected floors zeroed.** `_build_reference_weights` zeroes every
+  non-selected pool member (SOXX/PAVE/XLB/GLDM/IAU/IHE/STIP/DBMF/CTA/SPLV/…); the
+  selected incumbent keeps its floor, so a `selected` commit transfers it automatically.
+  Kills the phantom `unclassified` bucket and the ~1.01% unfillable pad.
+- **B2 (deferred finding 4) — earnings-calendar universe filter.** `_filter_earnings_to_universe`
+  filters the market-wide FMP calendar to held ∪ selected ∪ flex candidates ∪ held legacy
+  before writing `earnings_calendar` (GOOGL 07-22 was being missed).
+- **B3 (deferred finding 7) — `functional_coverage` block.** Deterministic Table-B
+  (each name in every quadrant its role covers; SGOV Q4+Q3; `sgov_note_inputs`), echoed
+  verbatim (07-20/21 Table B arithmetic was broken).
+- **B4 (new + 07-17 PCE precedent) — `growth_axis.as_of` + `freshness` block.**
+  growth_axis emits `as_of` = the newest USED vintage row's realtime `asof` (vintage
+  recency, not observation-quarter age — kills the GDPNow 3d↔81d flip); new `freshness`
+  block dates every tracked series deterministically with a cadence-aware threshold and
+  `convention` (observation_date vs vintage_date), echoed verbatim.
+- **B5 (deferred finding 5) — `performance.excess_attribution`.** Two-term
+  decomposition (cash vs invested contribution to the vs-SPY excess) for inception + 30d;
+  the prompt must cite it for any excess attribution (the "cash drag" sign is routinely
+  backwards — when SPY is negative, flat cash ADDS excess).
+- **C1–C5 (prompt-only):** basis enums echoed verbatim (C1); gap-table renders every
+  target∪held row incl. unheld targets like COWZ (C2); operative cash ceiling cited from
+  `reference_weights`/`risk-limits` binding, shock-3⇒25%, not `recent_reports` — deferred
+  finding 6 (C3); prior stated next-session intents adjudicated (C4); size-floored gap
+  honesty — a tranche-min floor is not total impossibility (C5, the 07-21 XLV case).
+- **Deferred 2026-07-13 findings 4–8 closed:** finding 4→B2, finding 5→B5, finding
+  6→C3, finding 7→B3 (Table B; Table A's findings 7+8 arithmetic were already retired by
+  the 07-17 Task D `quadrant_allocation` block). **#8 v2 (dynamic analyzer-emitted
+  candidate list) stays open** — A1/A2 unblock the STATIC funnel (a seeded Q3/Q4 name can
+  now clear G1 and reach entry); dynamic self-nomination is still future work.
+- **Tests:** new `test_flex_quadrant_resolution.py`, `test_earnings_universe.py`,
+  `test_functional_coverage.py`, `test_freshness.py`; rewrote `test_flex_separation.py`;
+  extended `test_reference_weights.py`, `test_performance_block.py`, `test_daytrade_separation.py`.
+  Full suite **690 green**, ruff clean; empirical probe on a constructed 2026-07-21
+  snapshot passed (flex_quadrant→Q3, Utilities admitted, PPA survives, no unclassified
+  mass, earnings filtered). **No auto-merge — human review before merge; D2/D3 flagged
+  in the PR body for veto.**
+
+
 - **2026-07-13** (PR #24, branch `fix/20260713-audit-price-universe-validator`, merged
   2026-07-13) — **2026-07-13 daily-report audit: price universe, intl-pool floor,
   off-roster validation seam.** The 07-13 report exposed three systemic gaps, all

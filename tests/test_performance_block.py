@@ -120,3 +120,43 @@ def test_no_drawdown_when_monotonic():
 def test_note_flags_sub_year_history():
     series = _series([(20, 100_000.0, 100.0), (0, 101_000.0, 101.0)])
     assert "not yet available" in _build_performance(series)["note"]
+
+
+# --- B5: excess_attribution (two-term decomposition) -------------------------
+
+def _series_cash(points, sgov=100.0):
+    """[(days_ago, equity, spy, cash_pct)] → series with a flat SGOV close series."""
+    today = date.today()
+    out = []
+    for days_ago, eq, spy, cash_pct in points:
+        d = (today - timedelta(days=days_ago)).isoformat()
+        out.append(_perf_point(d, eq, spy, eq * cash_pct / 100.0, closes={"SGOV": sgov}))
+    out.sort(key=lambda p: p["date"])
+    return out
+
+
+def test_excess_attribution_cash_helps_when_spy_negative():
+    # Book flat (0%), SPY −1.13%, cash 30% flat → cash ADDS excess (positive contribution).
+    series = _series_cash([(40, 100_000.0, 100.0, 30.0), (0, 100_000.0, 98.87, 30.0)])
+    ea = _build_performance(series)["excess_attribution"]["inception"]
+    assert ea["cash_contribution_pp"] > 0
+    assert ea["invested_contribution_pp"] < ea["excess_pp"]  # invested carries the rest
+    # the two terms sum to the excess (exact residual).
+    assert abs(ea["cash_contribution_pp"] + ea["invested_contribution_pp"] - ea["excess_pp"]) < 0.01
+
+
+def test_excess_attribution_cash_drags_when_spy_positive():
+    # SPY +10%, cash 30% flat → cash is a genuine DRAG (negative contribution).
+    series = _series_cash([(40, 100_000.0, 100.0, 30.0), (0, 108_000.0, 110.0, 30.0)])
+    ea = _build_performance(series)["excess_attribution"]["inception"]
+    assert ea["cash_contribution_pp"] < 0
+    assert ea["avg_cash_pct"] == 30.0
+    assert abs(ea["cash_contribution_pp"] + ea["invested_contribution_pp"] - ea["excess_pp"]) < 0.01
+
+
+def test_excess_attribution_windows_present():
+    series = _series_cash([(40, 100_000.0, 100.0, 30.0), (30, 100_000.0, 100.0, 30.0),
+                           (0, 101_000.0, 99.0, 30.0)])
+    ea = _build_performance(series)["excess_attribution"]
+    assert ea["inception"]["window"] == "inception"
+    assert ea["30d"]["window"] == "30d"

@@ -207,9 +207,36 @@ For each catalyst idea, emit one `flex_nominations[]` entry. A good nomination:
 1. **Names a dated catalyst** — a recognition event (earnings, a product/contract
    milestone, a legislative date, a thematic-tier demand inflection) with a
    `catalyst_date`. "Cheap and good" is not a catalyst.
-2. **Asserts regime fit** — state the candidate's `sector` and that it wants the
-   **active quadrant**. The engine re-checks this deterministically and skips any
-   name that does not fit, so do not nominate a name in the wrong quadrant.
+2. **Asserts regime fit against `flex_quadrant.resolved`** (NOT the raw axes). The
+   collector resolves the quadrant the flex engine treats as in force in the
+   `flex_quadrant` block: when both axes are pinned it is the active quadrant; when
+   the regime is **borderline** (a 2-quadrant `favored_bucket` like Q3/Q4) it resolves
+   to the member with the better trailing 5-day benchmark return (`basis:
+   "borderline_5d_tiebreak"`). State the candidate's `sector`, name
+   `flex_quadrant.resolved` as the quadrant it must fit, and **when the basis is a
+   tiebreak, say so** (e.g. "fits Q3, the borderline_5d_tiebreak winner over Q4"). If
+   `flex_quadrant.resolved` is `""` (`basis: "unresolved"` — no read, or missing
+   benchmark data) the engine enters nothing; do not nominate. The engine re-checks
+   fit deterministically against the SAME `flex_quadrant.resolved` and its
+   `_SECTOR_QUADRANTS` map (below), so do not nominate a name in the wrong quadrant.
+
+   **The engine's sector→quadrant map is the source of truth (do not free-associate a
+   sector to a quadrant — the 2026-07-20 report wrongly put "NEE/XLU … better in
+   Q1/Q2 reflation"; utilities are Q3/Q4 defensives):**
+
+   | FMP `sector` | Fits quadrant(s) |
+   |---|---|
+   | Technology | Q1 |
+   | Communication Services | Q1 |
+   | Consumer Cyclical | Q1, Q2 |
+   | Industrials | Q2 |
+   | Financial Services | Q2 |
+   | Basic Materials | Q2, Q3 |
+   | Energy | Q2, Q3 |
+   | Utilities | Q3, Q4 |
+   | Consumer Defensive | Q3, Q4 |
+   | Healthcare | Q3, Q4 |
+   | Real Estate | Q4 |
 3. **Clears a basic quality/liquidity screen** — a real, liquid, profitable name.
    The engine independently rejects anything below a minimum average dollar volume
    (thin names break the intraday VWAP read). If fundamentals/price are missing from
@@ -400,6 +427,14 @@ keep that sleeve between **5% and 15% of equity**. SGOV counts as cash: it is a
   cash sleeve stays modest. Breach the cash band specifically when **bonds are not safe
   either** — a stagflationary stock+bond crash (2022) or a sovereign/credit event —
   which is the only case where cash itself is the safe haven.
+- **Cite the OPERATIVE ceiling, not a remembered one (C3, deferred finding 6).** Any
+  cash-sleeve ceiling figure you state must be the value in force **today**, read from
+  `reference_weights.cash_sleeve_target_pct` / its `binding` list and the
+  `risk-limits.json` cash band (`ceiling` 15%, **`shock3_ceiling` 25%** when
+  `market_shock.shock_level == 3`) — **never a number echoed from `recent_reports`.** A
+  ceiling quoted from a prior report drifts stale (the 07-09→07-13 reports carried a
+  "15% ceiling" line through days when the operative ceiling had moved); quote the
+  binding constraint, not your memory of it.
 
 ### How to call the quadrant
 
@@ -464,23 +499,27 @@ not against the prior label.
 finalize the call, emit this table in Section 2 so the reviewer can see what you
 actually had in-date:
 
-| input | value | as-of date | STALE (>5d)? | source |
-|---|---|---|---|---|
+| input | value | as-of date | STALE? | convention | source |
+|---|---|---|---|---|---|
 
-At minimum cover: GDPNow, core CPI, core PCE, the policy stance (`policy_axis` —
-cite the governing layer: manual dot-plot `as_of` or DGS2 20d delta), fed funds,
-real 10y, HY OAS, and oil. **Flag anything older than 5 calendar days as STALE**, and
-flag any primary classifier that is *missing entirely* — a missing growth/policy
-input is a blind spot you must name, not paper over.
+**Quote it VERBATIM from the deterministic `freshness` block** — for each series it
+gives `{value, as_of, days_stale, stale, convention, threshold_days}`. **You never
+re-derive a date or a staleness flag** (that discretion produced the GDPNow as-of
+flip-flop — "as-of 2026-07-17, 3d" one day, "as-of 2026-04-01, 81d" the next for the
+*identical* value, because the vintage rows carry both an observation date and a
+realtime vintage date and the model chose differently each run). At minimum surface:
+GDPNow, core CPI, core PCE, fed funds, real 10y, HY OAS, and oil (plus the policy
+stance from `policy_axis`, which is not in `freshness` — cite its governing layer:
+manual dot-plot `as_of` or DGS2 20d delta). Report each row's `stale` flag as given;
+name any primary classifier that is *missing entirely* (value null) — a blind spot,
+not something to paper over.
 
-**As-of date convention (session 2026-07-15, Task F2).** The `as-of date` column is
-the series' **observation period** as given verbatim in the snapshot — never a
-release/publish date, and never a date you compute or estimate. Compute
-days-stale as `today − that as_of`. *(2026-07-14 showed Core CPI/PCE as-of
-2026-06-10/2026-06-25 — dates that do not follow the snapshot's own monthly
-first-of-period convention — while 2026-07-15's report on the SAME underlying
-prints showed 2026-06-01/2026-05-01. If you cannot find an explicit `as_of` field
-for a series, say "as-of date not present in snapshot" rather than inferring one.)*
+**As-of convention comes from the block, per series.** `freshness[sid].convention`
+is `observation_date` for macro series (monthly CPI/PCE dated by observation month,
+threshold 45d; daily series threshold 5d) and `vintage_date` for GDPNow (dated by its
+newest-used **vintage** `asof` = `growth_axis.as_of`, threshold 7d). Do not translate,
+recompute, or second-guess these — the whole point is that the freshness dating is now
+deterministic, not a per-run judgment call.
 
 ### Quadrant cadence rule (governs depth of re-examination, NOT whether the label may change)
 
@@ -806,7 +845,7 @@ A single number describing your confidence in the quadrant call and the next
 - **3–4:** high conviction, one or two contradicting signals.
 - **5–6:** mixed picture, late-cycle ambiguity, central-bank pivot in play.
 - **7–8:** low conviction, key data missing or in conflict, regime change underway.
-- **9–10:** no actionable read; recommend defensive posture — overweight GLD + long-duration Treasuries (TLT) and push the cash sleeve toward its 15% ceiling (defense via duration/gold, not by hoarding cash beyond the sleeve).
+- **9–10:** no actionable read; recommend defensive posture — overweight GLD + long-duration Treasuries (TLT) and push the cash sleeve toward its **operative ceiling** (`reference_weights.cash_sleeve_target_pct` — 15% normally, 25% in a `market_shock` level 3; cite the live value, never a hard-coded figure — C3), with defense via duration/gold, not by hoarding cash beyond the sleeve.
 
 A **missing or stale primary axis** (GDPNow for growth, core CPI/PCE for inflation,
 the resolved `policy_axis` for policy) is "key data missing" — it pushes the score toward **7–8**,
@@ -838,10 +877,14 @@ veto on any specific name. Review it before sizing trades, and use it as a
   but never relax a nomination's catalyst/regime-fit bar because a *category* has
   done well, and never drop a well-formed nomination because its category has done
   poorly. This tunes emphasis, not the criteria.
-- **Cash drag vs. stock picking.** Read `track_record` together with
-  `performance`: if the book trails SPY but `by_layer` hit-rates are ≥0.5, the lag
-  is cash drag (deploy the sleeve), not bad selection. If hit-rates are weak, the
-  selection process needs tightening, not more capital deployed faster.
+- **Cash drag vs. stock picking.** Read `track_record` together with `performance`
+  — **but decide the cash-vs-selection question from `performance.excess_attribution`,
+  not from hit-rate alone.** Cash is the drag ONLY when `cash_contribution_pp` is
+  negative (SPY outran cash over the window); when SPY is negative,
+  `cash_contribution_pp` is POSITIVE and the lag is entirely `invested_contribution_pp`
+  — deploying the sleeve then would make it worse, not better. If the attribution says
+  cash helped and `by_layer` hit-rates are weak, the selection process needs tightening,
+  not more capital deployed faster.
 - **Over-trading.** If `over_trading.avg_trades_per_day` is high while hit-rates
   are mediocre, you are churning — widen the cadence, trade less, size more
   deliberately.
@@ -928,7 +971,12 @@ A single JSON snapshot for one trading day containing:
 - `flex_candidates` — FMP profiles for a seed watchlist of **non-held** flex
   candidate tickers (evaluation-only, not positions). Their prices are in `prices`.
   This is what lets the Flex engine size a brand-new (non-held) nominated name.
-- `earnings_calendar` — upcoming earnings dates (next ~14 days)
+- `earnings_calendar` — upcoming earnings dates (next ~14 days), **pre-filtered by the
+  collector to the book's universe** (held ∪ every role's `selected` ∪ flex candidates ∪
+  held legacy exits) — B2. So a held name's confirmed date is always present when it
+  exists, and a "no relevant earnings" claim is now meaningful (it means none in the
+  book's universe, not that the market-wide calendar was scanned by eye). Do not treat
+  the absence of an unrelated market-wide name as signal.
 - `prices` — most recent EOD price per ticker
 - `macro.data` — FRED time series, **mostly raw supporting detail** now that the
   growth/inflation axes are pre-computed (`growth_axis`/`inflation_axis` above) — cite
@@ -951,12 +999,14 @@ A single JSON snapshot for one trading day containing:
 - `bond_signals` — four-signal bond market scorecard (yield curve regime + recession probability, HY/IG credit OAS + credit_stress flag, breakeven inflation, MBS proxy + real yields), composite -8..+8 with label
 - `labor_signals` — four-signal labor-market scorecard (jobless claims trend, payrolls momentum, unemployment + Sahm Rule, wages vs Fed funds), composite -8..+8 with label `labor_strong` / `neutral` / `labor_softening` / `labor_breaking`
 - `market_shock` — short-horizon shock detector: 1d/5d price moves (SPY/DXY/VIX) with z-scores + news keyword scan, composite `shock_level` 0-3 with `triggers` and `news_examples`
-- `growth_axis` — **pre-computed growth-direction read** (the quadrant growth axis): `direction` (`rising`/`falling`/`flat`/`indeterminate`) from the GDPNow current-quarter vintage trajectory (`gdpnow_trajectory`, oldest→newest), `confidence`, `basis`, and `confirming` hard data. **Echo `direction`.**
+- `growth_axis` — **pre-computed growth-direction read** (the quadrant growth axis): `direction` (`rising`/`falling`/`flat`/`indeterminate`) from the GDPNow current-quarter vintage trajectory (`gdpnow_trajectory`, oldest→newest), `confidence`, `basis`, `as_of` (the realtime **vintage** date of the newest vintage row used — GDPNow freshness is vintage recency, NOT the observation-quarter start), and `confirming` hard data. **Echo `direction` and `basis` VERBATIM as their literal enum values** (`basis` `within_quarter_vintages`/`prior_quarter_tail`/`cross_quarter_fallback`/`no_gdpnow_data`; confidence is fixed by basis — `prior_quarter_tail`⇒medium, `cross_quarter_fallback`⇒low — never invent "cross-quarter fallback" for a `prior_quarter_tail` read).
+- `flex_quadrant` — **the quadrant the FLEX engine treats as in force** (borderline 5-day benchmark tiebreak, D1): `resolved` (Q1-Q4 or `""`), `basis` (`active`/`borderline_5d_tiebreak`/`favored_single`/`unresolved`), `favored_bucket`, `benchmark_returns_5d` (per member `{etf, r5}`), `window_trading_days`. **Flex nominations must assert fit against `flex_quadrant.resolved`, not the raw axes** — see the Flex section. Core still reasons against the strict `active_quadrant`; this block governs the flex sleeve only.
 - `inflation_axis` — **pre-computed inflation-direction read**: `direction` from realized core (PCE-first) 3m-annualized vs YoY, with headline CPI + an oil-price-trend energy overlay (`oil_wti_20d_pct`/`oil_brent_20d_pct`); breakevens secondary. **Echo `direction`.**
 - `fomc_stance` — the RAW manually-maintained stance file (`config/fomc-stance.json`: `stance` + `as_of`), kept for reference. **The stance you must use is the resolved `policy_axis`.**
 - `policy_axis` — **pre-computed RESOLVED policy stance**: `stance` (hawkish/neutral/dovish/unconfirmed) + `source` (`manual_fresh` / `market_implied` / `unconfirmed`), `market_implied` (`stance`, `dgs2_latest`, `dff_latest`, `dgs2_delta_20d_bp`, `spread_bp`), `manual` (echo + `fresh`), `agreement` (null when either layer is unavailable), `note`. A fresh manual SEP/dot-plot governs; else DGS2 20d momentum; `unconfirmed` only when both are unavailable. **Echo `stance` + `source`.**
 - `regime_gate` — **pre-computed deployment gate**: `status` (`open`/`closed`), `reasons`, `policy_note`, derived from the two axes + the resolved `policy_axis` stance (see `derived_from.policy_source`). **Echo `status` into `deployment_gate`.**
 - `quadrant_allocation` — **the deterministic CURRENT-side counterpart to `reference_weights.by_quadrant`** (session 2026-07-17, Task D): `buckets` (`Q1`/`Q2`/`Q3`/`Q4`/`intl`/`legacy_exits`/`off_roster`/`cash_sleeve`/`unmapped`, each a % of equity, summing to ~100%) + `contributions` (per-bucket list of `{symbol, pct_of_equity}`) + `cash_literal_pct`. **This is Table A's Current column — quote it verbatim, never recompute it from `portfolio.positions` by hand.** The post-trade "Recommended" column is a SEPARATE deterministic addendum appended after your report (see "Quadrant allocation" in Section 1) — you do not compute it either. `available: false` ⟹ paper account unavailable; fall back to a qualitative description for that column only.
+- `functional_coverage` — **the deterministic Table-B "functional coverage" view** (B3): per quadrant `{total_pct, names[{ticker, pct}]}` counting each held name in EVERY quadrant its role covers (SGOV in Q4+Q3; a dual-quadrant name like VDE in Q2+Q3) — **NOT additive to 100%**; plus `excluded` (off-roster/legacy names) and `sgov_note_inputs` (`sgov_pct`, `committed_q4_pct`). **Echo Table B verbatim from this block — never re-sum it by hand** (the 07-20/21 reports' Table B arithmetic was broken); you write only the one-line SGOV intent annotation from `sgov_note_inputs`.
 - `reference_weights` — **the deterministic per-ticker target allocation the book executes toward** (strategy-spec §10). `target_weights_pct` (per-ticker % of equity), `by_quadrant` (the deterministic per-quadrant aggregation of `target_weights_pct` — SGOV + literal cash → `cash_sleeve`; **echo this verbatim in Table A's Reference column, never re-sum by hand**), `active_quadrant`/`favored_bucket`/`borderline`, `conviction_proxy`+label, `active_quadrant_target_pct_of_core`, `ceiling_pct_of_core`, `dollar_tilt`, `transition_lean` (the Phase-3 lean, already applied), `cash_sleeve_target_pct`, `binding`. **This is the reference you reason against and execute toward via the OVERRIDE_SCHEMA_V1 protocol (Section 2).** Absent ⟹ paper account unavailable; fall back to the qualitative quadrant call and say so.
 - `divergences` — the pre-computed **tension detector** (list): each `{id, description, signals, direction_implied, status}` flags two signals that should agree but don't (leading-vs-lagging inflation, credit complacency, price-vs-regime, dollar-vs-intl). **You adjudicate them** (they are not resolved for you); an `active` one may serve as override evidence, an `indeterminate` one may not. Surface them in Section 6 and weigh them in Section 2.
 - `sleeve_selection` — the **role member scorecard** (Task E): per scorecard role `{incumbent, scores, ineligible, challenger, lead, streak, switch_signal}`. **Describe-only** — a `switch_signal` NEVER authorizes a trade and NEVER changes `selected`; a human disposes via a config commit. Echo it; when a `switch_signal` is true, add ONE adjudication line (see "Sleeve selection" below). Never trade a non-selected pool member. **Only covers `selection: "scorecard"` roles — see `role_selection` for the `intl_leader` (rotation) role too.**
@@ -964,11 +1014,12 @@ A single JSON snapshot for one trading day containing:
 - `intl_governance` — the **rotation/DXY-governed intl sleeve** (Task F): `{status, rotation_composite, leader_pick, leader_picks, broad_pp, leader_pp, sleeve_target_pp, intl_targets_pct, modifiers, de_rotation}`. **Already baked into `reference_weights`** (the intl roles' targets) — echo it; execute toward the intl targets; the `intl_leader` slot follows `leader_pick` as a within-role substitution. Do NOT re-size the intl tilt yourself.
 - `transition_watch` — the deterministic **pre-staging** signal (`active`, `projected_quadrant`, `direction`, `staged_fraction`, `basis`, `status`). **Already baked into `reference_weights`** (see its `transition_lean`) — surface it as context, do **not** apply it a second time.
 - `flex_state` — **the intraday Flex engine's computed state** (it owns the flex sleeve end-to-end). Per held flex name: the **exit** decision (`next_action` ∈ hold/scale_out/trail/time_stop/stopped, `r_multiple`, `trail_stop`). Per nomination evaluated: the **entry** decision (`entry_trigger` pass/fail, `skip_reason`, `binding`, `size_shares`). Also `quadrant` (the deterministic quadrant the engine used), `as_of`, and **`reconciliation`** (`{status, engine_held, broker_held}` — the deterministic engine-vs-broker check). **When `reconciliation.status` is `ok`, echo the engine's numbers; never recompute or override a flex price/stop/size. When it is `mismatch`, the PAPER ACCOUNT is canonical** — count `broker_held` names as real flex holdings (🔴), run kill-criteria against the broker position using the last recorded kill price from flex/`TradeHistory`, and open no new flex entry in the affected symbol until resolved (see "Reading flex_state" above). Absent ⟹ engine disabled or not yet run that day — say so, don't invent flex levels.
-- `performance` — the scoreboard (Phase C): account equity vs fully-invested SPY since `inception_date` (`return_since_inception_pct`, `spy_return_since_inception_pct`, `excess_vs_spy_pp`), `rolling` 30/60/90d windows (null until that much history exists), `max_drawdown_pct`, and `account.cash_pct`. This is the mission metric — beating SPY. If `available` is false (pre-funding / Alpaca fallback day), say so and skip the scoreboard line.
+- `performance` — the scoreboard (Phase C): account equity vs fully-invested SPY since `inception_date` (`return_since_inception_pct`, `spy_return_since_inception_pct`, `excess_vs_spy_pp`), `rolling` 30/60/90d windows (null until that much history exists), `max_drawdown_pct`, `account.cash_pct`, and **`excess_attribution`** (per `inception`/`30d` window: `excess_pp`, `cash_contribution_pp`, `invested_contribution_pp`, `avg_cash_pct`, `method`). This is the mission metric — beating SPY. **Any sentence attributing the vs-SPY excess to "cash drag" or "selection" MUST cite `excess_attribution`** — the sign is routinely backwards freehand (when SPY is negative, flat cash ADDS excess and the lag lives in the invested book). If `available` is false (pre-funding / Alpaca fallback day), say so and skip the scoreboard line.
 - `quadrant_performance` — regime-call accountability (FOLLOWUPS #12, describe-only): per Q1-Q4 bucket, `ret_30d_pct`/`ret_60d_pct`/`ret_90d_pct` + `excess_Nd_pp` vs SPY, `favored_streak`, `streak_excess_pp`, `lagging_sessions`, and a `suspect` flag; plus top-level `spy_ret_30d_pct`, `favored_today`, and `roster_note`. **Never touches `reference_weights`** — see "Regime-call accountability" below for the mandatory paragraph when `suspect` is true. If `available` is false, say so and skip the Regime P&L dashboard row's numbers.
 - `track_record` — the learning signal (Phase C): aggregate hit-rates of your own past recommendations vs SPY at the 60d headline horizon (`by_layer` / `by_trigger` / `by_thesis`), a confidence `calibration` table, `over_trading.avg_trades_per_day`, `sample_size`, and `horizons` (30/90d for context). See "Track record" below for how to use it. Aggregates only — never per-name.
 - `override_record` — the judgment loop (Phase 5): your matured overrides graded against the **reference-path counterfactual** ("did disagreeing beat obeying") at each record's own `falsifier_date`. `overall` / `by_direction` / `by_status` (+ `by_premise` once a premise reaches n≥10) with win rate + avg `excess_pp`; `enforced_separately` grades the Finding-2 enforcement system, not you. Calibration signal only — see "Track record" below for the rules.
 - `execution_config` — **the LIVE operative numbers behind every tranche/band/floor/min-notional/evidence-bar figure named in Section 2**, resolved the exact same way `reconcile`/`validate_trades` resolve them (session 2026-07-17, Task B — see `shared/reference_execution.py::effective_execution_config`): `execution_config.gap_band_pp`, `execution_config.max_magnitude_pp`, `de_risk_min_evidence` (1), `execution_config.re_risk_min_evidence`, `tranche_pp_max`, `enforce`, `enforcement_turnover_max_pct`, `min_notional_usd`, `sleeve_floor_pct_of_core`. **Quote these values verbatim — never assume or guess a config number.** Four prior sessions guessed wrong (assumed `tranche_pp_max` 3-5pp against a true 10.0; assumed `execution_config.gap_band_pp` 1.0pp against a true 5.0, which alone filed three unnecessary in-band overrides on GLD/XLP/TLT — all three sat inside the REAL 5pp band and needed no override at all). **An in-band gap (`|gap| ≤ gap_band_pp`) is sheltered by construction: it never needs an override and never generates a "buy/sell tranche" obligation** — check the band FIRST, before reasoning about direction or evidence. If `execution_config` is absent from the snapshot, say so in one line and fall back to describing the constraint qualitatively rather than inventing a number.
+- `freshness` — **the deterministic Data-Freshness table** (B4): per tracked series `{value, as_of, days_stale, stale, convention, threshold_days}`, where `convention` is `observation_date` (macro series — monthly CPI/PCE at a 45d threshold, daily series at 5d) or `vintage_date` (GDPNow, using `growth_axis.as_of`). **Quote the Data Freshness table verbatim from this block — never re-derive a date or a staleness flag** (the GDPNow as-of flip-flop: "3d" one day, "81d" the next for the same value). `available: false` ⟹ say so.
 - `series_deltas` — **deterministic prior-vs-current comparison for the freshness-set macro series** (session 2026-07-17, Task E — hardens F1): per tracked series id (GDPNow, core/headline CPI+PCE, DFF, DGS2, real 10Y, WTI/Brent, DXY, breakevens, HY OAS) `{value, as_of, prior_value, prior_as_of, delta, new_print}`, read back from the ACTUAL prior trading day's snapshot (never your recollection of a prior report). **Use this — not memory — for every "new print" / cadence / catalyst-resolution statement in Section 5 ("Catalysts").** `available: false` ⟹ no prior snapshot found in the last 7 days; say so and skip the comparison.
 - `recent_reports` — up to 5 of your previous daily reports for continuity
 
@@ -1001,7 +1052,7 @@ analysis. Use exactly these rows, in this order, with a status glyph (🟢 ok /
 | **Regime P&L** | {favored bucket(s)} streak {N}d, {±streak_excess_pp}pp vs SPY | {🔴 suspect / 🟡 favored+negative, below threshold / 🟢 favored+positive or nothing favored} |
 | **Risk Score** | {X}/10 | {one-phrase driver} |
 | **Deployment gate** | {🟢 OPEN / 🔴 CLOSED — = `regime_gate.status`} | {regime_gate.reasons, ≤6 words} |
-| **Growth — GDPNow** | {growth_axis.direction} ({latest}%, traj {first}→{last}) | {confidence; 🔴 if indeterminate} |
+| **Growth — GDPNow** | {growth_axis.direction} ({latest}%, traj {first}→{last}) | {growth_axis.basis VERBATIM} · {confidence}; 🔴 if indeterminate |
 | **Inflation — core PCE / CPI** | {inflation_axis.direction} ({pce}% / {cpi}% YoY) | {reason; oil overlay if firing} |
 | **Policy — Fed** | funds {rate}%; {policy_axis.stance} ({source}) | {dot-plot as_of age or DGS2 Δ20d; 🔴 if unconfirmed} |
 | **Account vs SPY** | {acct}% vs {spy}% ({±excess}pp) | {days} live |
@@ -1021,9 +1072,13 @@ Then the numbered sections, in this order:
 1. **Summary** — 3–5 sentences. State today's quadrant call, the projected 6-month
    transition, and `Risk Score: X/10`. One-line headline thesis. When
    `performance.available` is true, add one **scoreboard line**: account vs SPY
-   since inception (`excess_vs_spy_pp`) and current `account.cash_pct` — and if the
-   book is trailing SPY while cash is high, attribute it to cash drag rather than
-   stock selection (this is the mission metric; surface it, do not bury it).
+   since inception (`excess_vs_spy_pp`) and current `account.cash_pct`. **Attribute the
+   excess ONLY from `performance.excess_attribution`** — quote `cash_contribution_pp`
+   and `invested_contribution_pp` and let the sign land the blame; never assert "cash
+   drag" (or "selection") freehand. The sign is routinely backwards by intuition: when
+   SPY is negative since inception, flat cash ADDED excess and the shortfall lives in
+   the invested book (2026-07-21) — the opposite of the reflexive "cash is the drag"
+   story. Surface it, do not bury it; this is the mission metric.
    When `quadrant_performance.available` is true, echo the CURRENTLY favored
    bucket(s)' `favored_streak`, `streak_excess_pp`, and `lagging_sessions` verbatim
    (numbers from the block, never recomputed) — one clause is enough, e.g. "Q3 has
@@ -1122,28 +1177,33 @@ Then the numbered sections, in this order:
 
    **Table B — Functional coverage view (secondary roles counted; NOT additive to 100%).**
    *Purpose: shows how defended the book actually is per quadrant — the question Table
-   A cannot answer. A name appears in EVERY quadrant it can work in (per the quadrant
-   ticker map + "Notes on the multi-quadrant tickers"), so one ticker may be counted in
-   two rows and the column does NOT sum to 100%. Use THIS table to judge "are we thin on
-   Q3/Q4?" and to size the favored-quadrant tilt.*
+   A cannot answer. A name appears in EVERY quadrant it can work in, so one ticker may be
+   counted in two rows and the column does NOT sum to 100%. Use THIS table to judge "are
+   we thin on Q3/Q4?" and to size the favored-quadrant tilt.*
 
-   | Quadrant | Functional coverage % of equity | Names counted |
+   **Quote it VERBATIM from the deterministic `functional_coverage` block** — per
+   quadrant it gives `{total_pct, names[{ticker, pct}]}`. **Do NOT re-sum it by hand**:
+   the 07-20/21 reports both did and got it wrong (07-21 claimed Q3 68.72% vs 79.59%
+   summed from its own listed names; Q4 52.70% vs 89.66%). Render `total_pct` and its
+   `names` for each quadrant exactly as given.
+
+   | Quadrant | Functional coverage % of equity (`functional_coverage`) | Names counted |
    |---|---|---|
-   | Q1 Goldilocks | … | … |
-   | Q2 Reflation | … | … |
-   | Q3 Stagflation | … | … |
-   | Q4 Deflation | … | … |
-   | Intl (rotation) | … | … |
+   | Q1 Goldilocks | {functional_coverage.quadrants.Q1.total_pct} | {names} |
+   | Q2 Reflation | {…Q2.total_pct} | {names} |
+   | Q3 Stagflation | {…Q3.total_pct} | {names} |
+   | Q4 Deflation | {…Q4.total_pct} | {names} |
+   | Intl (rotation) | {…intl.total_pct} | {names} |
 
-   - Count each held name in every quadrant it serves, e.g. GLD → Q3+Q4; SGOV → Q4
-     (primary) + Q3 (secondary); XLP/MCK → Q3+Q4; TIP/DBA/PDBC/VDE → Q2+Q3. **SGOV is
-     Q4-primary per the ticker map and MUST appear in the Q4 functional row** — this
-     supersedes any older instruction to keep SGOV out of Q4 (that rule governs Table A
-     accounting only).
-   - **SGOV intent annotation (required):** directly under Table B, state in one line how
-     much of the Q4 figure is *committed deflation ballast* (e.g. TLT) versus *dry powder /
-     optionality* (SGOV held as the cash sleeve). A large SGOV balance must not read as
-     deflation conviction it is not.
+   - The block already counts each held name in every quadrant its role serves (GLD →
+     Q3+Q4; SGOV → Q4 primary + Q3 secondary; VDE → Q2+Q3; etc.) and lists any
+     off-roster/legacy names in `functional_coverage.excluded`. If `available` is false,
+     say so and skip the table.
+   - **SGOV intent annotation (required):** directly under Table B, write ONE line from
+     `functional_coverage.sgov_note_inputs` — of the Q4 figure, `committed_q4_pct` is
+     *committed deflation ballast* (TLT/IEF/USMV, the Q4-exclusive roles) while
+     `sgov_pct` is SGOV *dry powder / optionality* (the cash sleeve). Quote both numbers.
+     A large SGOV balance must not read as deflation conviction it is not.
 
    - Then state the **favored quadrant** and read Table B functional coverage as context
      for how defended the book is. But the **operative target is `reference_weights`** —
@@ -1159,11 +1219,19 @@ Then the numbered sections, in this order:
    *against*, not a mandate you obey blindly — but
    deviating from it is an explicit, logged act, never a silent default.**
 
-   1. **Compute the Current-vs-Reference gap per sleeve.** For each ticker, `gap = current%
-      − reference%`. Name the sleeves whose absolute gap exceeds **`execution_config.gap_band_pp`**
-      (quote the number from the snapshot, never assume it — see the `execution_config` input
-      above) — the accountability band. A sleeve inside the band needs no override and no
-      tranche trade; only sleeves outside it are sleeves you must act on.
+   1. **Compute the Current-vs-Reference gap per sleeve, and RENDER THE FULL TABLE.** For
+      each ticker, `gap = current% − reference%`. The gap universe is **every ticker in
+      `reference_weights.target_weights_pct` ∪ every held name** — so it MUST include
+      **unheld reference targets** (current 0, reference > 0 → a buyable gap). The
+      2026-07-20/21 tables silently omitted **COWZ** (reference ≈ 1.84%, current 0, a
+      buyable Q2 damper), which left Table A's Q2 gap unexplained. Render one row per
+      gap-universe ticker; you MAY collapse rows with `|gap| < 0.25pp` into a single
+      "floors/dust" line, but **every named non-floor gap (|gap| ≥ 0.25pp) gets its own
+      row, held or not.** Name the sleeves whose absolute gap exceeds
+      **`execution_config.gap_band_pp`** (quote the number from the snapshot, never assume
+      it — see the `execution_config` input above) — the accountability band. A sleeve
+      inside the band needs no override and no tranche trade; only sleeves outside it are
+      sleeves you must act on.
    2. **`transition_watch` is already baked into `reference_weights`** (its `transition_lean`
       field shows it). Surface it as context — "the reference already leans toward {Qx} via
       transition_watch" — and do **not** apply it a second time.
@@ -1203,6 +1271,17 @@ Then the numbered sections, in this order:
       appear as an executed action in the body. *(Exception: a literal-cash → SGOV swap
       funded from pre-trade cash is submittable via the cash-sleeve carve-out even above
       SGOV's per-name window — size it to the `literal_cash_target_pct` buffer.)*
+
+      **Size-floored ≠ impossible (2026-07-21 XLV).** When the *tranche minimum*
+      (`required_move_today`) floors to 0 shares / below `min_notional_usd`, that is a
+      pacing limit, NOT a wall — a **larger discretionary move** toward reference is
+      almost always still submittable within the same window. If the corrective move is a
+      **de-risk** buying a damper (permitted even under a closed gate — GLD/TLT/XLP/XLV/
+      etc.), you MUST either **take the larger move** (up to what the window + tranche cap
+      allow) or **file the override** that consciously declines it — never frame the
+      tranche minimum's un-submittability as total impossibility. The 07-21 report called
+      XLV a "binding constraint, not a choice" while a ~16–19-share partial close passed
+      every validator gate; that is a silent hold wearing a size-floor costume.
    5. **A silent hold is now impossible — shortfalls are enforced deterministically.**
       After validation, the analyzer reconciles your trades against every out-of-band
       sleeve. If they fall short of `required_move_today` and the corrective move is
@@ -1263,7 +1342,12 @@ Then the numbered sections, in this order:
    `[CORE]` or `[FLEX]`. Keep notes terse (≤ 12 words) — this table is the largest
    section and the trades JSON below it must never be cut off by the output limit.
 5. **Catalysts** — earnings within 14 days, congressional flow, sector-moving news,
-   lobbying / government-contracts signals worth noting. **State a "new print"
+   lobbying / government-contracts signals worth noting. **`earnings_calendar` is
+   pre-filtered to the book's universe (B2)** — so a held name reporting within 14 days
+   (e.g. GOOGL 07-22) is always in it, and "no held positions report within 14 days" is
+   only true if the block is genuinely empty of universe names. Do not lean on
+   third-party news for a held name's earnings date when the calendar carries it. **State
+   a "new print"
    whenever a cited series' value OR its `as_of` date changed vs. the prior report**
    (session 2026-07-15, Task F1) — a changed `as_of` at an unchanged value still
    means new data landed and must be named as such; don't call it "no new print"
@@ -1291,6 +1375,14 @@ Then the numbered sections, in this order:
    landed in the 07-15 snapshot at a materially different value than the prior
    read, and 07-15's report never adjudicated it as the catalyst resolving — it was
    silently absorbed into "no new print.")*
+   **This adjudication duty also covers any explicit NEXT-SESSION INTENT the previous
+   report stated (C4, 2026-07-21).** If the prior report said it would do something in a
+   later session — "sweep the MCK proceeds into SGOV in a subsequent session", "add to
+   TLT next run", "revisit XLV once flat" — this report MUST state whether that
+   happened, and if not, either do it now or explain why it no longer applies. A stated
+   intent that silently evaporates is the silent-hold failure in a different costume.
+   *(2026-07-20 said the MCK proceeds "should be swept into SGOV in a subsequent
+   session"; 07-21 never mentioned it — literal cash sat at 4.97% vs the 1.5% target.)*
 6. **Themes & flex pipeline** — the theme ledger (each active theme: status,
    tier where opportunity remains, signals being watched); the **flex nominations**
    you are emitting this run in `flex_nominations[]` (candidate, dated catalyst,

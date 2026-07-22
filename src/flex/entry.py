@@ -95,6 +95,7 @@ def build_flex_entry(
     session_minutes_elapsed: int,
     cfg: FlexConfig,
     sleeve_room_usd: float | None = None,
+    quadrant_basis: str = "",
 ) -> dict:
     symbol = str(candidate.get("symbol") or "").upper()
     sector = candidate.get("sector")
@@ -103,6 +104,7 @@ def build_flex_entry(
         "symbol": symbol,
         "sector": sector,
         "quadrant": quadrant,
+        "quadrant_basis": quadrant_basis,
         "regime_fit": None,
         "adv_usd": None,
         "gap_pct": None,
@@ -131,10 +133,13 @@ def build_flex_entry(
     if not intraday_bars or not daily_bars:
         return _skip("no_bars")
 
-    # G1 — regime fit (the shared quadrant input).
+    # G1 — regime fit (the shared quadrant input). The basis (active /
+    # borderline_5d_tiebreak / favored_single / unresolved) is surfaced so
+    # flex_state shows WHY a quadrant was or wasn't in force.
     out["regime_fit"] = regime_fit(sector, quadrant)
     if not out["regime_fit"]:
-        return _skip(f"regime_fit:{sector!r} not in {quadrant or 'unknown'}")
+        _basis = f" ({quadrant_basis})" if quadrant_basis else ""
+        return _skip(f"regime_fit:{sector!r} not in {quadrant or 'unknown'}{_basis}")
 
     # Liquidity screen — tied to IEX-VWAP validity.
     adv = avg_dollar_volume(daily_bars)
