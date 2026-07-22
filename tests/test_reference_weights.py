@@ -316,3 +316,49 @@ def test_intl_broad_restored_when_gate_open():
         {}, {}, {}, CFG, intl_governance=_ig(),
     )
     assert rw_open["target_weights_pct"].get("VXUS", 0.0) == 2.0
+
+
+# --- B1 (decision D2, 2026-07-21): non-selected pool-member floors zeroed -----
+
+# The 11 non-selected US pool members that used to keep the 0.1%-of-core floor
+# (≈1.01% of equity of permanently-unfillable reference + a phantom `unclassified`
+# bucket). Completes the PR #24 Option-1 doctrine.
+_NON_SELECTED = ("SOXX", "PAVE", "XLB", "XLE", "GLDM", "IAU", "IHE", "STIP", "DBMF", "CTA", "SPLV")
+
+
+def test_by_quadrant_has_no_unclassified_mass():
+    g, i = _axes("falling", "rising")  # Q3
+    rw = _build(_paper({"SPY": 17, "QQQ": 14, "GLD": 5, "SGOV": 10}), g, i, _gate("closed", "neutral"))
+    assert rw["by_quadrant"].get("unclassified", 0.0) == 0.0
+
+
+def test_non_selected_pool_members_zeroed_selected_present():
+    g, i = _axes("falling", "rising")  # Q3 — gold/energy/staples/healthcare concentrate
+    rw = _build(_paper({"GLD": 5, "SGOV": 10}), g, i, _gate("closed", "neutral"))
+    tw = rw["target_weights_pct"]
+    for t in _NON_SELECTED:
+        assert tw.get(t, 0.0) == 0.0, t
+    # The selected incumbent of a concentrated Q3 role is present (GLD = gold).
+    assert tw.get("GLD", 0.0) > 0.0
+
+
+def test_b1_mechanism_follows_config_not_ticker(monkeypatch):
+    """Flipping `selected` for healthcare_def to IHE moves the zeroing: XLV (no longer
+    selected) is now zeroed. The mechanism follows the config, not the ticker."""
+    import copy
+
+    from collector import handler as H
+    g, i = _axes("falling", "rising")  # Q3
+    paper = _paper({"XLV": 3, "GLD": 5, "SGOV": 10})
+
+    rw_real = _build(paper, g, i, _gate("closed", "neutral"))
+    assert rw_real["target_weights_pct"].get("XLV", 0.0) > 0.0   # selected incumbent
+    assert rw_real["target_weights_pct"].get("IHE", 0.0) == 0.0  # non-selected → zeroed
+
+    patched = copy.deepcopy(H.roles_config())
+    for r in patched:
+        if r["role_id"] == "healthcare_def":
+            r["selected"] = "IHE"
+    monkeypatch.setattr(H, "roles_config", lambda: patched)
+    rw_flip = _build(paper, g, i, _gate("closed", "neutral"))
+    assert rw_flip["target_weights_pct"].get("XLV", 0.0) == 0.0  # now non-selected → zeroed

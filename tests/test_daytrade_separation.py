@@ -19,7 +19,7 @@ from flex.entry import size_flex_position  # noqa: E402
 from flex.handler import _coid as flex_coid  # noqa: E402
 from flex.handler import _flex_nominations, _symbols_notional  # noqa: E402
 from flex.reconcile import reconcile_ledger  # noqa: E402
-from flex.regime import CORE_TICKERS  # noqa: E402
+from flex.regime import flex_separation_set  # noqa: E402
 
 _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 
@@ -54,7 +54,7 @@ def test_catalyst_nominations_exclude_daytrade_symbols():
     ]}
     syms = {n["symbol"] for n in _flex_nominations(doc, exclude=frozenset({"ABCD"}))}
     assert syms == {"NVDA"}
-    assert all(s not in CORE_TICKERS for s in syms)
+    assert all(s not in flex_separation_set(frozenset()) for s in syms)
 
 
 def test_catalyst_reconcile_ignores_lab_positions():
