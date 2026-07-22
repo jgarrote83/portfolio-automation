@@ -147,36 +147,3 @@ def regime_fit(sector: str | None, quadrant: str | None) -> bool:
     if not fits:
         return False
     return q in fits
-
-
-# ---------------------------------------------------------------------------
-# Dynamic watch_candidates funnel — FOLLOWUPS #8 v2
-# ---------------------------------------------------------------------------
-
-# Legacy exits that may re-enter the flex funnel once flat (core re-entry remains
-# closed; flex nomination while the position is fully sold is allowed).
-# INTC/MCK/PPA/EUAD are seeded in config/flex-candidates.json for exactly this reason.
-# AMZN/GOOGL/DBA/TIP/XSD/VDE are NOT re-enterable as flex — they either have
-# a re-entry prohibition or are ETF roles not suitable as single-name flex catalysts.
-FLEX_REENTERABLE: frozenset[str] = frozenset({"INTC", "MCK", "PPA", "EUAD"})
-
-
-def flex_separation_set(held: set[str]) -> frozenset[str]:
-    """The set of tickers that must NOT appear in the dynamic watch_candidates list.
-
-    All CORE_ROSTER members (role pool members ∪ LEGACY_EXITS) are separated —
-    the Flex Catalyst Engine Separation Contract prohibits a flex order touching a
-    core name. FLEX_REENTERABLE names are carved out when they are currently flat:
-    a flat INTC/MCK/PPA/EUAD is a valid flex candidate (and IS seeded in the static
-    list). A held FLEX_REENTERABLE name is already excluded via the ``exclude``
-    set in ``_load_flex_candidates`` — it is also returned here for belt-and-suspenders.
-
-    ``held`` should be the set of currently-held ticker symbols (uppercase).
-    """
-    from shared.quadrants import CORE_ROSTER
-    separation: set[str] = set(CORE_ROSTER)
-    # Carve out flat re-enterable names (they are valid flex candidates while flat)
-    for sym in FLEX_REENTERABLE:
-        if sym not in held:
-            separation.discard(sym)
-    return frozenset(separation)
