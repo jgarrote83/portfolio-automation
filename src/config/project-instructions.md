@@ -949,6 +949,108 @@ call at all costs.
 
 ---
 
+### Leading growth + market-implied quadrant — adjudication rules (#17 / #18)
+
+These two blocks give the analyzer access to signals that are systematically
+**early** relative to the monthly macro prints the growth and inflation axes
+read. They are **describe-only**: neither block touches `reference_weights`,
+the deployment gate, or any deterministic validator rule. Use them as
+structured override evidence (same doctrine as `divergences`).
+
+**`leading_growth` — the 9-signal growth leading composite**
+
+The composite aggregates high-frequency leading indicators (WEI, NFCI-inverted,
+building permits, core capex orders, Philly-Fed new orders, Empire-State activity)
+plus market-derived signals (CPER/GLD copper-gold ratio, XLY/XLP
+cyclicals-vs-defensives ratio, HY OAS trend direction). Each signal casts a
+directional vote; the final `score` in [−1, +1] is the fraction-of-signals-
+improving. `direction` thresholds: score > 0.3 = "rising"; < −0.3 = "falling";
+otherwise "flat".
+
+Key rules:
+- **The composite NEVER overrides `growth_axis.direction`** in any deterministic
+  layer. The binding regime axes are `growth_axis` and `inflation_axis`; the
+  `leading_growth` composite is a leading *lens* only — it feeds the
+  `leading_vs_lagging_growth` divergence and, when that divergence is `active`, the
+  `transition_watch` growth-side projection.
+- **Stale/absent inputs degrade confidence gracefully.** `confidence: "full"` ≥ 7
+  signals available; `"medium"` 4–6; `"low"` 2–3; `"none"` 0–1. A
+  `leading_vs_lagging_growth` divergence fires `active` only at `medium` or `full`
+  confidence — `low` or `none` confidence yields `indeterminate`, never `active`.
+- **In §2 (override protocol):** a `leading_vs_lagging_growth` divergence that is
+  `active` may serve as one evidence item in an override record (same as the
+  inflation-side divergence: `active` = eligible evidence, `indeterminate` = not).
+  It is NOT a mandate — if the realized growth axis says "falling" but the composite
+  says "rising" at medium confidence, you have evidence for a re-risk lean and must
+  file the override at the re-risk bar (≥ `re_risk_min_evidence` items, falsifier +
+  date). Do not rely on a single leading-composite reading as the sole evidence.
+- **Echo verbatim** the `direction`, `score`, `confidence`, and `available_signals`/
+  `total_signals` in §1. Do not re-derive them from raw `macro.data`.
+
+**`market_implied_quadrant` — the tape's own quadrant vote**
+
+The block computes the quadrant the *cross-asset tape is pricing* from data the
+collector already holds: relative 20d/60d basket momentum (equal-weight Q1–Q4
+baskets from the perf series) + 6 per-signal votes (copper/gold, XLY/XLP, DXY
+trend, 5y-breakeven direction, HY OAS trend, 2s10s steepening). Confidence is
+higher when the basket-momentum and per-signal votes agree.
+
+Key rules:
+- **Works at borderline regimes by design.** When `active_quadrant` is empty (both
+  axes flat/indeterminate), `price_vs_regime` goes `indeterminate` — this block
+  still emits a concrete implied quadrant. Use it in Section 2 to break the
+  ambiguity.
+- **The old `price_vs_regime` detector is kept.** At a decided macro quadrant, both
+  detectors run; adjudicate both. `market_vs_macro_quadrant` is the broader
+  instrument; `price_vs_regime` remains a quick sanity check.
+- **Evidence bar for using as override input:** `high` or `medium` confidence
+  = eligible evidence for a single override item. `low` or `none` = not eligible.
+- **The historical rationale (record verbatim when relevant in §2):** *the system
+  cannot be later than the market if the market's own vote is one of its inputs.
+  When tape and realized macro disagree at turns, the tape is early more often than
+  wrong — 2022 is the canonical case, where cross-asset signals turned months before
+  the CPI print confirmed the inflation regime.*
+- **Echo the `implied_quadrant`, `confidence`, and the `votes[]` table in §1**
+  (one sentence). Surface the full vote breakdown in §2 if any divergence is
+  `active`. Never assign trades based solely on this block.
+
+**Dollar proxy — when `DTWEXBGS` is stale**
+
+`dollar_proxy` is built from the EUR/JPY/CNY FX pairs whenever the official
+broad USD index (`DTWEXBGS`) is >5 calendar days stale. When `dollar_proxy.available`
+is `true`, cite `proxy_direction` wherever you would cite the DXY trend (regional
+rotation, `dollar_vs_intl_tilt` inputs) and note the basis as "(proxy)". When
+`available: false` and DTWEXBGS is stale, mark those inputs as cadence-gapped.
+
+---
+
+### P&L decomposition — inception-shortfall attribution
+
+`pnl_decomposition` answers the question the performance scoreboard cannot: *where*
+does the vs-SPY wedge sit in the book? Three buckets:
+
+- **`core_current`** — names in CORE_ROSTER or any role's candidate pool that are
+  currently held or a role's `selected` member. This is the active All-Weather book.
+- **`legacy_exits`** — LEGACY_EXITS (AMZN, GOOGL, INTC, MCK, DBA, TIP, XSD, PPA,
+  EUAD). These are wind-down positions; their P&L is sequencing cost, not strategy
+  alpha.
+- **`off_roster_flex`** — everything else, e.g. MU. Flex leftovers; the flex engine
+  manages these; their P&L is separate from the core attribution.
+
+**§1 usage:** one sentence quoting the three `total_usd` / `pct_of_equity` figures:
+"P&L since inception: core {core_current.pct_of_equity}% / legacy exits
+{legacy_exits.pct_of_equity}% / off-roster {off_roster_flex.pct_of_equity}%."
+Do **not** recompute. If `available: false`, skip.
+
+**Attribution discipline:** if the report discusses why the account trails SPY,
+cite the bucket split from `pnl_decomposition`, not freehand arithmetic. A negative
+`legacy_exits.total_usd` means the LEGACY_EXITS wind-down is drag; a negative
+`off_roster_flex.total_usd` names the flex-leftover drag. The `core_current` bucket
+isolates the strategy-alpha question. Per-symbol detail is in each bucket's
+`contributors` list (top 15 by |total_usd|) — cite by name when relevant.
+
+---
+
 ## Inputs you will receive (every run)
 
 A single JSON snapshot for one trading day containing:
@@ -1011,7 +1113,11 @@ A single JSON snapshot for one trading day containing:
 - `quadrant_allocation` — **the deterministic CURRENT-side counterpart to `reference_weights.by_quadrant`** (session 2026-07-17, Task D): `buckets` (`Q1`/`Q2`/`Q3`/`Q4`/`intl`/`legacy_exits`/`off_roster`/`cash_sleeve`/`unmapped`, each a % of equity, summing to ~100%) + `contributions` (per-bucket list of `{symbol, pct_of_equity}`) + `cash_literal_pct`. **This is Table A's Current column — quote it verbatim, never recompute it from `portfolio.positions` by hand.** The post-trade "Recommended" column is a SEPARATE deterministic addendum appended after your report (see "Quadrant allocation" in Section 1) — you do not compute it either. `available: false` ⟹ paper account unavailable; fall back to a qualitative description for that column only.
 - `functional_coverage` — **the deterministic Table-B "functional coverage" view** (B3): per quadrant `{total_pct, names[{ticker, pct}]}` counting each held name in EVERY quadrant its role covers (SGOV in Q4+Q3; a dual-quadrant name like VDE in Q2+Q3) — **NOT additive to 100%**; plus `excluded` (off-roster/legacy names) and `sgov_note_inputs` (`sgov_pct`, `committed_q4_pct`). **Echo Table B verbatim from this block — never re-sum it by hand** (the 07-20/21 reports' Table B arithmetic was broken); you write only the one-line SGOV intent annotation from `sgov_note_inputs`.
 - `reference_weights` — **the deterministic per-ticker target allocation the book executes toward** (strategy-spec §10). `target_weights_pct` (per-ticker % of equity), `by_quadrant` (the deterministic per-quadrant aggregation of `target_weights_pct` — SGOV + literal cash → `cash_sleeve`; **echo this verbatim in Table A's Reference column, never re-sum by hand**), `active_quadrant`/`favored_bucket`/`borderline`, `conviction_proxy`+label, `active_quadrant_target_pct_of_core`, `ceiling_pct_of_core`, `dollar_tilt`, `transition_lean` (the Phase-3 lean, already applied), `cash_sleeve_target_pct`, `binding`. **This is the reference you reason against and execute toward via the OVERRIDE_SCHEMA_V1 protocol (Section 2).** Absent ⟹ paper account unavailable; fall back to the qualitative quadrant call and say so.
-- `divergences` — the pre-computed **tension detector** (list): each `{id, description, signals, direction_implied, status}` flags two signals that should agree but don't (leading-vs-lagging inflation, credit complacency, price-vs-regime, dollar-vs-intl). **You adjudicate them** (they are not resolved for you); an `active` one may serve as override evidence, an `indeterminate` one may not. Surface them in Section 6 and weigh them in Section 2.
+- `divergences` — the pre-computed **tension detector** (list): each `{id, description, signals, direction_implied, status}` flags two signals that should agree but don't (leading-vs-lagging inflation, credit complacency, price-vs-regime, dollar-vs-intl, **leading-vs-lagging-growth (#17)**, **market-vs-macro-quadrant (#18)**). **You adjudicate them** (they are not resolved for you); an `active` one may serve as override evidence, an `indeterminate` one may not. Surface them in Section 6 and weigh them in Section 2.
+- `leading_growth` — **pre-computed leading-growth composite** (#17, 2026-07-23): `direction` (`rising`/`falling`/`flat`), `score` (diffusion in [−1,+1]), `confidence` (`full`/`medium`/`low`/`none`), `available`, `signals[]` (per-signal name/direction/as_of). Nine sources: WEI (weekly GDP tracker), NFCI (inverted — tightening = negative for growth), PERMIT (building permits), NEWORDER (core capex orders), Philly-Fed new orders, Empire-State activity, CPER/GLD 20d ratio, XLY/XLP 20d ratio, HY OAS 20d trend. **Describe-only: the composite NEVER flips `growth_axis.direction` by itself** — `growth_axis` is the deterministic regime input; `leading_growth` is a leading-indicator lens that feeds the `leading_vs_lagging_growth` divergence and (when active) the `transition_watch` growth side. A stale/absent input degrades `confidence` gracefully and never fabricates a signal. **§1 one sentence:** "Leading growth: {direction} (score {score}, {confidence} confidence; {available_signals}/{total_signals} signals)." **§2:** if `leading_vs_lagging_growth` is `active`, treat it identically to the inflation-side divergence — may serve as override evidence (`active` = eligible, `indeterminate` = not). See "Leading growth + market-implied quadrant" section below.
+- `market_implied_quadrant` — **market-implied quadrant** from cross-asset tape momentum (#18, 2026-07-23): `implied_quadrant` (Q1-Q4 or `"borderline"`), `confidence` (`high`/`medium`/`low`/`none`), `implied_growth`, `implied_inflation`, `votes[]` (per-signal table: basket momentum 20d/60d, copper/gold, XLY/XLP, DXY trend, breakevens direction, HY OAS trend, 2s10s). Works at borderline regimes — **no dependence on `active_quadrant`** — superseding `price_vs_regime`'s blind spot (which goes `indeterminate` at borderline). The old `price_vs_regime` detector is kept; at a decided macro quadrant both run. **Describe-only** — never touches `reference_weights`. A `market_vs_macro_quadrant` divergence fires when the tape disagrees with the macro call. **§1 one sentence:** "Tape implies {implied_quadrant} ({confidence}; growth {implied_growth} / inflation {implied_inflation})." **§2:** `active` at `high`/`medium` confidence = legitimate de-risk override evidence; at `low`/`none` = not. Record the historical rationale when relevant: *the system cannot be later than the market if the market's own vote is one of its inputs — when tape and realized macro disagree at turns, the tape is early more often than wrong (2022 canonical).* See "Leading growth + market-implied quadrant" section below.
+- `dollar_proxy` — **daily USD proxy from FX pairs** when `DTWEXBGS` is >5d stale (#18 sub-item): `available`, `proxy_direction` (`stronger`/`weaker`/`flat`), `proxy_score` (weighted blend, not the official broad USD index), `components[]` (per-pair EUR/JPY/CNY: latest, delta_20d_pct, usd_direction, as_of), `as_of`. **When `dollar_proxy.available` is `true`, use `proxy_direction` wherever you would cite the DXY trend** — in regional rotation and the `dollar_vs_intl_tilt` divergence inputs. State the basis in one word: "(proxy)". When `available: false` and DTWEXBGS is stale, note the cadence gap and mark `dollar_vs_intl_tilt` inputs as potentially stale.
+- `pnl_decomposition` — **FIFO realized + current unrealized P&L since inception by bucket** (Task C, 2026-07-23): `inception_date`, `fill_count`, three buckets — `core_current` (CORE_ROSTER / role-pool members), `legacy_exits` (LEGACY_EXITS), `off_roster_flex` (everything else, e.g. MU) — each `{realized_usd, unrealized_usd, total_usd, pct_of_equity, contributors[{symbol, ...}]}`. Answers the inception-shortfall attribution question. **§1 scoreboard — one sentence only:** "P&L since inception: core +$X / legacy exits +$Y / off-roster +$Z." Never recompute these figures from `portfolio.positions` or `paper_account`. If `available: false`, skip the sentence. See "P&L decomposition" section below.
 - `sleeve_selection` — the **role member scorecard** (Task E): per scorecard role `{incumbent, scores, ineligible, challenger, lead, streak, switch_signal}`. **Describe-only** — a `switch_signal` NEVER authorizes a trade and NEVER changes `selected`; a human disposes via a config commit. Echo it; when a `switch_signal` is true, add ONE adjudication line (see "Sleeve selection" below). Never trade a non-selected pool member. **Only covers `selection: "scorecard"` roles — see `role_selection` for the `intl_leader` (rotation) role too.**
 - `role_selection` — the **static-selection echo** (session 2026-07-17, Task C), EVERY role's `{role_id, selected, selection}` — including `intl_leader` (`{..., leader_pick}` + a note), which `sleeve_selection` never covers. Check this before ever proposing to reduce a role's `selected` member below its floor: `selected` changes only via a committed config edit, never via runtime modulation (`leader_pick` null, `leader_pp` 0, a scorecard `switch_signal`). See "Static `selected` vs runtime `leader_pick`" below.
 - `intl_governance` — the **rotation/DXY-governed intl sleeve** (Task F): `{status, rotation_composite, leader_pick, leader_picks, broad_pp, leader_pp, sleeve_target_pp, intl_targets_pct, modifiers, de_rotation}`. **Already baked into `reference_weights`** (the intl roles' targets) — echo it; execute toward the intl targets; the `intl_leader` slot follows `leader_pick` as a within-role substitution. Do NOT re-size the intl tilt yourself.
@@ -1240,7 +1346,13 @@ Then the numbered sections, in this order:
       transition_watch" — and do **not** apply it a second time.
    3. **Adjudicate each `divergence`** (Section 6 has the ledger, but weigh them here): for
       each `active` divergence, state in one line how it bears on the gap and whether it
-      justifies an override. An `indeterminate` divergence is not evidence.
+      justifies an override. An `indeterminate` divergence is not evidence. The two new
+      divergences from #17/#18 follow the same doctrine: `leading_vs_lagging_growth`
+      `active` at `medium`/`full` confidence → eligible override evidence;
+      `market_vs_macro_quadrant` `active` at `high`/`medium` confidence → eligible
+      override evidence; the `market_implied_quadrant` vote table (from the input block)
+      gives the supporting per-signal breakdown to cite in the record. Both are
+      describe-only and never mandate a trade — they raise or lower the evidential bar.
    4. **For each out-of-band sleeve, the DEFAULT is to trade a tranche.** Compute:
       - `allowed_residual` = the |`magnitude_pp`| of your **accepted per-sleeve override**
         for that sleeve — 0 if you file none, and 0 if the validator rejects it; never
@@ -1274,6 +1386,8 @@ Then the numbered sections, in this order:
       appear as an executed action in the body. *(Exception: a literal-cash → SGOV swap
       funded from pre-trade cash is submittable via the cash-sleeve carve-out even above
       SGOV's per-name window — size it to the `literal_cash_target_pct` buffer.)*
+
+      **SGOV sweep sizing rule (Task D F6, 2026-07-23):** any cash→SGOV sweep MUST be sized on the **available surplus** = `literal_cash − literal_cash_target_pct − Σ(same-session proposed buy notionals)`. State the arithmetic in §9 prose (e.g. "literal_cash $X − target $Y − buy notionals $Z = surplus $W → N shares @ $P/share"). Never size the sweep before netting out same-session buys — the 07-22 sweep sized without netting left cash at 0.79% vs the 1.50% target. A deterministic post-model guard trims the sweep if post-all-trades literal cash would fall below `execution_config.literal_cash_floor_pct` (0.75% of equity); if that guard fires it will appear in the validation addendum.
 
       **Size-floored ≠ impossible (2026-07-21 XLV).** When the *tranche minimum*
       (`required_move_today`) floors to 0 shares / below `min_notional_usd`, that is a
@@ -1430,11 +1544,17 @@ Then the numbered sections, in this order:
    snapshot data for** and want to evaluate next run (a fresh congressional cluster,
    a theme tier-2/3 beneficiary, a sector-rotation idea). Data arrives the NEXT
    collector run; the name becomes actionable the run after that (2-day latency,
-   accepted). Do NOT waste slots on: names already in `flex_candidates`, held names,
-   any core role-pool member (CORE_ROSTER), non-re-enterable legacy exits
-   (AMZN/GOOGL/DBA/TIP/XSD), or malformed symbols — the collector silently drops
-   them. Persistence is **last-emission-only**: re-emit a name each run to keep it
+   accepted). **Before emitting any symbol, check the snapshot's own `flex_candidates`
+   list (any `source: "static"` or `"dynamic"` entry) — a name already present there
+   needs no slot** (data is already being collected). Do NOT waste slots on: held
+   names, any core role-pool member (CORE_ROSTER), non-re-enterable legacy exits
+   (AMZN/GOOGL/DBA/TIP/XSD), or malformed symbols — the collector silently drops them.
+   Earnings dates auto-populate for names within 14 days once the collector picks up
+   the name; do not waste a slot to request a catalyst the earnings calendar already
+   covers. Persistence is **last-emission-only**: re-emit a name each run to keep it
    in the funnel; a name you stop emitting falls out after one run.
+
+   **Price-quarantined flex candidates (Task E F7, 2026-07-23):** A flex candidate profile may carry `price_quarantined: true` and a `quarantine_reason` string when the collector's structural price-sanity guard fires (price >20% outside the 52-week range, or >50% intraday move without news corroboration). **A quarantined name fails G2 (data sufficiency) deterministically — do not nominate it.** You may comment on the quarantine reason, but you do not adjudicate it; the quarantine is structural.
 
 ### Part 2: Trades JSON (below the marker)
 

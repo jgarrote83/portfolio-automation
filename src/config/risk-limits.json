@@ -82,5 +82,14 @@
   "quadrant_performance": {
     "suspect_after_sessions": 10
   },
+
+  "literal_cash_floor_pct": 0.75,
+  "_literal_cash_floor_note": "Task D (F6, 2026-07-23): after any SGOV sweep, the analyzer's post-model guard trims the sweep notional so that literal cash does not fall below this fraction of equity. Prevents the 07-22 ratchet (sweep sized without netting same-day buy notionals, leaving cash at 0.79% vs the 1.50% target). D-G1 default 0.75%.",
+
+  "price_quarantine": {
+    "range_pct": 20.0,
+    "single_day_move_pct": 50.0
+  },
+  "_price_quarantine_note": "Task E (F7, 2026-07-23): flex-candidate prices are quarantined when outside the symbol's 52-week high/low range by > range_pct OR moved > single_day_move_pct vs the prior snapshot EOD without a corroborating news hit. Quarantined names carry price_quarantined: true + reason and are treated as failing G2 (data sufficiency) by the flex gatekeeper deterministically. E-G1 defaults: range_pct=20%, single_day_move_pct=50%.",
   "_quadrant_performance_note": "FOLLOWUPS #12 — regime-call accountability (collector _build_quadrant_performance, describe-only; never touches reference_weights). Per Q1-Q4 basket: 30/60/90d return + excess vs SPY (web-chart `_quadrant_series` semantics — base = first close INSIDE the window slice, so a late-joining roster member, e.g. the 2026-07-10 roster-revision additions, never retroactively distorts history), plus a favored_streak/streak_excess_pp/lagging_sessions hysteresis. suspect_after_sessions is how many consecutive AS-OF-THAT-SESSION-negative sessions a FAVORED bucket must run (recomputed each session, not just read off today) before the prompt's `suspect` gate fires — i.e. a bucket the book has been concentrating into that has lagged SPY every single session it's been checked for this many sessions running. This block only raises the evidentiary bar in the analyzer's PROSE for increasing a suspect bucket further; it is describe-only, same as divergences/transition_watch's Phase-2/3 role before Phase 4 wired them in."
 }

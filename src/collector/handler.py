@@ -71,6 +71,11 @@ _CASH_BUFFER_PCT = 1.5
 # Trailing window (trading days) for the flex borderline-quadrant tiebreak (D1,
 # 2026-07-21). A named constant, deliberately NOT an env knob in v1.
 _FLEX_TIEBREAK_WINDOW_D = 5
+# Extra tickers fetched for the leading-growth (Task A) and market-implied-quadrant
+# (Task B) builders. XLY is the cyclicals/discretionary signal vs XLP (already in
+# CORE_ROSTER via the staples role); CPER is the copper ETF used for the copper/gold
+# growth proxy. SPY is already in the rotation universe; GLD in CORE_ROSTER.
+_LEADING_GROWTH_EXTRAS = ("XLY", "CPER")
 
 _DIVERGENCE_CONFIG_FILE = _SRC / "config" / "divergence-config.json"
 _SPY_SMA_WINDOW = 200  # long-trend filter for the price-vs-regime divergence (spec §6)
@@ -81,6 +86,8 @@ _DIVERGENCE_DEFAULTS = {
     "credit_complacency": {"hy_oas_pct_rank_max": 10.0, "hy_oas_complacency_level_pct": 3.5},
     "price_vs_regime": {},
     "dollar_vs_intl_tilt": {"intl_heavy_pct": 20.0, "intl_light_pct": 8.0},
+    "leading_vs_lagging_growth": {"diffusion_threshold": 0.3},
+    "market_vs_macro_quadrant": {"basket_momentum_min_pct": 2.0, "vote_majority_threshold": 0.5},
     "staleness_days": 7,
 }
 
@@ -555,8 +562,76 @@ def _build_price_universe(tickers: list[str], flex_candidate_tickers: list[str])
     to synthesize the buy that would close its underweight.
     """
     return list(dict.fromkeys(
-        tickers + list(selected_core_members()) + _ETF_WATCHLIST + flex_candidate_tickers
+        tickers + list(selected_core_members()) + _ETF_WATCHLIST
+        + list(_LEADING_GROWTH_EXTRAS) + flex_candidate_tickers
     ))
+
+
+def _quarantine_flex_price(
+    profile: dict,
+    prices: dict,
+    prior_prices: dict,
+    company_news: dict,
+    cfg: dict,
+) -> tuple[bool, str]:
+    """Task E (F7): structural price-sanity guard for flex candidates.
+
+    Returns (quarantined: bool, reason: str).
+    Quarantine when:
+      1. Price is outside the symbol's 52-week high/low range by > range_pct, OR
+      2. Price moved > single_day_move_pct vs prior snapshot EOD without a corroborating
+         news hit in company_news for that symbol.
+
+    Never raises — returns (False, "") on any input error.
+    """
+    sym = (profile.get("symbol") or "").upper()
+    if not sym:
+        return False, ""
+    q_cfg = cfg.get("price_quarantine") or {}
+    range_pct = float(q_cfg.get("range_pct", 20.0))
+    move_pct = float(q_cfg.get("single_day_move_pct", 50.0))
+
+    price_now_raw = (prices.get(sym) or {}).get("c")
+    if price_now_raw is None:
+        return False, ""  # no price — can't quarantine on data we don't have
+    try:
+        price_now = float(price_now_raw)
+    except (TypeError, ValueError):
+        return False, ""
+
+    # --- Gate 1: 52-week range check ----------------------------------------
+    try:
+        high_52 = float(profile.get("yearHigh") or 0)
+        low_52 = float(profile.get("yearLow") or 0)
+    except (TypeError, ValueError):
+        high_52 = low_52 = 0.0
+    if high_52 > 0 and low_52 > 0:
+        # Allow a range_pct% overshoot beyond either bound before quarantining.
+        if price_now > high_52 * (1 + range_pct / 100.0):
+            return True, (f"price {price_now:.2f} is >{range_pct}% above 52-wk high {high_52:.2f} "
+                          f"— possible data error")
+        if price_now < low_52 * (1 - range_pct / 100.0):
+            return True, (f"price {price_now:.2f} is >{range_pct}% below 52-wk low {low_52:.2f} "
+                          f"— possible data error")
+
+    # --- Gate 2: large single-day move without news corroboration -----------
+    price_prev_raw = (prior_prices.get(sym) or {}).get("c")
+    if price_prev_raw is not None:
+        try:
+            price_prev = float(price_prev_raw)
+            if price_prev > 0:
+                delta_pct = abs((price_now / price_prev - 1.0) * 100.0)
+                if delta_pct > move_pct:
+                    # Check for corroborating news (any item in company_news for this symbol).
+                    news_items = company_news.get(sym) or []
+                    if not news_items:
+                        return True, (f"price moved {delta_pct:.1f}% vs prior snapshot "
+                                      f"({price_prev:.2f}→{price_now:.2f}) with no news corroboration "
+                                      f"— possible bad print")
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+
+    return False, ""
 
 
 def _filter_earnings_to_universe(rows: list[dict], universe) -> list[dict]:
@@ -1457,7 +1532,6 @@ def run() -> None:
     for p in flex_candidate_profiles:
         sym = (p.get("symbol") or "").upper()
         p["source"] = _flex_provenance.get(sym, "static")
-
     from_2w = (date.today() - timedelta(days=1)).isoformat()
     to_2w   = (date.today() + timedelta(days=14)).isoformat()
     from_30d = (date.today() - timedelta(days=30)).isoformat()
@@ -1575,6 +1649,13 @@ def run() -> None:
     # Energy axis: oil spot for the stagflation/Hormuz-shock read (~90d for baseline).
     for _oil_sid in ("DCOILWTICO", "DCOILBRENTEU"):
         macro_data[_oil_sid] = fred.get_series_latest(_oil_sid, limit=90)
+    # Leading-growth composite (#17): weekly series need ~26 obs for trend; monthly
+    # regional-Fed surveys and building permits need ~12 obs for 3m comparisons.
+    # All degrade gracefully (stale/absent → dropped, confidence reduced).
+    for _lg_weekly in ("WEI", "NFCI"):
+        macro_data[_lg_weekly] = fred.get_series_latest(_lg_weekly, limit=60)
+    for _lg_monthly in ("PERMIT", "NEWORDER", "NOCDFSA066MSFRBPHI", "GACDISA066MSFRBNY"):
+        macro_data[_lg_monthly] = fred.get_series_latest(_lg_monthly, limit=18)
     logger.info("FRED: %d series collected", sum(1 for v in macro_data.values() if v))
 
     # --- EOD prices (FMP batch-quote, single call) --------------------------
@@ -1582,6 +1663,19 @@ def run() -> None:
     prices = fmp.get_eod_prices(all_tickers)
     logger.info("FMP prices: %d/%d collected (universe: held+selected-core+watchlist+flex)",
                 len(prices), len(all_tickers))
+
+    # Task E (F7): load prior snapshot prices for the quarantine delta check.
+    _prior_prices: dict = {}
+    try:
+        d0 = date.fromisoformat(today)
+        for _back in range(1, 8):
+            _prior_snap = read_json_blob("daily-snapshots",
+                                         f"{(d0 - timedelta(days=_back)).isoformat()}.json")
+            if isinstance(_prior_snap, dict) and _prior_snap.get("prices"):
+                _prior_prices = _prior_snap["prices"]
+                break
+    except Exception:  # noqa: BLE001
+        logger.debug("Price quarantine: could not load prior snapshot prices (non-fatal)")
 
     # --- Regional rotation pre-compute --------------------------------------
     regional_rotation = _build_regional_rotation(fmp, macro_data)
@@ -1604,6 +1698,25 @@ def run() -> None:
 
     logger.info("Finnhub: %d market news, %d company news items",
                 len(market_news), sum(len(v) for v in company_news.values()))
+
+    # --- Task E (F7): price-sanity quarantine for flex candidates -----------
+    # Apply after company_news is available (needed for news-corroboration gate).
+    _quarantine_cfg = _load_risk_limits()
+    _quarantined_count = 0
+    for _fcp in flex_candidate_profiles:
+        _quar, _quar_reason = _quarantine_flex_price(
+            _fcp, prices, _prior_prices, company_news, _quarantine_cfg)
+        if _quar:
+            _fcp["price_quarantined"] = True
+            _fcp["quarantine_reason"] = _quar_reason
+            _quarantined_count += 1
+            logger.warning(
+                "Flex candidate %s QUARANTINED: %s",
+                _fcp.get("symbol"), _quar_reason,
+            )
+    if _quarantined_count:
+        logger.info("Price quarantine: %d/%d flex candidates quarantined",
+                    _quarantined_count, len(flex_candidate_profiles))
 
     # --- Market shock detector (short-horizon moves + news keyword scan) ----
     bond_signals = _build_bond_signals(macro_data)
@@ -1668,6 +1781,63 @@ def run() -> None:
     _binding_quad = {"active_quadrant": active_quadrant(
         growth_axis.get("direction"), inflation_axis.get("direction")) or None}
 
+    # --- Task A (#17): Leading-growth composite (FOLLOWUPS #17) ---------------
+    # Diffusion score from FRED weekly/monthly leading indicators + market-derived
+    # signals (copper/gold, XLY/XLP, HY OAS direction). Describe-only. Feeds the
+    # new leading_vs_lagging_growth divergence and generalises transition_watch.
+    # Fetch historical closes for market-derived ratio signals (XLY, CPER, GLD, XLP)
+    # — 4 extra FMP calls; within the 250/day budget (see PR body).
+    leading_growth: dict = {"available": False}
+    try:
+        _lg_close_cache: dict[str, dict[str, float]] = {}
+        for _lg_sym in ("XLY", "CPER", "GLD", "XLP"):
+            try:
+                _lg_close_cache[_lg_sym] = _close_by_date(fmp, _lg_sym)
+            except Exception:  # noqa: BLE001
+                logger.debug("Leading growth: could not fetch %s history (non-fatal)", _lg_sym)
+        leading_growth = _build_leading_growth(macro_data, prices, bond_signals, _lg_close_cache)
+        logger.info(
+            "Leading growth: direction=%s score=%s confidence=%s available=%d/%d",
+            leading_growth.get("direction"), leading_growth.get("score"),
+            leading_growth.get("confidence"),
+            leading_growth.get("available_signals", 0), leading_growth.get("total_signals", 0),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Leading growth build failed (non-fatal)")
+
+    # --- Task B (#18): market_implied_quadrant --------------------------------
+    # Built BEFORE divergences — loads the perf series from blob directly so it
+    # doesn't depend on the in-memory `series` (which is built post-reference_weights).
+    # Prices injected for the copper/gold and XLY/XLP votes.
+    market_implied_quadrant: dict = {"available": False}
+    try:
+        market_implied_quadrant = _build_market_implied_quadrant(
+            [], macro_data, bond_signals, regional_rotation, today, prices=prices
+        )
+        logger.info(
+            "Market implied quadrant: implied=%s confidence=%s growth=%s inflation=%s",
+            market_implied_quadrant.get("implied_quadrant"),
+            market_implied_quadrant.get("confidence"),
+            market_implied_quadrant.get("implied_growth"),
+            market_implied_quadrant.get("implied_inflation"),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Market implied quadrant build failed (non-fatal)")
+
+    # --- Task B (#18) sub-item: daily dollar proxy (when DTWEXBGS stale >5d) --
+    dxy_date = (regional_rotation or {}).get("dxy_latest_date")
+    dxy_stale = _days_stale(dxy_date, today)
+    dollar_proxy: dict = {"available": False}
+    try:
+        if dxy_stale is not None and dxy_stale > 5:
+            dollar_proxy = _daily_dollar_proxy(macro_data, today)
+            logger.info(
+                "Dollar proxy (DTWEXBGS %dd stale): available=%s direction=%s",
+                dxy_stale, dollar_proxy.get("available"), dollar_proxy.get("proxy_direction"),
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Dollar proxy build failed (non-fatal)")
+
     # --- Divergences (Phase 2: DETECT tensions, don't resolve) ---------------
     # Descriptive precompute pointing the analyzer's judgment at high-value zones; the LLM
     # adjudicates them (Phase 4). The SPY 200-day SMA (#3's filter) is fetched here and
@@ -1682,6 +1852,8 @@ def run() -> None:
         divergences = _build_divergences(
             paper_account, growth_axis, inflation_axis, bond_signals, regional_rotation,
             _binding_quad, market_shock, spy_sma, today, _load_divergence_config(),
+            leading_growth=leading_growth,
+            market_implied_quadrant=market_implied_quadrant,
         )
         _active = [d["id"] for d in divergences if d.get("status") == "active"]
         logger.info("Divergences: %d total, active=%s", len(divergences), _active)
@@ -1960,6 +2132,26 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Track record build failed (non-fatal)")
 
+    # --- Task C: pnl_decomposition (inception-shortfall analysis) ------------
+    # Non-fatal. FIFO realized + current unrealized P&L split by bucket. Answers
+    # the "where does the vs-SPY wedge sit" question without re-deriving it freehand.
+    pnl_decomposition: dict = {"available": False}
+    _inception_date = "2026-05-26"  # account inception date (CLAUDE.md)
+    try:
+        if ak and asec and paper_account.get("available"):
+            _alp_pnl = AlpacaClient(api_key=ak, api_secret=asec)
+            pnl_decomposition = _build_pnl_decomposition(
+                _alp_pnl, paper_account, _inception_date)
+            logger.info(
+                "P&L decomposition: core_current=%s legacy_exits=%s off_roster_flex=%s fills=%s",
+                (pnl_decomposition.get("core_current") or {}).get("total_usd"),
+                (pnl_decomposition.get("legacy_exits") or {}).get("total_usd"),
+                (pnl_decomposition.get("off_roster_flex") or {}).get("total_usd"),
+                pnl_decomposition.get("fill_count"),
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("P&L decomposition build failed (non-fatal)")
+
     # --- Brief Phase 5: override_record (judgment loop, sibling of track_record) --
     # Non-fatal. Reads OverrideHistory (stamped by _stamp_override_outcomes on
     # prior runs); compact aggregates only.
@@ -2090,6 +2282,10 @@ def run() -> None:
         "execution_config": execution_config,
         "series_deltas": series_deltas,
         "freshness": freshness,
+        "leading_growth": leading_growth,
+        "market_implied_quadrant": market_implied_quadrant,
+        "dollar_proxy": dollar_proxy,
+        "pnl_decomposition": pnl_decomposition,
         "news": {
             "market": market_news[:50],
             "forex": forex_news[:20],
@@ -3995,108 +4191,174 @@ def _project_quadrant(realized_quad: str, leading_inflation_dir: str, growth_dir
     return ""
 
 
+def _project_quadrant_growth(leading_growth_dir: str, realized_inflation_dir: str) -> str:
+    """The quadrant the LEADING growth signal projects, holding the inflation axis fixed.
+
+    Growth is the only axis the leading-growth composite speaks to, so we move only along
+    the growth dimension of the grid, never the inflation one:
+      inflation falling: growth rising → Q1, growth falling → Q4
+      inflation rising:  growth rising → Q2, growth falling → Q3
+    Returns "" if the inflation axis is not pinned.
+    """
+    g = (leading_growth_dir or "").lower()
+    i = (realized_inflation_dir or "").lower()
+    if i == "falling":
+        return "Q1" if g == "rising" else ("Q4" if g == "falling" else "")
+    if i == "rising":
+        return "Q2" if g == "rising" else ("Q3" if g == "falling" else "")
+    return ""
+
+
 def _build_transition_watch(
     divergences: list[dict],
     growth_axis: dict,
     inflation_axis: dict,
     cfg: dict,
 ) -> dict:
-    """Deterministic PRE-STAGING signal: when leading inflation disagrees with realized,
-    project the quadrant it points to and emit a bounded lean for reference_weights —
-    WITHOUT moving the binding active_quadrant / regime_gate / realized inflation axis
-    (strategy-spec §6). Realized inflation is laggy, so this catches the turn early.
+    """Deterministic PRE-STAGING signal: when leading inflation OR leading growth disagrees
+    with realized, project the quadrant it points to and emit a bounded lean for
+    reference_weights — WITHOUT moving the binding active_quadrant / regime_gate / realized
+    axes (strategy-spec §6). Both sides use the same asymmetry: de-risk stages readily;
+    re-risk needs a higher bar.
 
-    REUSE not re-detect (§5/DRY): the trigger is the Phase-2 `leading_vs_lagging_inflation`
-    divergence — consumed here, never re-derived. If that divergence is not `active` (or is
-    `indeterminate` because the leading data is stale/absent), no transition is staged.
+    GENERALIZED (FOLLOWUPS #17, 2026-07-23): now consumes BOTH
+    `leading_vs_lagging_inflation` (original) AND `leading_vs_lagging_growth` (new)
+    divergences symmetrically. The inflation side projects by flipping the inflation axis
+    while holding growth fixed; the growth side projects by flipping the growth axis while
+    holding inflation fixed. When both sides fire, the more defensive projection wins
+    (de-risk bias, spec §6 safety).
 
-    ASYMMETRY (§6 safety): a de-risk transition (projecting a MORE defensive quadrant)
-    stages at the full de-risk fraction; a re-risk transition (MORE offensive) requires a
-    higher confirmation bar (>= re_risk_min_confirmations leading signals agreeing — both
-    breakevens AND oil, not one) and a smaller fraction; below the bar it does not activate.
+    REUSE not re-detect (§5/DRY): triggers are Phase-2 divergences — consumed here,
+    never re-derived.
     """
     tw_cfg = cfg.get("transition_watch") or _RISK_LIMITS_DEFAULTS["transition_watch"]
-    div = next((d for d in (divergences or []) if d.get("id") == "leading_vs_lagging_inflation"), None)
-
-    base = {"active": False, "projected_quadrant": None, "direction": None,
-            "staged_fraction": 0.0, "basis": []}
-
-    # Trigger must be an ACTIVE Phase-2 divergence with a concrete leading direction.
-    if div is None:
-        return {**base, "status": "indeterminate"}
-    if div.get("status") != "active":
-        # indeterminate divergence (stale/absent leading data) OR aligned (no tension).
-        return {**base, "status": div.get("status", "indeterminate")}
-
-    leading_dir = div.get("direction_implied")  # "rising" | "falling" (the leading axis)
     g = (growth_axis or {}).get("direction")
     realized_i = (inflation_axis or {}).get("direction")
 
-    # The leading signal speaks only to inflation — the growth axis must be pinned to
-    # place the projection on the grid. (Growth flat/unknown → can't project.)
-    projected = _project_quadrant("", leading_dir, g)
-    if not projected:
+    base = {"active": False, "projected_quadrant": None, "direction": None,
+            "staged_fraction": 0.0, "basis": [], "sides": []}
+
+    def _evaluate_inflation_side(div: dict) -> dict | None:
+        """Returns a side-result dict or None if not activatable."""
+        if div.get("status") != "active":
+            return None
+        leading_dir = div.get("direction_implied")
+        projected = _project_quadrant("", leading_dir, g)
+        if not projected:
+            return None
+        realized_quad = active_quadrant(g, realized_i)
+        if realized_quad:
+            r_real = float(_QUADRANT_DEFENSIVENESS.get(realized_quad, 0))
+        else:
+            bucket = favored_bucket(g, realized_i)
+            ranks = [_QUADRANT_DEFENSIVENESS[q] for q in bucket if q in _QUADRANT_DEFENSIVENESS]
+            if not ranks:
+                return None
+            r_real = sum(ranks) / len(ranks)
+        r_proj = float(_QUADRANT_DEFENSIVENESS.get(projected, 0))
+        if r_proj == r_real:
+            return None
+        direction = "de_risk" if r_proj > r_real else "re_risk"
+        basis = [f"{s['name']}={s['value']}" for s in div.get("signals", [])
+                 if s.get("name") in ("be_5y.delta_20d_bp", "inflation_axis.oil_wti_20d_pct")
+                 and s.get("value") is not None]
+        if direction == "re_risk":
+            div_cfg_thr = _load_divergence_config().get("leading_vs_lagging_inflation", {})
+            thr = float(div_cfg_thr.get("breakeven_delta_20d_bp", 15.0))
+            oil_thr = float(div_cfg_thr.get("oil_20d_pct", 10.0))
+            be = next((s["value"] for s in div.get("signals", []) if s.get("name") == "be_5y.delta_20d_bp"), None)
+            oil = next((s["value"] for s in div.get("signals", []) if s.get("name") == "inflation_axis.oil_wti_20d_pct"), None)
+            want_up = leading_dir == "rising"
+            confs = sum([
+                1 if (be is not None and ((be >= thr) if want_up else (be <= -thr))) else 0,
+                1 if (oil is not None and ((oil >= oil_thr) if want_up else (oil <= -oil_thr))) else 0,
+            ])
+            if confs < int(tw_cfg.get("re_risk_min_confirmations", 2)):
+                return None  # below confirmation bar
+            frac = float(tw_cfg.get("staged_fraction_re_risk", 0.15))
+        else:
+            frac = float(tw_cfg.get("staged_fraction_de_risk", 0.30))
+        return {"side": "inflation", "projected_quadrant": projected, "direction": direction,
+                "staged_fraction": frac, "basis": basis,
+                "defensiveness": float(_QUADRANT_DEFENSIVENESS.get(projected, 0))}
+
+    def _evaluate_growth_side(div: dict) -> dict | None:
+        """Returns a side-result dict or None if not activatable."""
+        if div.get("status") != "active":
+            return None
+        leading_dir = div.get("direction_implied")  # "rising"/"falling"
+        projected = _project_quadrant_growth(leading_dir, realized_i)
+        if not projected:
+            return None
+        realized_quad = active_quadrant(g, realized_i)
+        if realized_quad:
+            r_real = float(_QUADRANT_DEFENSIVENESS.get(realized_quad, 0))
+        else:
+            bucket = favored_bucket(g, realized_i)
+            ranks = [_QUADRANT_DEFENSIVENESS[q] for q in bucket if q in _QUADRANT_DEFENSIVENESS]
+            if not ranks:
+                return None
+            r_real = sum(ranks) / len(ranks)
+        r_proj = float(_QUADRANT_DEFENSIVENESS.get(projected, 0))
+        if r_proj == r_real:
+            return None
+        direction = "de_risk" if r_proj > r_real else "re_risk"
+        basis = [f"{s['name']}={s['value']}" for s in div.get("signals", [])
+                 if s.get("name") in ("leading_growth.direction", "leading_growth.score")
+                 and s.get("value") is not None]
+        if direction == "re_risk":
+            # Growth re-risk: the composite must have high confidence (medium+).
+            lg_conf = next((s["value"] for s in div.get("signals", [])
+                            if s.get("name") == "leading_growth.confidence"), None)
+            if lg_conf not in ("full", "medium"):
+                return None
+            frac = float(tw_cfg.get("staged_fraction_re_risk", 0.15))
+        else:
+            frac = float(tw_cfg.get("staged_fraction_de_risk", 0.30))
+        return {"side": "growth", "projected_quadrant": projected, "direction": direction,
+                "staged_fraction": frac, "basis": basis,
+                "defensiveness": float(_QUADRANT_DEFENSIVENESS.get(projected, 0))}
+
+    # Evaluate both sides.
+    infl_div = next((d for d in (divergences or []) if d.get("id") == "leading_vs_lagging_inflation"), None)
+    grow_div = next((d for d in (divergences or []) if d.get("id") == "leading_vs_lagging_growth"), None)
+
+    infl_result = _evaluate_inflation_side(infl_div) if infl_div else None
+    grow_result = _evaluate_growth_side(grow_div) if grow_div else None
+
+    active_sides = [r for r in (infl_result, grow_result) if r is not None]
+    if not active_sides:
+        # No side could be staged (below confirmation bar, or unprojectable).
+        # Always return indeterminate — the divergence's own "active" status must
+        # not propagate here; the transition_watch is inactive when nothing stages.
         return {**base, "status": "indeterminate"}
 
-    # Realized baseline defensiveness rank. When realized inflation is decided we compare
-    # against that quadrant; when it is FLAT/borderline (the primary transition case — the
-    # leading signal is resolving which side of the border) we compare against the MIDPOINT
-    # of the favored bucket, so the leading direction still yields a de/re-risk call.
+    # When both sides fire, the more defensive projected quadrant wins (de-risk bias).
+    if len(active_sides) == 1:
+        best = active_sides[0]
+    else:
+        # Prefer the de-risk side; within same direction, the more defensive quadrant.
+        de_risk_sides = [r for r in active_sides if r["direction"] == "de_risk"]
+        if de_risk_sides:
+            best = max(de_risk_sides, key=lambda r: r["defensiveness"])
+        else:
+            best = min(active_sides, key=lambda r: r["defensiveness"])
+
     realized_quad = active_quadrant(g, realized_i)
-    if realized_quad:
-        r_real = float(_QUADRANT_DEFENSIVENESS.get(realized_quad, 0))
-    else:
-        bucket = favored_bucket(g, realized_i)
-        ranks = [_QUADRANT_DEFENSIVENESS[q] for q in bucket if q in _QUADRANT_DEFENSIVENESS]
-        if not ranks:
-            return {**base, "status": "indeterminate"}
-        r_real = sum(ranks) / len(ranks)
-
-    r_proj = float(_QUADRANT_DEFENSIVENESS.get(projected, 0))
-    if r_proj == r_real:
-        # No directional move relative to the realized baseline.
-        return {**base, "projected_quadrant": projected, "status": "indeterminate"}
-    direction = "de_risk" if r_proj > r_real else "re_risk"
-
-    # Echo the leading signals that drove it (from the divergence, not re-derived).
-    basis = [f"{s['name']}={s['value']}" for s in div.get("signals", [])
-             if s.get("name") in ("be_5y.delta_20d_bp", "inflation_axis.oil_wti_20d_pct")
-             and s.get("value") is not None]
-
-    if direction == "re_risk":
-        # Higher bar: require >= N leading confirmations (both breakevens AND oil agreeing).
-        thr = float((div_cfg_thr := _load_divergence_config().get("leading_vs_lagging_inflation", {}))
-                    .get("breakeven_delta_20d_bp", 15.0))
-        oil_thr = float(div_cfg_thr.get("oil_20d_pct", 10.0))
-        be = next((s["value"] for s in div.get("signals", []) if s.get("name") == "be_5y.delta_20d_bp"), None)
-        oil = next((s["value"] for s in div.get("signals", []) if s.get("name") == "inflation_axis.oil_wti_20d_pct"), None)
-        want_up = leading_dir == "rising"
-        confs = 0
-        if be is not None and ((be >= thr) if want_up else (be <= -thr)):
-            confs += 1
-        if oil is not None and ((oil >= oil_thr) if want_up else (oil <= -oil_thr)):
-            confs += 1
-        if confs < int(tw_cfg.get("re_risk_min_confirmations", 2)):
-            return {**base, "projected_quadrant": projected, "direction": "re_risk",
-                    "basis": basis, "status": "indeterminate",
-                    "note": f"re-risk below confirmation bar ({confs} < "
-                            f"{tw_cfg.get('re_risk_min_confirmations', 2)}) — not staged"}
-        frac = float(tw_cfg.get("staged_fraction_re_risk", 0.15))
-    else:
-        frac = float(tw_cfg.get("staged_fraction_de_risk", 0.30))
-
     return {
         "active": True,
-        "projected_quadrant": projected,
+        "projected_quadrant": best["projected_quadrant"],
         "realized_quadrant": realized_quad,
-        "direction": direction,
-        "staged_fraction": frac,
-        "basis": basis,
+        "direction": best["direction"],
+        "staged_fraction": best["staged_fraction"],
+        "basis": best["basis"],
+        "sides": active_sides,
         "status": "active",
         "rule": (
             "Bounded partial lean toward projected_quadrant staged into reference_weights "
-            "as a convex blend; binding active_quadrant / regime_gate / realized inflation "
-            "axis are UNCHANGED. Reuses the Phase-2 leading_vs_lagging_inflation divergence."
+            "as a convex blend; binding active_quadrant / regime_gate / realized axes "
+            "UNCHANGED. Consumes leading_vs_lagging_inflation AND leading_vs_lagging_growth "
+            "divergences symmetrically (FOLLOWUPS #17 generalisation)."
         ),
     }
 
@@ -4951,6 +5213,771 @@ def _days_stale(as_of: str | None, today: str) -> int | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Task A (FOLLOWUPS #17): Leading-growth composite
+# ---------------------------------------------------------------------------
+# Diffusion score in [-1, +1] from FRED leading-growth series + market-derived
+# signals (copper/gold, XLY/XLP, HY OAS direction). Describe-only; feeds the
+# new `leading_vs_lagging_growth` divergence and generalises _build_transition_watch
+# to consume it symmetrically with the inflation side. The composite NEVER flips
+# the growth axis itself — it feeds divergence/transition machinery; LLM adjudicates.
+# ---------------------------------------------------------------------------
+
+def _series_direction(vals: list[float], window: int = 4) -> str | None:
+    """'rising'/'falling'/'flat' from a short trailing window of newest-first values.
+
+    Uses the simple slope (last-first) over a rolling window; 'flat' when the
+    absolute move is < 20% of the standard deviation across the window, or when
+    there are fewer than 2 values. Returns None when insufficient data.
+    """
+    recent = [v for v in vals[:window] if v is not None]
+    if len(recent) < 2:
+        return None
+    first, last = recent[-1], recent[0]   # oldest→newest in the slice
+    diff = last - first
+    mean = sum(recent) / len(recent)
+    std = (sum((x - mean) ** 2 for x in recent) / len(recent)) ** 0.5
+    if std == 0:
+        return "flat" if diff == 0 else ("rising" if diff > 0 else "falling")
+    if abs(diff) < 0.2 * std:
+        return "flat"
+    return "rising" if diff > 0 else "falling"
+
+
+def _price_return_pct(prices: dict, symbol: str, window_td: int) -> float | None:
+    """Trailing N-trading-day return (%) for `symbol` from the prices dict.
+
+    `prices` is {symbol: {date: close}} or the flat FMP EOD dict
+    {symbol: {"c": close, ...}}. Handles both shapes. Returns None when
+    insufficient history or symbol absent.
+    """
+    sym_data = prices.get(symbol.upper()) or prices.get(symbol)
+    if not sym_data:
+        return None
+    # Historical series shape: {date: close_float} (from _close_by_date).
+    # Flat EOD shape: {"c": float, ...} — only the current day; not usable for
+    # a window return. Detect by checking for date-keyed entries.
+    if isinstance(sym_data, dict):
+        date_keys = [k for k in sym_data if isinstance(k, str) and len(k) == 10 and k[4] == '-']
+        if date_keys:
+            sorted_dates = sorted(date_keys, reverse=True)
+            if len(sorted_dates) <= window_td:
+                return None
+            p_now = sym_data[sorted_dates[0]]
+            p_then = sym_data[sorted_dates[window_td]]
+            try:
+                return (float(p_now) / float(p_then) - 1.0) * 100.0
+            except (TypeError, ValueError, ZeroDivisionError):
+                return None
+    return None
+
+
+def _build_leading_growth(
+    macro_data: dict,
+    prices: dict,
+    bond_signals: dict,
+    close_cache: dict[str, dict[str, float]],
+) -> dict:
+    """Deterministic leading-growth composite (FOLLOWUPS #17).
+
+    Aggregates FRED high-frequency leading indicators + market-derived signals into
+    a diffusion score in [-1, +1]. Score > 0 ⟹ majority of signals improving
+    (growth accelerating); < 0 ⟹ majority deteriorating; 0 ⟹ mixed.
+
+    Signal set:
+      FRED:   WEI (weekly GDP tracker), NFCI (inverted — tightening = negative),
+              PERMIT (building permits), NEWORDER (core capex orders),
+              NOCDFSA066MSFRBPHI (Philly Fed new orders),
+              GACDISA066MSFRBNY (Empire State general activity)
+      Market: CPER/GLD ratio 20d trend (copper/gold growth proxy),
+              XLY/XLP ratio 20d trend (cyclicals vs defensives),
+              HY OAS direction (inverted: tightening = positive for growth)
+
+    A stale or absent input is DROPPED from the count (never fabricates a vote).
+    Confidence degrades with available-input count: full (>=7), medium (4-6), low (2-3).
+    """
+    def _newest_vals(sid: str, n: int = 6) -> list[float]:
+        rows = macro_data.get(sid) or []
+        vals: list[float] = []
+        for r in rows:
+            v = r.get("value")
+            if v in (None, ".", ""):
+                continue
+            try:
+                vals.append(float(v))
+            except (TypeError, ValueError):
+                continue
+            if len(vals) >= n:
+                break
+        return vals   # newest-first
+
+    def _as_of(sid: str) -> str | None:
+        rows = macro_data.get(sid) or []
+        for r in rows:
+            if r.get("value") not in (None, ".", ""):
+                return r.get("date") or r.get("asof")
+        return None
+
+    signals: list[dict] = []
+    votes_up = votes_down = 0
+
+    # --- WEI (weekly economic index) ----------------------------------------
+    wei = _newest_vals("WEI", 6)
+    wei_dir = _series_direction(wei, window=4)
+    signals.append({"name": "WEI", "direction": wei_dir, "as_of": _as_of("WEI"),
+                    "latest": round(wei[0], 3) if wei else None})
+    if wei_dir == "rising":
+        votes_up += 1
+    elif wei_dir == "falling":
+        votes_down += 1
+
+    # --- NFCI (financial conditions; INVERTED — tightening hurts growth) ----
+    nfci = _newest_vals("NFCI", 6)
+    nfci_dir_raw = _series_direction(nfci, window=4)
+    # NFCI rising = tightening = bad for growth → invert
+    nfci_dir = ("falling" if nfci_dir_raw == "rising"
+                else ("rising" if nfci_dir_raw == "falling" else nfci_dir_raw))
+    signals.append({"name": "NFCI_inv", "direction": nfci_dir, "as_of": _as_of("NFCI"),
+                    "latest": round(nfci[0], 3) if nfci else None})
+    if nfci_dir == "rising":
+        votes_up += 1
+    elif nfci_dir == "falling":
+        votes_down += 1
+
+    # --- PERMIT (building permits, monthly) ---------------------------------
+    permit = _newest_vals("PERMIT", 6)
+    permit_dir = _series_direction(permit, window=4)
+    signals.append({"name": "PERMIT", "direction": permit_dir, "as_of": _as_of("PERMIT"),
+                    "latest": round(permit[0], 1) if permit else None})
+    if permit_dir == "rising":
+        votes_up += 1
+    elif permit_dir == "falling":
+        votes_down += 1
+
+    # --- NEWORDER (core capex orders, monthly) ------------------------------
+    neworder = _newest_vals("NEWORDER", 6)
+    neworder_dir = _series_direction(neworder, window=4)
+    signals.append({"name": "NEWORDER", "direction": neworder_dir, "as_of": _as_of("NEWORDER"),
+                    "latest": round(neworder[0], 1) if neworder else None})
+    if neworder_dir == "rising":
+        votes_up += 1
+    elif neworder_dir == "falling":
+        votes_down += 1
+
+    # --- Philly Fed new orders ---------------------------------------------
+    phi = _newest_vals("NOCDFSA066MSFRBPHI", 6)
+    phi_dir = _series_direction(phi, window=3)
+    signals.append({"name": "PhillyFed_neworders", "direction": phi_dir, "as_of": _as_of("NOCDFSA066MSFRBPHI"),
+                    "latest": round(phi[0], 1) if phi else None})
+    if phi_dir == "rising":
+        votes_up += 1
+    elif phi_dir == "falling":
+        votes_down += 1
+
+    # --- Empire State general activity -------------------------------------
+    emp = _newest_vals("GACDISA066MSFRBNY", 6)
+    emp_dir = _series_direction(emp, window=3)
+    signals.append({"name": "EmpireState", "direction": emp_dir, "as_of": _as_of("GACDISA066MSFRBNY"),
+                    "latest": round(emp[0], 1) if emp else None})
+    if emp_dir == "rising":
+        votes_up += 1
+    elif emp_dir == "falling":
+        votes_down += 1
+
+    # --- CPER/GLD ratio (copper/gold growth proxy) -- market-derived --------
+    # Uses the closes_cache so we don't re-fetch (same data as sleeve scorecard).
+    cper_map = close_cache.get("CPER") or {}
+    gld_map = close_cache.get("GLD") or {}
+    # Compute ratio at each common date then 20d return on the ratio.
+    common_dates = sorted(set(cper_map) & set(gld_map), reverse=True)
+    cg_dir: str | None = None
+    cg_latest: float | None = None
+    if len(common_dates) > 20:
+        try:
+            r_now = cper_map[common_dates[0]] / gld_map[common_dates[0]]
+            r_then = cper_map[common_dates[20]] / gld_map[common_dates[20]]
+            cg_20d = (r_now / r_then - 1.0) * 100.0
+            cg_latest = round(cg_20d, 2)
+            cg_dir = "rising" if cg_20d > 2.0 else ("falling" if cg_20d < -2.0 else "flat")
+        except (ZeroDivisionError, TypeError):
+            pass
+    signals.append({"name": "CPER_GLD_20d", "direction": cg_dir, "as_of": common_dates[0] if common_dates else None,
+                    "latest": cg_latest})
+    if cg_dir == "rising":
+        votes_up += 1
+    elif cg_dir == "falling":
+        votes_down += 1
+
+    # --- XLY/XLP ratio (cyclicals vs defensives, 20d) ----------------------
+    xly_map = close_cache.get("XLY") or {}
+    xlp_map = close_cache.get("XLP") or {}
+    common_xl = sorted(set(xly_map) & set(xlp_map), reverse=True)
+    xl_dir: str | None = None
+    xl_latest: float | None = None
+    if len(common_xl) > 20:
+        try:
+            r_now = xly_map[common_xl[0]] / xlp_map[common_xl[0]]
+            r_then = xly_map[common_xl[20]] / xlp_map[common_xl[20]]
+            xl_20d = (r_now / r_then - 1.0) * 100.0
+            xl_latest = round(xl_20d, 2)
+            xl_dir = "rising" if xl_20d > 2.0 else ("falling" if xl_20d < -2.0 else "flat")
+        except (ZeroDivisionError, TypeError):
+            pass
+    signals.append({"name": "XLY_XLP_20d", "direction": xl_dir, "as_of": common_xl[0] if common_xl else None,
+                    "latest": xl_latest})
+    if xl_dir == "rising":
+        votes_up += 1
+    elif xl_dir == "falling":
+        votes_down += 1
+
+    # --- HY OAS direction (inverted — tightening = positive for growth) -----
+    hy_dir_raw = None
+    credit = (bond_signals or {}).get("credit") or {}
+    hy = credit.get("hy_oas") or {}
+    hy_trend = hy.get("trend_4w")  # "tightening"/"widening"/"flat" from bond_signals
+    if hy_trend == "tightening":
+        hy_dir_raw = "rising"   # credit improving = growth positive
+    elif hy_trend == "widening":
+        hy_dir_raw = "falling"  # credit deteriorating = growth negative
+    elif hy_trend == "flat":
+        hy_dir_raw = "flat"
+    signals.append({"name": "HY_OAS_inv", "direction": hy_dir_raw,
+                    "as_of": None, "latest": hy.get("latest")})
+    if hy_dir_raw == "rising":
+        votes_up += 1
+    elif hy_dir_raw == "falling":
+        votes_down += 1
+
+    # --- Aggregate into a diffusion score ----------------------------------
+    total_signals = len(signals)
+    voted = votes_up + votes_down
+    if total_signals == 0 or voted == 0:
+        score = 0.0
+    else:
+        score = round((votes_up - votes_down) / total_signals, 3)
+
+    available = sum(1 for s in signals if s["direction"] is not None)
+    if available >= 7:
+        confidence = "full"
+    elif available >= 4:
+        confidence = "medium"
+    elif available >= 2:
+        confidence = "low"
+    else:
+        confidence = "none"
+
+    # Direction of the composite (for the divergence detector).
+    cfg_thr = (_load_divergence_config().get("leading_vs_lagging_growth") or {}).get(
+        "diffusion_threshold", 0.3)
+    if score > float(cfg_thr):
+        composite_dir = "rising"
+    elif score < -float(cfg_thr):
+        composite_dir = "falling"
+    else:
+        composite_dir = "flat"
+
+    return {
+        "available": available >= 2,
+        "score": score,
+        "direction": composite_dir,
+        "confidence": confidence,
+        "votes_up": votes_up,
+        "votes_down": votes_down,
+        "available_signals": available,
+        "total_signals": total_signals,
+        "signals": signals,
+        "note": (
+            "Leading-growth composite (FOLLOWUPS #17). Describe-only — never flips the "
+            "growth axis directly; feeds leading_vs_lagging_growth divergence and "
+            "_build_transition_watch growth side. LLM adjudicates."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Task B (FOLLOWUPS #18): Market-implied quadrant + daily dollar proxy
+# ---------------------------------------------------------------------------
+
+def _daily_dollar_proxy(macro_data: dict, today: str) -> dict:
+    """Trade-weighted USD proxy from FX pairs when DTWEXBGS is stale (>5d).
+
+    Blend: EUR 57% + JPY 28% + CNY 15% (approximate trade weights for the major
+    G3 currencies in the broad USD index). A rising blend → stronger USD.
+    Returns {available, proxy_direction, components, as_of, basis} or
+    {available: False} when the pairs themselves are stale.
+    """
+    stale_days = 5
+    rows_eu = macro_data.get("DEXUSEU") or []   # USD/EUR (lower = stronger USD)
+    rows_jp = macro_data.get("DEXJPUS") or []   # JPY/USD (higher = stronger USD)
+    rows_cn = macro_data.get("DEXCHUS") or []   # CNY/USD (higher = stronger USD)
+
+    def _latest_val_date(rows: list) -> tuple[float | None, str | None]:
+        for r in rows:
+            v, d = r.get("value"), r.get("date")
+            if v not in (None, ".", "") and d:
+                try:
+                    return float(v), str(d)[:10]
+                except (TypeError, ValueError):
+                    continue
+        return None, None
+
+    eu_val, eu_date = _latest_val_date(rows_eu)
+    jp_val, jp_date = _latest_val_date(rows_jp)
+    cn_val, cn_date = _latest_val_date(rows_cn)
+
+    ages = [_days_stale(d, today) for d in (eu_date, jp_date, cn_date) if d]
+    if not ages or all(a is None or a > stale_days for a in ages):
+        return {"available": False, "basis": "all_fx_pairs_stale"}
+
+    # Previous values (20d back for a trend read).
+    def _val_20d_ago(rows: list) -> float | None:
+        non_null = [r for r in rows if r.get("value") not in (None, ".", "")]
+        if len(non_null) > 20:
+            try:
+                return float(non_null[20]["value"])
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    eu_p20, jp_p20, cn_p20 = _val_20d_ago(rows_eu), _val_20d_ago(rows_jp), _val_20d_ago(rows_cn)
+
+    components: list[dict] = []
+    score = 0.0
+    weight_sum = 0.0
+    weights = {"EUR": 0.57, "JPY": 0.28, "CNY": 0.15}
+
+    if eu_val and eu_p20 and _days_stale(eu_date, today) is not None and _days_stale(eu_date, today) <= stale_days:
+        # USD/EUR: lower = stronger USD → USD stronger when ratio falls
+        delta_pct = (eu_val / eu_p20 - 1.0) * 100.0
+        direction = "stronger" if delta_pct < -0.5 else ("weaker" if delta_pct > 0.5 else "flat")
+        score += weights["EUR"] * (1 if direction == "stronger" else (-1 if direction == "weaker" else 0))
+        weight_sum += weights["EUR"]
+        components.append({"pair": "DEXUSEU", "latest": eu_val, "delta_20d_pct": round(delta_pct, 3),
+                            "usd_direction": direction, "as_of": eu_date})
+
+    if jp_val and jp_p20 and _days_stale(jp_date, today) is not None and _days_stale(jp_date, today) <= stale_days:
+        # JPY/USD: higher = stronger USD
+        delta_pct = (jp_val / jp_p20 - 1.0) * 100.0
+        direction = "stronger" if delta_pct > 0.5 else ("weaker" if delta_pct < -0.5 else "flat")
+        score += weights["JPY"] * (1 if direction == "stronger" else (-1 if direction == "weaker" else 0))
+        weight_sum += weights["JPY"]
+        components.append({"pair": "DEXJPUS", "latest": jp_val, "delta_20d_pct": round(delta_pct, 3),
+                            "usd_direction": direction, "as_of": jp_date})
+
+    if cn_val and cn_p20 and _days_stale(cn_date, today) is not None and _days_stale(cn_date, today) <= stale_days:
+        # CNY/USD: higher = stronger USD
+        delta_pct = (cn_val / cn_p20 - 1.0) * 100.0
+        direction = "stronger" if delta_pct > 0.5 else ("weaker" if delta_pct < -0.5 else "flat")
+        score += weights["CNY"] * (1 if direction == "stronger" else (-1 if direction == "weaker" else 0))
+        weight_sum += weights["CNY"]
+        components.append({"pair": "DEXCHUS", "latest": cn_val, "delta_20d_pct": round(delta_pct, 3),
+                            "usd_direction": direction, "as_of": cn_date})
+
+    if not components:
+        return {"available": False, "basis": "no_fresh_fx_pairs"}
+
+    as_of = max(c["as_of"] for c in components)
+    net = score / weight_sum if weight_sum > 0 else 0.0
+    proxy_dir = "stronger" if net > 0.2 else ("weaker" if net < -0.2 else "flat")
+
+    return {
+        "available": True,
+        "proxy_direction": proxy_dir,
+        "proxy_score": round(net, 3),
+        "components": components,
+        "as_of": as_of,
+        "basis": "fx_pairs_blend",
+        "weights": weights,
+    }
+
+
+def _build_market_implied_quadrant(
+    perf_series: list[dict],
+    macro_data: dict,
+    bond_signals: dict,
+    regional_rotation: dict,
+    today: str,
+    prices: dict | None = None,
+) -> dict:
+    """Market-implied quadrant from cross-asset tape momentum (FOLLOWUPS #18).
+
+    Computes the quadrant the TAPE is pricing — independent of the macro axes, so
+    it works at borderline regimes where `active_quadrant` is empty.
+
+    Basket momentum: relative 20/60d performance of equal-weight Q1-Q4 baskets
+    from `performance/equity-series.json` closes (reuses `_quadrant_perf_series`).
+    When the stored series is short (<20d), falls back to a partial read.
+    Per-signal votes: copper/gold, XLY/XLP, DXY trend, breakevens direction,
+    HY OAS direction, 2s10s steepening.
+
+    `prices` (optional): today's EOD prices dict — used to extend the series with
+    the current day's closes for signals that aren't in perf_series yet.
+
+    Output: {implied_quadrant, confidence, vote_count, total_votes, votes, basis}.
+    Describe-only — never touches reference_weights or regime_gate.
+    """
+    # Load perf series if not provided.
+    if not perf_series:
+        perf_series = read_perf_series()
+    if not perf_series:
+        return {"available": False, "note": "no perf series yet"}
+
+    # --- Basket momentum (20d and 60d via _quadrant_perf_series) ---------------
+    dates = [p["date"] for p in perf_series]
+    today_date = date.fromisoformat(today)
+
+    def _cutoff_idx(days: int) -> int | None:
+        target = (today_date - timedelta(days=days)).isoformat()
+        for i, d in enumerate(dates):
+            if d >= target:
+                return i
+        return None
+
+    votes: list[dict] = []
+    growth_up_score = 0.0   # positive = growth-favoring (Q1 or Q2)
+    infl_up_score = 0.0     # positive = inflation-favoring (Q2 or Q3)
+
+    for window_days, weight in ((20, 0.4), (60, 0.6)):
+        idx = _cutoff_idx(window_days)
+        if idx is None or idx >= len(perf_series) - 1:
+            votes.append({"source": f"basket_momentum_{window_days}d",
+                          "vote": None, "weight": weight, "note": "insufficient history"})
+            continue
+        window_pts = perf_series[idx:]
+        idx_rows = _quadrant_perf_series(window_pts, QUADRANT_CONCENTRATE)
+        if not idx_rows:
+            votes.append({"source": f"basket_momentum_{window_days}d",
+                          "vote": None, "weight": weight, "note": "no basket data"})
+            continue
+        last = idx_rows[-1]
+        q1, q2 = last.get("Q1"), last.get("Q2")
+        q3, q4 = last.get("Q3"), last.get("Q4")
+        # Growth axis vote: compare risk-on (Q1+Q2) avg vs defensive (Q3+Q4) avg.
+        ro = [v for v in (q1, q2) if v is not None]
+        def_ = [v for v in (q3, q4) if v is not None]
+        if ro and def_:
+            ro_avg = sum(ro) / len(ro)
+            def_avg = sum(def_) / len(def_)
+            growth_delta = ro_avg - def_avg   # >0 → growth, <0 → stagflation/deflation
+            growth_up_score += weight * growth_delta / 10.0   # normalise (baskets ≈ 100)
+        # Inflation axis vote: compare inflationary (Q2+Q3) vs deflationary (Q1+Q4).
+        inf_ = [v for v in (q2, q3) if v is not None]
+        def_lat = [v for v in (q1, q4) if v is not None]
+        if inf_ and def_lat:
+            inf_avg = sum(inf_) / len(inf_)
+            def_lat_avg = sum(def_lat) / len(def_lat)
+            infl_delta = inf_avg - def_lat_avg
+            infl_up_score += weight * infl_delta / 10.0
+        votes.append({
+            "source": f"basket_momentum_{window_days}d",
+            "vote": {
+                "q1": round(q1 - 100.0, 2) if q1 is not None else None,
+                "q2": round(q2 - 100.0, 2) if q2 is not None else None,
+                "q3": round(q3 - 100.0, 2) if q3 is not None else None,
+                "q4": round(q4 - 100.0, 2) if q4 is not None else None,
+            }, "weight": weight
+        })
+
+    # --- Per-signal cross-asset votes (simple up/down flags) ----------------
+    # Copper/gold proxy (from perf-series closes — GLD is in CORE_ROSTER).
+    last_closes = (perf_series[-1] if perf_series else {}).get("closes") or {}
+    prev_closes = {}
+    for pt in reversed(perf_series):
+        if pt["date"] < (perf_series[-1]["date"] if perf_series else ""):
+            prev_closes = pt.get("closes") or {}
+            break
+
+    cper_now = last_closes.get("CPER")
+    gld_now = last_closes.get("GLD")
+    cper_prev = prev_closes.get("CPER")
+    gld_prev = prev_closes.get("GLD")
+    cg_vote = None
+    if cper_now and gld_now and cper_prev and gld_prev:
+        try:
+            ratio_now = float(cper_now) / float(gld_now)
+            ratio_prev = float(cper_prev) / float(gld_prev)
+            cg_pct = (ratio_now / ratio_prev - 1.0) * 100.0
+            if cg_pct > 2.0:
+                cg_vote = "growth"   # copper>gold → risk-on, growth
+                growth_up_score += 0.10
+            elif cg_pct < -2.0:
+                cg_vote = "stagflation"  # gold>copper → defensive
+                growth_up_score -= 0.10
+        except (ZeroDivisionError, TypeError):
+            pass
+    votes.append({"source": "copper_gold_ratio", "vote": cg_vote})
+
+    # XLY/XLP (cyclicals vs defensives)
+    xly_now = last_closes.get("XLY")
+    xlp_now = last_closes.get("XLP")
+    xly_prev = prev_closes.get("XLY")
+    xlp_prev = prev_closes.get("XLP")
+    xl_vote = None
+    if xly_now and xlp_now and xly_prev and xlp_prev:
+        try:
+            ratio_now = float(xly_now) / float(xlp_now)
+            ratio_prev = float(xly_prev) / float(xlp_prev)
+            xl_pct = (ratio_now / ratio_prev - 1.0) * 100.0
+            if xl_pct > 2.0:
+                xl_vote = "growth"
+                growth_up_score += 0.10
+            elif xl_pct < -2.0:
+                xl_vote = "defensive"
+                growth_up_score -= 0.10
+        except (ZeroDivisionError, TypeError):
+            pass
+    votes.append({"source": "XLY_XLP", "vote": xl_vote})
+
+    # DXY trend (from regional_rotation; inverted for growth — weaker USD → growth/intl)
+    dxy_trend = (regional_rotation or {}).get("dxy_tailwind_for_intl")
+    dxy_vote = None
+    if dxy_trend == "tailwind":     # USD weakening → favors intl/risk
+        dxy_vote = "growth"
+        growth_up_score += 0.05
+    elif dxy_trend == "headwind":   # USD strengthening → defensive/Q4
+        dxy_vote = "defensive"
+        growth_up_score -= 0.05
+    votes.append({"source": "DXY_trend", "vote": dxy_vote})
+
+    # Breakevens direction (from bond_signals)
+    be5y = ((bond_signals or {}).get("breakevens") or {}).get("be_5y") or {}
+    be_delta = be5y.get("delta_20d_bp")
+    be_vote = None
+    if be_delta is not None:
+        if float(be_delta) > 15.0:
+            be_vote = "reflation"    # rising breakevens → Q2/Q3
+            infl_up_score += 0.10
+        elif float(be_delta) < -15.0:
+            be_vote = "disinflation"  # falling → Q1/Q4
+            infl_up_score -= 0.10
+    votes.append({"source": "breakevens_20d", "vote": be_vote,
+                  "value": round(be_delta, 1) if be_delta is not None else None})
+
+    # HY OAS direction (from bond_signals; tightening = risk-on = growth)
+    hy = ((bond_signals or {}).get("credit") or {}).get("hy_oas") or {}
+    hy_trend_val = hy.get("trend_4w")
+    hy_vote = None
+    if hy_trend_val == "tightening":
+        hy_vote = "growth"
+        growth_up_score += 0.08
+    elif hy_trend_val == "widening":
+        hy_vote = "defensive"
+        growth_up_score -= 0.08
+    votes.append({"source": "HY_OAS_trend", "vote": hy_vote})
+
+    # 2s10s steepening (steepening → growth/reflation expectation)
+    t10y2y = ((macro_data.get("T10Y2Y") or [{}])[0]).get("value")
+    t10y2y_prev = ((macro_data.get("T10Y2Y") or [{}] * 2)[1]).get("value") if len(macro_data.get("T10Y2Y") or []) > 1 else None
+    slope_vote = None
+    if t10y2y not in (None, ".", "") and t10y2y_prev not in (None, ".", ""):
+        try:
+            delta_2s10 = float(t10y2y) - float(t10y2y_prev)
+            if delta_2s10 > 0.05:
+                slope_vote = "growth"    # steepening → growth
+                growth_up_score += 0.08
+            elif delta_2s10 < -0.05:
+                slope_vote = "defensive"  # flattening → defensive
+                growth_up_score -= 0.08
+        except (TypeError, ValueError):
+            pass
+    votes.append({"source": "2s10s_steepening", "vote": slope_vote})
+
+    # --- Resolve implied quadrant from the accumulated scores ---------------
+    # growth_up_score > 0 → growth rising; < 0 → falling
+    # infl_up_score > 0 → inflation rising; < 0 → falling
+    GROWTH_THR = 0.10
+    INFL_THR = 0.05
+
+    if growth_up_score > GROWTH_THR:
+        implied_growth = "rising"
+    elif growth_up_score < -GROWTH_THR:
+        implied_growth = "falling"
+    else:
+        implied_growth = "flat"
+
+    if infl_up_score > INFL_THR:
+        implied_infl = "rising"
+    elif infl_up_score < -INFL_THR:
+        implied_infl = "falling"
+    else:
+        implied_infl = "flat"
+
+    implied_q = active_quadrant(implied_growth, implied_infl)
+    vote_count = sum(1 for v in votes if v.get("vote") is not None)
+    total_votes = len(votes)
+
+    if vote_count == 0:
+        confidence = "none"
+    elif abs(growth_up_score) + abs(infl_up_score) > 0.4:
+        confidence = "high"
+    elif abs(growth_up_score) + abs(infl_up_score) > 0.15:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    return {
+        "available": True,
+        "implied_quadrant": implied_q or "borderline",
+        "implied_growth": implied_growth,
+        "implied_inflation": implied_infl,
+        "confidence": confidence,
+        "growth_score": round(growth_up_score, 3),
+        "inflation_score": round(infl_up_score, 3),
+        "vote_count": vote_count,
+        "total_votes": total_votes,
+        "votes": votes,
+        "note": (
+            "Tape-implied quadrant from cross-asset momentum + signal votes (FOLLOWUPS #18). "
+            "Describe-only — never touches reference_weights or regime_gate. "
+            "Works at borderline regimes (no dependence on active_quadrant). "
+            "Historical rationale: when tape and realized macro disagree at turns, "
+            "the tape is early more often than wrong (2022 canonical case)."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Task C: P&L decomposition (inception-shortfall analysis)
+# ---------------------------------------------------------------------------
+
+def _fifo_realized_pnl(fills: list[dict]) -> dict[str, float]:
+    """FIFO realized P&L per symbol from a list of fill activity dicts.
+
+    Each fill: {symbol, side ('buy'|'sell'), qty (float), price (float)}.
+    Older fills processed first (sorted by transaction_time ascending).
+    Returns {symbol: realized_pnl_usd}.
+    """
+    # Cost queues: {symbol: [(qty, cost_per_share), ...]}
+    queues: dict[str, list[tuple[float, float]]] = {}
+    realized: dict[str, float] = {}
+
+    sorted_fills = sorted(fills, key=lambda f: f.get("transaction_time") or f.get("date") or "")
+    for fill in sorted_fills:
+        sym = (fill.get("symbol") or "").upper()
+        if not sym:
+            continue
+        try:
+            qty = abs(float(fill.get("qty") or 0))
+            price = float(fill.get("price") or 0)
+        except (TypeError, ValueError):
+            continue
+        side = (fill.get("side") or "").lower()
+        if side == "buy":
+            queues.setdefault(sym, []).append((qty, price))
+        elif side == "sell":
+            q = queues.get(sym) or []
+            remaining = qty
+            while remaining > 0 and q:
+                lot_qty, lot_cost = q[0]
+                taken = min(remaining, lot_qty)
+                realized[sym] = realized.get(sym, 0.0) + taken * (price - lot_cost)
+                remaining -= taken
+                if taken >= lot_qty:
+                    q.pop(0)
+                else:
+                    q[0] = (lot_qty - taken, lot_cost)
+            queues[sym] = q
+    return realized
+
+
+def _build_pnl_decomposition(
+    alp: "AlpacaClient",
+    paper_account: dict,
+    inception_date: str,
+) -> dict:
+    """Task C: FIFO realized + current unrealized P&L per bucket since inception.
+
+    Buckets:
+      core_current  — symbol in CORE_ROSTER (incl. role-pool members) AND
+                      currently held or a role's selected member
+      legacy_exits  — LEGACY_EXITS names
+      off_roster_flex — everything else (flex leftovers like MU)
+
+    Non-fatal: returns {available: False, reason: ...} on any Alpaca error.
+    """
+    try:
+        fills_raw = alp.get_activities(activity_type="FILL", after=inception_date)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pnl_decomposition: activities fetch failed: %s", exc)
+        return {"available": False, "reason": str(exc)}
+
+    fills = []
+    for f in fills_raw:
+        sym = (f.get("symbol") or "").upper()
+        side = (f.get("side") or "").lower()
+        try:
+            qty = abs(float(f.get("qty") or 0))
+            price = float(f.get("price") or 0)
+        except (TypeError, ValueError):
+            continue
+        if sym and side in ("buy", "sell") and qty > 0 and price > 0:
+            fills.append({
+                "symbol": sym, "side": side, "qty": qty, "price": price,
+                "transaction_time": f.get("transaction_time") or f.get("date") or "",
+            })
+
+    realized_by_sym = _fifo_realized_pnl(fills)
+
+    # Unrealized from paper_account positions.
+    unrealized_by_sym: dict[str, float] = {}
+    for pos in (paper_account.get("positions") or []):
+        sym = (pos.get("ticker") or "").upper()
+        try:
+            unr = float(pos.get("unrealized_pl") or 0)
+        except (TypeError, ValueError):
+            unr = 0.0
+        if sym:
+            unrealized_by_sym[sym] = unr
+
+    # All symbols that appear in any fill or position.
+    all_syms = set(realized_by_sym) | set(unrealized_by_sym)
+
+    # Bucket assignment.
+    core_set = set(CORE_ROSTER)
+    legacy_set = set(LEGACY_EXITS)
+
+    def _bucket(sym: str) -> str:
+        if sym in legacy_set:
+            return "legacy_exits"
+        if sym in core_set or role_of(sym) is not None:
+            return "core_current"
+        return "off_roster_flex"
+
+    buckets: dict[str, dict] = {
+        "core_current":   {"realized_usd": 0.0, "unrealized_usd": 0.0, "symbols": {}},
+        "legacy_exits":   {"realized_usd": 0.0, "unrealized_usd": 0.0, "symbols": {}},
+        "off_roster_flex": {"realized_usd": 0.0, "unrealized_usd": 0.0, "symbols": {}},
+    }
+
+    for sym in all_syms:
+        b = _bucket(sym)
+        r = realized_by_sym.get(sym, 0.0)
+        u = unrealized_by_sym.get(sym, 0.0)
+        buckets[b]["realized_usd"] += r
+        buckets[b]["unrealized_usd"] += u
+        buckets[b]["symbols"][sym] = {"realized_usd": round(r, 2), "unrealized_usd": round(u, 2),
+                                      "total_usd": round(r + u, 2)}
+
+    equity = float(paper_account.get("equity") or 0) or 1.0
+    result: dict = {"available": True, "inception_date": inception_date,
+                    "fill_count": len(fills), "symbol_count": len(all_syms)}
+
+    for b_name, b_data in buckets.items():
+        r, u = b_data["realized_usd"], b_data["unrealized_usd"]
+        total = r + u
+        # Top 15 contributors by absolute total P&L.
+        top15 = sorted(b_data["symbols"].items(), key=lambda kv: abs(kv[1]["total_usd"]), reverse=True)[:15]
+        result[b_name] = {
+            "realized_usd": round(r, 2),
+            "unrealized_usd": round(u, 2),
+            "total_usd": round(total, 2),
+            "pct_of_equity": round(total / equity * 100.0, 3),
+            "contributors": [{"symbol": sym, **v} for sym, v in top15],
+        }
+
+    return result
+
+
 def _build_divergences(
     paper_account: dict,
     growth_axis: dict,
@@ -4962,6 +5989,8 @@ def _build_divergences(
     spy_sma: dict,
     today: str,
     cfg: dict,
+    leading_growth: dict | None = None,
+    market_implied_quadrant: dict | None = None,
 ) -> list[dict]:
     """Deterministic detector of TENSIONS between signals that should agree but don't
     (responsiveness brief Phase 2). It points the analyzer's judgment at the high-value
@@ -4991,11 +6020,141 @@ def _build_divergences(
     # --- 4. dollar vs international tilt --------------------------------------
     out.append(_div_dollar_vs_intl(paper_account, regional_rotation, today, stale_days, cfg))
 
+    # --- 5. leading vs lagging growth (#17) ----------------------------------
+    out.append(_div_leading_vs_lagging_growth(growth_axis, leading_growth, cfg))
+
+    # --- 6. market-implied vs macro quadrant (#18) ---------------------------
+    out.append(_div_market_vs_macro_quadrant(
+        reference_weights, market_implied_quadrant, today, stale_days, cfg))
+
     return out
 
 
+def _div_leading_vs_lagging_growth(
+    growth_axis: dict, leading_growth: dict | None, cfg: dict
+) -> dict:
+    """Leading-growth composite vs realized growth_axis direction (FOLLOWUPS #17).
+
+    Fires when the leading composite score is >= cfg threshold in a direction that
+    disagrees with the realized axis. Stale or unavailable composite → indeterminate,
+    never a false active. Confidence from `leading_growth.confidence` propagates.
+    """
+    base = {
+        "id": "leading_vs_lagging_growth",
+        "description": "Leading-growth composite vs realized growth_axis direction.",
+    }
+    realized = (growth_axis or {}).get("direction")
+    lg = leading_growth or {}
+
+    if not lg.get("available"):
+        return {**base, "signals": [], "direction_implied": "unresolved", "status": "indeterminate",
+                "note": "leading_growth block unavailable"}
+
+    composite_dir = lg.get("direction")  # "rising"/"falling"/"flat"
+    score = lg.get("score", 0.0)
+    confidence = lg.get("confidence", "none")
+
+    sig = [
+        {"name": "leading_growth.direction", "value": composite_dir},
+        {"name": "leading_growth.score", "value": score},
+        {"name": "growth_axis.direction (realized)", "value": realized},
+        {"name": "leading_growth.confidence", "value": confidence},
+    ]
+    base["signals"] = sig
+
+    if realized is None or composite_dir is None or confidence in ("none", "low"):
+        return {**base, "direction_implied": "unresolved", "status": "indeterminate"}
+
+    if composite_dir == "flat" or composite_dir == realized:
+        return {**base, "direction_implied": "aligned", "status": "indeterminate"}
+
+    # Leading disagrees with realized — active tension.
+    return {
+        **base,
+        "description": (f"Leading growth composite points {composite_dir} "
+                        f"while realized growth_axis is {realized} "
+                        f"(score={score:+.2f}, {confidence} confidence)."),
+        "direction_implied": composite_dir,
+        "status": "active",
+    }
+
+
+def _div_market_vs_macro_quadrant(
+    reference_weights: dict,
+    market_implied_quadrant: dict | None,
+    today: str,
+    stale_days: int,
+    cfg: dict,
+) -> dict:
+    """Market tape-implied quadrant vs the macro active_quadrant / favored_bucket (#18).
+
+    Fires when the tape disagrees with the macro call. Works at borderline regimes
+    (market_implied_quadrant has no dependence on active_quadrant). High-confidence
+    tape read required to fire active (avoids noise). Keeps the `price_vs_regime`
+    detector running in parallel — market_vs_macro_quadrant is the broader instrument;
+    it catches borderline-regime mismatches where price_vs_regime goes indeterminate.
+    Both describe-only; LLM adjudicates.
+    """
+    base = {
+        "id": "market_vs_macro_quadrant",
+        "description": "Market-implied quadrant (tape momentum + cross-asset votes) vs macro regime call.",
+    }
+    miq = market_implied_quadrant or {}
+
+    if not miq.get("available"):
+        return {**base, "signals": [], "direction_implied": "unresolved", "status": "indeterminate",
+                "note": "market_implied_quadrant block unavailable"}
+
+    implied_q = miq.get("implied_quadrant")
+    confidence = miq.get("confidence", "none")
+    macro_q = (reference_weights or {}).get("active_quadrant")
+    favored = (reference_weights or {}).get("favored_bucket") or []
+
+    sig = [
+        {"name": "market_implied_quadrant", "value": implied_q},
+        {"name": "market_implied.confidence", "value": confidence},
+        {"name": "macro.active_quadrant", "value": macro_q},
+        {"name": "macro.favored_bucket", "value": favored},
+    ]
+    base["signals"] = sig
+
+    # Only fire when the tape has a confident, resolved read.
+    if confidence in ("none", "low") or not implied_q or implied_q == "borderline":
+        return {**base, "direction_implied": "unresolved", "status": "indeterminate"}
+
+    # At a decided macro quadrant: check direct mismatch.
+    if macro_q and macro_q in ("Q1", "Q2", "Q3", "Q4") and implied_q != macro_q:
+        macro_def = _QUADRANT_DEFENSIVENESS.get(macro_q, 0)
+        impl_def = _QUADRANT_DEFENSIVENESS.get(implied_q, 0)
+        direction = "more_defensive" if impl_def > macro_def else "more_risk_on"
+        return {
+            **base,
+            "description": (f"Tape implies {implied_q} ({confidence} confidence) "
+                            f"while macro call is {macro_q}."),
+            "direction_implied": direction,
+            "status": "active",
+        }
+
+    # At a borderline/indeterminate macro: check if implied quadrant is outside
+    # the favored bucket (a concrete tape read beats the borderline ambiguity).
+    if isinstance(favored, list) and favored and implied_q not in favored and implied_q:
+        macro_defs = [_QUADRANT_DEFENSIVENESS.get(q, 0) for q in favored if q in _QUADRANT_DEFENSIVENESS]
+        impl_def = _QUADRANT_DEFENSIVENESS.get(implied_q, 0)
+        if macro_defs:
+            avg_macro = sum(macro_defs) / len(macro_defs)
+            direction = "more_defensive" if impl_def > avg_macro else "more_risk_on"
+            return {
+                **base,
+                "description": (f"Tape implies {implied_q} ({confidence}) "
+                                f"outside the borderline favored bucket {favored}."),
+                "direction_implied": direction,
+                "status": "active",
+            }
+
+    return {**base, "direction_implied": "aligned", "status": "indeterminate"}
+
+
 def _div_leading_vs_lagging_inflation(inflation_axis: dict, bond_signals: dict, cfg: dict) -> dict:
-    """Leading inflation (5y breakeven 20d delta + WTI 20d move) vs realized direction."""
     c = cfg["leading_vs_lagging_inflation"]
     be = ((bond_signals or {}).get("breakevens") or {}).get("be_5y") or {}
     be_delta = be.get("delta_20d_bp")

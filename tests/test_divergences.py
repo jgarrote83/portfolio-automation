@@ -230,10 +230,14 @@ def test_build_divergences_returns_all_four_with_schema():
         _rr_dxy("neutral"), {"active_quadrant": None}, {"shock_level": 0},
         {"available": False}, TODAY, CFG,
     )
-    assert len(divs) == 4
+    # 2026-07-23: 6 divergences (4 original + 2 new from #17/#18)
+    assert len(divs) == 6
     ids = {d["id"] for d in divs}
-    assert ids == {"leading_vs_lagging_inflation", "credit_complacency",
-                   "price_vs_regime", "dollar_vs_intl_tilt"}
+    assert ids == {
+        "leading_vs_lagging_inflation", "credit_complacency",
+        "price_vs_regime", "dollar_vs_intl_tilt",
+        "leading_vs_lagging_growth", "market_vs_macro_quadrant",
+    }
     for d in divs:
         assert set(d) >= {"id", "description", "signals", "direction_implied", "status"}
         assert d["status"] in ("active", "indeterminate")

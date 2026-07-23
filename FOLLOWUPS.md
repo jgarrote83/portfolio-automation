@@ -3,7 +3,10 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-07-22 post-merge (prompt-completion, branch `fix/20260722-prompt-completion`).**
+**▶ START HERE — last session 2026-07-23 (regime responsiveness cycle, branch `feat/20260723-leading-growth-market-implied`).**
+Tasks: A (#17 leading-growth composite + growth-side transition_watch), B (#18 market_implied_quadrant + daily dollar proxy), C (pnl_decomposition inception-shortfall block), D (F6 sweep sizing / cash-floor guard), E (F7 price-sanity quarantine), F (F8 A4 watch_candidates wording). Suite 721→789 green, ruff clean. PR pending review (see entry **#46** below). **Merge timing note:** 07-24 carries the SOXX/IHE sleeve-switch event; review/merge AFTER that day's report is graded so switch behavior is observed on unchanged code.
+
+**▶ Prior session 2026-07-22 post-merge (prompt-completion, branch `fix/20260722-prompt-completion`).**
 PR #28 merged to master (`7be613a`); decision gates A-G1 (last-emission-only persistence)
 and B-G1 (gate-zeroed VXUS gap row) shipped as defaults. This PR lands three deferred
 prompt tasks: A4 (`watch_candidates` emission contract), C (override-paragraph hygiene),
@@ -674,7 +677,8 @@ consume the RESOLVED stance; `unconfirmed` now requires BOTH layers unavailable.
 The manual file remains the SEP override channel — **still update it after the
 2026-07-28/29 FOMC.** Moved to Done.
 
-### 17. Leading-growth composite + growth-side `transition_watch` (HIGH — the biggest forecasting gap)
+### 17. Leading-growth composite + growth-side `transition_watch` ✅ DONE 2026-07-23 (`feat/20260723-leading-growth-market-implied`)
+See entry #46 for full details. The leading-growth composite (`leading_growth` snapshot block) is built, the `leading_vs_lagging_growth` divergence fires, and `_build_transition_watch` generalizes to consume both inflation and growth sides symmetrically. Remaining after this PR: #23 (backtest harness to verify signal lag), #22 (probabilistic quadrant vector that uses the composite as input).
 The inflation axis has a leading layer (breakevens + oil → `leading_vs_lagging_inflation`
 → transition lean). The growth axis has **none** — GDPNow is a coincident nowcast and its
 confirming inputs (payrolls, retail) are lagging and revision-prone, so the growth axis
@@ -705,7 +709,8 @@ is flat *is* the staged re-entry signal.
   divergence + growth-side projection; on a replayed 2026-06 snapshot the composite
   produces a directional read where the binary axis said flat.
 
-### 18. `market_implied_quadrant` block + `market_vs_macro_quadrant` divergence (HIGH)
+### 18. `market_implied_quadrant` block + `market_vs_macro_quadrant` divergence ✅ DONE 2026-07-23 (`feat/20260723-leading-growth-market-implied`)
+See entry #46. The block works at borderline regimes; the daily dollar proxy covers DTWEXBGS staleness; `market_vs_macro_quadrant` divergence fires at high/medium confidence only. Sub-item (dollar proxy from FX pairs when DTWEXBGS stale) also shipped. Live test case: DTWEXBGS was 6d stale on 07-23. The original task's FOLLOWUPS entry stated the 07-03 tape-above-200d-while-macro-defensive case would fire active — validated in the new divergence test suite.
 **Live evidence (2026-07-03 report):** the book proposed selling ~$51K of equities into
 a tape above its 200d SMA, on a *low-confidence* flat growth read — while
 `price_vs_regime` sat `indeterminate` because it requires a concrete `active_quadrant`
@@ -1357,6 +1362,26 @@ ticks — is covered by the new F2 orphan sweep + the very next tick's repair).
 ---
 
 ## Done
+### 46. 2026-07-23 session: Regime responsiveness cycle + hygiene batch — Done, branch `feat/20260723-leading-growth-market-implied` (PR pending review)
+Six-task PR: Tasks A (#17), B (#18), C (pnl_decomposition), D (F6), E (F7), F (F8). Suite 721→789, ruff clean.
+
+**Completion note (2026-07-24):** The 2026-07-23 push was `0e5258c`. A follow-up
+"completion v1" session claimed done but pushed nothing new (the no-op session).
+This completion v2 (2026-07-24) addresses the three verified gaps from the v1 session:
+(1) prompt `leading_growth`/`market_implied_quadrant`/`pnl_decomposition`/`dollar_proxy`
+were one-liner bullets — needed proper `###` describe-only sections; (2) `tests/test_price_quarantine.py`
+was absent; (3) the hardcoded "(ETN, NEE, XLU, MU)" seed list appeared twice in the
+watch_candidates prompt — replaced with a check against the snapshot's own `flex_candidates`
+list. Suite 789→805, ruff clean. Verification gate output in session summary.
+
+- **Task A (#17): Leading-growth composite + growth-side transition_watch.** New `leading_growth` snapshot block: 9-signal diffusion score in [−1,+1] from 6 FRED series (WEI, NFCI-inv, PERMIT, NEWORDER, NOCDFSA066MSFRBPHI, GACDISA066MSFRBNY) + 3 market-derived signals (CPER/GLD 20d ratio, XLY/XLP 20d ratio, HY OAS trend). New `_div_leading_vs_lagging_growth` detector (fires when composite disagrees with realized growth_axis at medium+ confidence). `_build_transition_watch` generalized to consume BOTH `leading_vs_lagging_inflation` AND `leading_vs_lagging_growth` divergences symmetrically — new `_project_quadrant_growth` helper + nested evaluator functions; when both sides fire, more defensive projection wins. New FRED series added to `macro-series.json`; XLY/CPER added to price universe + fetched as historical closes. FMP call budget: +4 historical fetches (XLY, CPER, GLD, XLP).
+- **Task B (#18): market_implied_quadrant + market_vs_macro_quadrant divergence + daily dollar proxy.** New `market_implied_quadrant` snapshot block: relative 20/60d basket momentum (reuses `_quadrant_perf_series`) + 6 per-signal cross-asset votes (copper/gold, XLY/XLP, DXY trend, breakevens, HY OAS, 2s10s). Works at borderline regimes. New `_div_market_vs_macro_quadrant` detector — fires at high/medium confidence only; fires at borderline regime when implied outside favored bucket. New `dollar_proxy` snapshot block when DTWEXBGS >5d stale (the live test case on 07-23 — DTWEXBGS was 6d stale). Loads perf series from storage (`read_perf_series`) so it can run before the in-memory `series` is computed. Decision gates: D-G1 (0.75% cash floor default) and E-G1 (20%/50% quarantine thresholds) in `risk-limits.json`.
+- **Task C (pnl_decomposition): FIFO realized + current unrealized P&L split.** New `get_activities` method on `AlpacaClient` (paginated). New `_fifo_realized_pnl` pure function + `_build_pnl_decomposition` builder. Three buckets: `core_current` (CORE_ROSTER or any role pool member), `legacy_exits` (LEGACY_EXITS), `off_roster_flex` (everything else — MU lands here). Non-fatal. `performance.pnl_decomposition` in snapshot. Prompt: §1 scoreboard sentence + "P&L decomposition" `###` section with attribution discipline. Tests on buys/sells/partial-lots/FIFO cross multiple symbols.
+- **Task D (F6 sweep sizing / cash-floor guard):** Prompt rule: size cash→SGOV sweep on `surplus = literal_cash − target − Σ(same-session buy notionals)` with arithmetic shown in §9. New `_apply_cash_floor_guard` in `analyzer/handler.py` + `_load_risk_limits()` helper: trims or removes the SGOV sweep if post-all-trades literal cash would fall below `literal_cash_floor_pct` (0.75% default, `risk-limits.json`). Surfaces in validation addendum. Applied after pass-2 validation.
+- **Task E (F7 price-sanity quarantine):** New `_quarantine_flex_price` collector function: quarantines flex-candidate prices >20% outside the 52-week high/low range OR >50% intraday move without news corroboration. Profile carries `price_quarantined: true` + `quarantine_reason`. Prior snapshot prices loaded at collect time for the delta check. Prompt: quarantined names fail G2 deterministically; LLM no longer adjudicates plausibility itself. `tests/test_price_quarantine.py`: 16 tests covering all quarantine cases (MU 10× case, boundary, with/without news, stale prior snapshot). Proved fail-on-master (`_quarantine_flex_price` absent from `origin/master`).
+- **Task F (F8 A4 wording tighten):** Watch_candidates prompt: check the snapshot's own `flex_candidates` list before emitting; hardcoded "(ETN, NEE, XLU, MU)" removed (0 occurrences). Non-re-enterable legacy list (AMZN/GOOGL/DBA/TIP/XSD) kept — that is doctrine.
+- **Prompt sections added (completion v2):** `### Leading growth + market-implied quadrant` (adjudication rules, 9-signal descriptions, historical rationale for market-implied verbatim); `### P&L decomposition` (bucket semantics + attribution discipline); `### Regime-call accountability` already existed; Input-list bullets expanded to full describe-only entries with cross-references. All four new blocks now hit the ≥3 / ≥2 mention thresholds.
+- **Bookkeeping:** `divergence-config.json` += `leading_vs_lagging_growth` + `market_vs_macro_quadrant` entries. `risk-limits.json` += `literal_cash_floor_pct` (0.75%) + `price_quarantine` thresholds. `macro-series.json` += 6 leading-growth series. `_DIVERGENCE_DEFAULTS` in handler += new divergences. All new blocks in snapshot dict. CLAUDE.md updated (new blocks in data flow). FOLLOWUPS #17/#18 moved to Done (full); #46 added.
 ### 45. 2026-07-22 session: Flex funnel v2 (dynamic `watch_candidates`) + report-hygiene batch — Done, branch `feat/20260722-flex-dynamic-candidates` (PR pending review)
 #8 v2 (dynamic analyzer-emitted `watch_candidates`) + prompt-hygiene findings F1-F5 shipped in one branch.
 - **Task A (#8 v2):** Analyzer emits `watch_candidates[]` (<=6 entries, `{symbol, reason}`). Collector merges previous run's list (walk-back 7 days) with static seed; sanitization drops invalid symbol format, currently held, core-roster `flex_separation_set(held)` members (new `flex.regime.FLEX_REENTERABLE` + `flex.regime.flex_separation_set`), non-reenterable LEGACY_EXITS; INTC/MCK/PPA/EUAD survive when flat. Static names have priority; cap stays 20. Each `flex_candidates` profile gains `source: "static"|"dynamic"`. Executor `_extract_trades`/`_validation_refusal` provably unaffected (test added). Decision gate **A-G1** (default = last-emission-only persistence) flagged in PR for veto.
