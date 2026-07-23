@@ -23,6 +23,17 @@
     "_note": "Fires when the dollar switch (regional_rotation.dxy_tailwind_for_intl) disagrees with the book's aggregate international weight (sum of the amplifier-intl names / equity): DXY headwind/neutral (favors US growth) while intl weight >= intl_heavy_pct, OR DXY tailwind (favors intl) while intl weight <= intl_light_pct. direction_implied = toward the dollar signal."
   },
 
+  "leading_vs_lagging_growth": {
+    "diffusion_threshold": 0.3,
+    "_note": "Fires when the leading-growth composite score (diffusion of WEI/PERMIT/NEWORDER/fed-surveys/NFCI + market-derived CPER/GLD + XLY/XLP + HY OAS direction, [-1,+1]) disagrees with the realized growth_axis direction by magnitude >= diffusion_threshold. Both directions use the same threshold. A stale/absent input is dropped from the diffusion count (reduced confidence) but never fabricates an active signal."
+  },
+
+  "market_vs_macro_quadrant": {
+    "basket_momentum_min_pct": 2.0,
+    "vote_majority_threshold": 0.5,
+    "_note": "Fires when the market-implied quadrant (relative 20/60d momentum of Q1-Q4 baskets + per-signal cross-asset votes) disagrees with the current active_quadrant or favored_bucket. Works at borderline regimes — the implied quadrant needs no concrete macro axis, superseding price_vs_regime's blind spot. basket_momentum_min_pct is the minimum lead of a basket over the opposite-regime basket to cast a vote. vote_majority_threshold is the fraction of signals that must agree to produce a confident implied quadrant."
+  },
+
   "staleness_days": 7,
   "_staleness_note": "An input older than this many calendar days (by its as_of date) makes any divergence that depends on it `status: indeterminate` — never a false `active`, never silently suppressed (missing data = WATCH, never REJECT)."
 }

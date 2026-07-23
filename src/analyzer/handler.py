@@ -54,6 +54,14 @@ def _load_override_cfg() -> dict:
         return dict(OVERRIDE_DEFAULTS)
 
 
+def _load_risk_limits() -> dict:
+    """Full risk-limits.json for keys not exposed by _load_reference_execution_cfg."""
+    try:
+        return json.loads(_RISK_LIMITS_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
 def _load_reference_execution_cfg() -> dict:
     """override_protocol + reference_execution + exempt_holds (+ the Tier-1 scalars the
     trade validator needs) from risk-limits.json, shaped for
@@ -335,14 +343,31 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
                      "rejected": all_rejected},
                     gaps, vctx, snapshot.get("paper_account", {}).get("positions"),
                 )
+
+            # Task D (F6): cash-floor guard — trim the SGOV sweep if post-trade
+            # literal cash would fall below the configured floor (non-fatal).
+            try:
+                _rl = _load_risk_limits()
+                _guarded_trades, _floor_addendum = _apply_cash_floor_guard(
+                    tv2["trades"], gaps, vctx,
+                    snapshot.get("paper_account", {}).get("positions"),
+                    _rl,
+                )
+                if _floor_addendum:
+                    trades_obj["trades"] = _guarded_trades
+                    report_md += _floor_addendum
+                    logger.info("Cash-floor guard: trades updated (SGOV sweep trimmed)")
+            except Exception as e:  # noqa: BLE001
+                logger.error("Cash-floor guard failed (non-fatal): %s", e)
+
             # Task D (session 2026-07-17) — deterministic post-trade quadrant view
             # (Table A "Recommended"), applying the FINAL validated trades[] to the
             # collector's pre-trade quadrant_allocation. Unconditional (always shown,
             # not gated on rejections/clamps) — Recommended is reported every run.
             try:
                 report_md += _quadrant_allocation_addendum(
-                    snapshot.get("quadrant_allocation") or {}, tv2["trades"], gaps,
-                    float(vctx.get("equity_usd") or 0),
+                    snapshot.get("quadrant_allocation") or {}, trades_obj.get("trades", []),
+                    gaps, float(vctx.get("equity_usd") or 0),
                 )
             except Exception as e:  # noqa: BLE001
                 logger.error("Quadrant allocation addendum failed (non-fatal): %s", e)
@@ -533,13 +558,131 @@ def _validation_addendum(tv: dict, gaps: list[dict] | None = None,
     return "\n".join(lines) + "\n"
 
 
+def _apply_cash_floor_guard(
+    trades: list[dict],
+    gaps: list[dict],
+    ctx: dict,
+    positions: list[dict] | None,
+    risk_limits: dict,
+) -> tuple[list[dict], str]:
+    """Task D (F6): trim the SGOV sweep so literal cash stays >= literal_cash_floor_pct.
+
+    The 07-22 issue: SGOV sweep sized on `surplus = literal_cash - target` without
+    netting same-day buy notionals → cash landed at 0.79% vs the 1.50% target.
+    The fix: recompute post-all-trades literal cash; if below the floor, trim the SGOV
+    buy notional (rounding down to integer shares using the gap-row price). Other trades
+    are never touched — only the SGOV sweep is trimmed.
+
+    Returns (final_trades, addendum_line). If no trimming needed, addendum_line is "".
+    Non-destructive: a copy of the trade is modified; original list is not mutated.
+    """
+    floor_pct = float(risk_limits.get("literal_cash_floor_pct", 0.75))
+    try:
+        equity = float(ctx.get("equity_usd") or 0)
+        cash_pre = float(ctx.get("cash_usd") or 0)
+    except (TypeError, ValueError):
+        return trades, ""
+    if equity <= 0:
+        return trades, ""
+
+    floor_usd = floor_pct / 100.0 * equity
+
+    # Build price map from positions + gaps.
+    price_map: dict[str, float] = {}
+    for p in positions or []:
+        sym = str(p.get("ticker") or "").upper()
+        try:
+            px = float(p.get("current_price"))
+            if px > 0:
+                price_map[sym] = px
+        except (TypeError, ValueError):
+            continue
+    for g in gaps or []:
+        sym = str(g.get("symbol") or "").upper()
+        try:
+            px = float(g.get("price"))
+            if px > 0:
+                price_map[sym] = px
+        except (TypeError, ValueError):
+            continue
+
+    def _cash_after(t_list: list[dict]) -> float:
+        cash = cash_pre
+        for t in t_list:
+            sym = str(t.get("symbol") or t.get("ticker") or "").upper()
+            side = str(t.get("side") or t.get("action") or "").lower()
+            try:
+                qty = float(t.get("quantity") or t.get("qty") or 0)
+            except (TypeError, ValueError):
+                qty = 0.0
+            px = price_map.get(sym)
+            if not px or qty <= 0:
+                continue
+            if side == "sell":
+                cash += qty * px
+            elif side == "buy":
+                cash -= qty * px
+        return cash
+
+    post_cash = _cash_after(trades)
+    if post_cash >= floor_usd:
+        return trades, ""   # no issue
+
+    # Find the SGOV buy (sweep) to trim.
+    sgov_idx = next(
+        (i for i, t in enumerate(trades)
+         if str(t.get("symbol") or "").upper() == "SGOV"
+         and str(t.get("side") or t.get("action") or "").lower() == "buy"),
+        None,
+    )
+    if sgov_idx is None:
+        return trades, ""
+
+    sgov_trade = trades[sgov_idx]
+    sgov_px = price_map.get("SGOV")
+    if not sgov_px:
+        return trades, ""
+
+    try:
+        sgov_qty_orig = float(sgov_trade.get("quantity") or sgov_trade.get("qty") or 0)
+    except (TypeError, ValueError):
+        return trades, ""
+    if sgov_qty_orig <= 0:
+        return trades, ""
+
+    shortfall = floor_usd - post_cash  # positive
+    shares_to_cut = shortfall / sgov_px
+    new_qty = max(0.0, sgov_qty_orig - shares_to_cut)
+    new_qty = int(new_qty)  # integer shares only
+
+    if new_qty <= 0:
+        trimmed = [t for i, t in enumerate(trades) if i != sgov_idx]
+        addendum = (
+            f"\n_Cash-floor guard (F6): SGOV sweep removed (all {sgov_qty_orig:.0f} shares) "
+            f"to maintain literal-cash floor {floor_pct}% (${floor_usd:,.0f})._\n"
+        )
+    elif new_qty < sgov_qty_orig:
+        trimmed_trade = dict(sgov_trade)
+        trimmed_trade["quantity"] = new_qty
+        trimmed_trade["qty"] = new_qty
+        trimmed = list(trades)
+        trimmed[sgov_idx] = trimmed_trade
+        addendum = (
+            f"\n_Cash-floor guard (F6): SGOV sweep trimmed {sgov_qty_orig:.0f}→{new_qty} shares "
+            f"to maintain literal-cash floor {floor_pct}% (${floor_usd:,.0f})._\n"
+        )
+    else:
+        return trades, ""
+
+    logger.info(
+        "Cash-floor guard: SGOV sweep %s→%s shares (floor=%.2f%% / $%.0f)",
+        sgov_qty_orig, new_qty, floor_pct, floor_usd,
+    )
+    return trimmed, addendum
+
+
 def _post_validation_cash(trades: list[dict], gaps: list[dict], ctx: dict,
                           positions: list[dict] | None = None) -> float | None:
-    """Literal cash after only the VALIDATED trades execute: pre-trade cash + sell
-    proceeds - buy notional, priced off the gap rows (paper-account position price as
-    a fallback for a validated trade in a name with no gap row — e.g. an off-roster
-    flex leftover like MU, 2026-07-13 audit finding 3). None if pre-trade cash is
-    unknown."""
     try:
         cash = float(ctx.get("cash_usd"))
     except (TypeError, ValueError):

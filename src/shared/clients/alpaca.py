@@ -223,3 +223,44 @@ class AlpacaClient:
         r.raise_for_status()
         data = r.json()
         return data if isinstance(data, list) else []
+
+    def get_activities(
+        self,
+        activity_type: str = "FILL",
+        after: str | None = None,
+        until: str | None = None,
+        page_size: int = 100,
+    ) -> list[dict]:
+        """Account activities (fills) paginated until exhausted.
+
+        Returns list of activity dicts with at minimum:
+        ``{id, activity_type, date, symbol, qty, price, side, transaction_time}``.
+        Alpaca paginates via ``page_token`` (the ``id`` of the last row).
+        ``after`` / ``until`` are ISO date strings (YYYY-MM-DD).
+        """
+        out: list[dict] = []
+        params: dict = {"activity_type": activity_type, "page_size": page_size}
+        if after:
+            params["after"] = after
+        if until:
+            params["until"] = until
+        for _ in range(200):  # hard cap: 200 pages × 100 = 20 000 fills max
+            r = self.session.get(
+                f"{self.base_url}/v2/account/activities/{activity_type}",
+                params=params,
+                timeout=30,
+            )
+            r.raise_for_status()
+            page = r.json()
+            if not isinstance(page, list) or not page:
+                break
+            out.extend(page)
+            if len(page) < page_size:
+                break  # last page
+            # Use the id of the last row as the page token for the next request.
+            params["page_token"] = page[-1]["id"]
+            # Clear after/until on subsequent pages — Alpaca ignores them once
+            # page_token is set and they can conflict.
+            params.pop("after", None)
+            params.pop("until", None)
+        return out

@@ -39,5 +39,13 @@
   "CES0500000003":    { "name": "Avg Hourly Earnings, Private",          "unit": "$",    "frequency": "monthly"  },
   "JTSJOL":           { "name": "Job Openings (JOLTS)",                  "unit": "000s", "frequency": "monthly"  },
   "CIVPART":          { "name": "Labor Force Participation Rate",        "unit": "%",    "frequency": "monthly"  },
-  "SAHMREALTIME":     { "name": "Sahm Rule Recession Indicator",         "unit": "pp",   "frequency": "monthly"  }
+  "SAHMREALTIME":     { "name": "Sahm Rule Recession Indicator",         "unit": "pp",   "frequency": "monthly"  },
+
+  "_leading_growth_comment": "Leading-growth composite inputs (FOLLOWUPS #17, 2026-07-23). Degrade gracefully on stale/absent.",
+  "WEI":                  { "name": "Weekly Economic Index (NY Fed)",                     "unit": "index","frequency": "weekly"   },
+  "PERMIT":               { "name": "Building Permits: New Private Housing Units",         "unit": "000s", "frequency": "monthly"  },
+  "NEWORDER":             { "name": "Manufacturers New Orders: Nondefense Capital Goods Ex-Aircraft", "unit": "M$","frequency": "monthly" },
+  "NOCDFSA066MSFRBPHI":  { "name": "Philly Fed New Orders Index",                         "unit": "index","frequency": "monthly"  },
+  "GACDISA066MSFRBNY":   { "name": "Empire State General Business Conditions Index",      "unit": "index","frequency": "monthly"  },
+  "NFCI":                 { "name": "National Financial Conditions Index (Chicago Fed)",   "unit": "index","frequency": "weekly"   }
 }
