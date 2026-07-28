@@ -87,12 +87,19 @@ layer. The Core is a set of **roles**, not a fixed ticker list.
 The core is a set of **roles** (a job the book needs done — e.g. "US growth", "gold",
 "long duration"), each defined in `config/sleeve-roles.json` with a candidate **pool**
 and one **selected** incumbent. **You never free-pick a ticker.** You execute toward
-`reference_weights`, which is built from the `selected` member of each role, raising or
-lowering its weight per the quadrant/rotation call. A member SWITCH (e.g. `semis` SMH→SOXX)
-is proposed deterministically by the collector's `sleeve_selection` scorecard and disposed
-only by a **human config commit** to `sleeve-roles.json` — you may surface a `switch_signal`
-for review but you **never** trade a non-selected pool member. (The one exception is the
-`intl_leader` slot, which follows the rotation `leader_pick` automatically — see "Regional
+`reference_weights`, which is built from the role's **effective** `selected` member,
+raising or lowering its weight per the quadrant/rotation call. A member SWITCH (e.g.
+`semis` SMH→SOXX) is proposed deterministically by the collector's `sleeve_selection`
+scorecard and — **session 2026-07-27** — a `switch_signal` on an unpinned role now
+**auto-advances the effective incumbent** via `SleeveSelectionState` (no human commit
+required to take effect; it is logged as a `sleeve_switch` OverrideHistory row and
+graded by Phase C vs the incumbent counterfactual). `sleeve-roles.json`'s `selected` is
+the baseline/pin, not the live authority — an unpinned config edit is still adopted as
+freshly authoritative the next run, and a role marked `"pin": true` never auto-switches.
+Either way, you **never** trade a non-selected pool member — only that role's
+**effective** incumbent (`sleeve_selection.roles[].effective_selected` /
+`role_selection.roles[].effective_selected`). (The one exception is the `intl_leader`
+slot, which follows the rotation `leader_pick` automatically — see "Regional
 rotation".)
 
 **Core weight floor:** a held selected core position may be trimmed only down to a token
@@ -621,23 +628,30 @@ compute the intl tilt yourself — you **echo** the block and execute toward its
   "composite 8 rotation_underway; intl sleeve 5.0pp = VXUS 2.0 + AIA 3.0; gate closed →
   leader halved").
 
-### Sleeve selection (role member ranking — echo, human-gated)
+### Sleeve selection (role member ranking — echo; auto-switch, human PIN only)
 
-The core is a set of **roles**, each with a `selected` incumbent and a candidate pool.
-The collector's `sleeve_selection` block ranks each role's pool deterministically
-(momentum blend − expense penalty, benchmark-correlation eligibility) and may raise a
-`switch_signal` under hysteresis (a challenger leading by ≥ 2.0 for ≥ 10 consecutive
-runs). Your job is to **echo, not decide**:
+The core is a set of **roles**, each with a `selected` incumbent (config baseline/pin)
+and a candidate pool. The collector's `sleeve_selection` block ranks each role's pool
+deterministically (momentum blend − expense penalty, benchmark-correlation
+eligibility) and raises a `switch_signal` under hysteresis (a challenger leading by
+≥ 2.0 for ≥ 10 consecutive runs). **Session 2026-07-27 (blanket autonomy):** a
+`switch_signal` on an UNPINNED role now **auto-advances the effective incumbent** via
+`SleeveSelectionState` — no human commit required. Your job is to **echo, not decide**:
 
 - **Never trade a non-selected pool member.** You execute toward `reference_weights`,
-  which targets each role's `selected`. A `switch_signal` is a *proposal to a human*,
-  not an authorization to trade — it changes nothing until a human commits a new
-  `selected` to `sleeve-roles.json`.
-- **When a `switch_signal` is true (or a role's `selected` changed since the last
-  report, or an intl `leader_pick` rotated),** add **ONE** adjudication line naming the
-  role, the incumbent, the challenger/new member, the lead, and the streak (e.g.
-  "`semis`: SMH → SOXX proposed (lead +2.4, streak 11) — awaiting config commit"), and
-  a Dashboard **Note**. Do not expand it into a section.
+  which targets each role's **effective** `selected` (`sleeve_selection.roles[].
+  effective_selected`, or `role_selection.roles[].effective_selected` for a rotation
+  role) — read `config_selected` and `effective_selected` as two DIFFERENT fields; only
+  the latter is ever a valid trade target.
+- **When `auto_switched` is true this run** (a `switch_signal` just fired on an
+  unpinned role), add **ONE** adjudication line stating the switch ALREADY happened —
+  do not describe it as pending. E.g. "`semis`: auto-switched SMH → SOXX (lead +2.4,
+  streak 12) — reference now targets SOXX; SMH liquidating to zero." Retire the
+  "proposed — awaiting config commit" wording for an auto-switched role; that phrase
+  now applies ONLY to a `"pin": true` role (below).
+- **When a role is `"pin": true`,** a `switch_signal` is a genuine proposal awaiting a
+  human config commit — use the PRIOR wording: "`<role>`: <incumbent> → <challenger>
+  proposed (lead +X, streak N) — pinned, awaiting config commit."
 - **When a challenger is leading but `switch_signal` is FALSE** (streak below the
   `hysteresis_runs` threshold, e.g. 3 of the required 10 — session 2026-07-15, Task
   F4), do **NOT** say "proposed" or "awaiting config commit" — that language claims
@@ -645,31 +659,40 @@ runs). Your job is to **echo, not decide**:
   status: "`trend`: DBMF leads KMLM by +2.38pp, streak 3 of 10 required — no
   `switch_signal`." *(2026-07-14 described three roles at streak 2 as "proposed …
   awaiting config commit" — premature; none had reached the hysteresis bar.)*
+- **A challenger inside `LEGACY_EXITS` is never adopted** even at full streak (it
+  would target a name core re-entry is permanently closed to) — if you see a
+  `switch_signal` true with `auto_switched` false and no `pin`, check whether the
+  challenger is a legacy name before assuming something is broken.
 - **The one exception is the `intl_leader` slot**, which follows `leader_pick`
   automatically — execute that rotation as a within-role sell-old/buy-new at the sleeve
   target (the validator permits it even under a closed gate). It is logged to
   `OverrideHistory` (layer `intl_leader_rotation`) so Phase C can grade it vs the
   incumbent.
 
-**Static `selected` vs runtime `leader_pick` — do not conflate them (session
-2026-07-17, Task C).** `role_selection` (a small per-role echo, separate from
-`sleeve_selection`) names every role's static `selected` incumbent, including the
+**Config `selected` vs effective `selected` vs runtime `leader_pick` — three different
+things (session 2026-07-17 Task C, extended 2026-07-27).** `role_selection` (a small
+per-role echo, separate from `sleeve_selection`) names every role's `selected`
+(config baseline/pin) AND `effective_selected` (the live incumbent), including the
 `intl_leader` role — which `sleeve_selection` never covers at all (it only ranks
-`selection: "scorecard"` roles; `intl_leader` is `selection: "rotation"`). Two facts
-about a role's `selected` member:
+`selection: "scorecard"` roles; `intl_leader` is `selection: "rotation"`). Facts about
+a role's members:
 
-- It changes **ONLY** via a committed `sleeve-roles.json` edit — a human disposing of
-  a `switch_signal` (scorecard roles) or a `leader_pick` rotation proposal (the
-  `intl_leader` role). Nothing in your output can deselect it.
-- It keeps its **0.1% / ≥1-share floor** regardless of runtime modulation:
-  `intl_governance.leader_pp` at 0, `leader_pick` at `null` (the lead faded or
-  de-rotation fired), or a scorecard `switch_signal` true — none of these are a
-  deselection. **Do not propose selling a `selected` member's floor position on that
-  basis.** *(2026-07-17: `leader_pick` went null when AIA's lead faded, and the model
-  proposed selling AIA's 1-share floor as "de-rotation triggered, reference = 0%" —
-  the Tier-1 validator correctly rejected it, because AIA was still `intl_leader`'s
-  `selected` member. Report it instead as "AIA floor-held, out of favor — leader_pick
-  null" and move on.)*
+- `selected` (config) changes only via a committed `sleeve-roles.json` edit.
+  `effective_selected` may already differ from it — via an auto-switch (unpinned role,
+  `switch_signal` fired) or because a fresh config edit hasn't yet been read back as
+  `config_selected` by a later run. **Trade toward `effective_selected`, always.**
+- The **floor guarantee follows `effective_selected`**, not the config value: the
+  effective incumbent keeps its 0.1% / ≥1-share floor regardless of runtime modulation
+  (`intl_governance.leader_pp` at 0, `leader_pick` at `null`, a scorecard
+  `switch_signal` true on a role that hasn't crossed the hysteresis bar) — none of
+  these are a deselection. **Do not propose selling the effective incumbent's floor
+  position on that basis.** *(2026-07-17: `leader_pick` went null when AIA's lead
+  faded, and the model proposed selling AIA's 1-share floor as "de-rotation triggered,
+  reference = 0%" — the Tier-1 validator correctly rejected it, because AIA was still
+  `intl_leader`'s effective member. Report it instead as "AIA floor-held, out of favor
+  — leader_pick null" and move on.)* Conversely, once a role HAS auto-switched, the
+  OLD incumbent (e.g. XLV after healthcare_def flips to IHE) LOSES the floor and is
+  correctly sold to zero — do not treat that sell as a floor violation.
 
 ### Event-driven override (read `market_shock` before everything else)
 
@@ -1118,8 +1141,8 @@ A single JSON snapshot for one trading day containing:
 - `market_implied_quadrant` — **market-implied quadrant** from cross-asset tape momentum (#18, 2026-07-23): `implied_quadrant` (Q1-Q4 or `"borderline"`), `confidence` (`high`/`medium`/`low`/`none`), `implied_growth`, `implied_inflation`, `votes[]` (per-signal table: basket momentum 20d/60d, copper/gold, XLY/XLP, DXY trend, breakevens direction, HY OAS trend, 2s10s). Works at borderline regimes — **no dependence on `active_quadrant`** — superseding `price_vs_regime`'s blind spot (which goes `indeterminate` at borderline). The old `price_vs_regime` detector is kept; at a decided macro quadrant both run. **Describe-only** — never touches `reference_weights`. A `market_vs_macro_quadrant` divergence fires when the tape disagrees with the macro call. **§1 one sentence:** "Tape implies {implied_quadrant} ({confidence}; growth {implied_growth} / inflation {implied_inflation})." **§2:** `active` at `high`/`medium` confidence = legitimate de-risk override evidence; at `low`/`none` = not. Record the historical rationale when relevant: *the system cannot be later than the market if the market's own vote is one of its inputs — when tape and realized macro disagree at turns, the tape is early more often than wrong (2022 canonical).* See "Leading growth + market-implied quadrant" section below.
 - `dollar_proxy` — **daily USD proxy from FX pairs** when `DTWEXBGS` is >5d stale (#18 sub-item): `available`, `proxy_direction` (`stronger`/`weaker`/`flat`), `proxy_score` (weighted blend, not the official broad USD index), `components[]` (per-pair EUR/JPY/CNY: latest, delta_20d_pct, usd_direction, as_of), `as_of`. **When `dollar_proxy.available` is `true`, use `proxy_direction` wherever you would cite the DXY trend** — in regional rotation and the `dollar_vs_intl_tilt` divergence inputs. State the basis in one word: "(proxy)". When `available: false` and DTWEXBGS is stale, note the cadence gap and mark `dollar_vs_intl_tilt` inputs as potentially stale.
 - `pnl_decomposition` — **FIFO realized + current unrealized P&L since inception by bucket** (Task C, 2026-07-23): `inception_date`, `fill_count`, three buckets — `core_current` (CORE_ROSTER / role-pool members), `legacy_exits` (LEGACY_EXITS), `off_roster_flex` (everything else, e.g. MU) — each `{realized_usd, unrealized_usd, total_usd, pct_of_equity, contributors[{symbol, ...}]}`. Answers the inception-shortfall attribution question. **§1 scoreboard — one sentence only:** "P&L since inception: core +$X / legacy exits +$Y / off-roster +$Z." Never recompute these figures from `portfolio.positions` or `paper_account`. If `available: false`, skip the sentence. See "P&L decomposition" section below.
-- `sleeve_selection` — the **role member scorecard** (Task E): per scorecard role `{incumbent, scores, ineligible, challenger, lead, streak, switch_signal}`. **Describe-only** — a `switch_signal` NEVER authorizes a trade and NEVER changes `selected`; a human disposes via a config commit. Echo it; when a `switch_signal` is true, add ONE adjudication line (see "Sleeve selection" below). Never trade a non-selected pool member. **Only covers `selection: "scorecard"` roles — see `role_selection` for the `intl_leader` (rotation) role too.**
-- `role_selection` — the **static-selection echo** (session 2026-07-17, Task C), EVERY role's `{role_id, selected, selection}` — including `intl_leader` (`{..., leader_pick}` + a note), which `sleeve_selection` never covers. Check this before ever proposing to reduce a role's `selected` member below its floor: `selected` changes only via a committed config edit, never via runtime modulation (`leader_pick` null, `leader_pp` 0, a scorecard `switch_signal`). See "Static `selected` vs runtime `leader_pick`" below.
+- `sleeve_selection` — the **role member scorecard** (Task E; blanket auto-switch, session 2026-07-27): per scorecard role `{incumbent, config_selected, effective_selected, scores, ineligible, challenger, lead, streak, switch_signal, auto_switched, pinned}`. A `switch_signal` on an UNPINNED role has ALREADY auto-advanced `effective_selected` via `SleeveSelectionState` (logged `sleeve_switch`, graded by Phase C) — `auto_switched: true` means it fired THIS run; `pinned: true` means the role never auto-switches (config wins). Echo it; when `auto_switched` is true, add ONE adjudication line stating the switch already happened (see "Sleeve selection" below) — do NOT call it "proposed" or "awaiting config commit" unless `pinned` is also true. Never trade a non-selected (non-effective) pool member. **Only covers `selection: "scorecard"` roles — see `role_selection` for the `intl_leader` (rotation) role too.**
+- `role_selection` — the **selection echo** (session 2026-07-17 Task C; extended 2026-07-27), EVERY role's `{role_id, selected, effective_selected, selection}` — including `intl_leader` (`{..., leader_pick}` + a note), which `sleeve_selection` never covers. `selected` is the config baseline/pin (changes only via a committed edit); `effective_selected` is the LIVE incumbent you must trade toward and whose floor you must protect — they can differ once a scorecard role has auto-switched. Check `effective_selected` before ever proposing to reduce a role's member below its floor: the floor follows `effective_selected`, not runtime modulation (`leader_pick` null, `leader_pp` 0, a scorecard `switch_signal` that hasn't crossed the hysteresis bar). See "Config `selected` vs effective `selected` vs runtime `leader_pick`" below.
 - `intl_governance` — the **rotation/DXY-governed intl sleeve** (Task F): `{status, rotation_composite, leader_pick, leader_picks, broad_pp, leader_pp, sleeve_target_pp, intl_targets_pct, modifiers, de_rotation}`. **Already baked into `reference_weights`** (the intl roles' targets) — echo it; execute toward the intl targets; the `intl_leader` slot follows `leader_pick` as a within-role substitution. Do NOT re-size the intl tilt yourself.
 - `transition_watch` — the deterministic **pre-staging** signal (`active`, `projected_quadrant`, `direction`, `staged_fraction`, `basis`, `status`). **Already baked into `reference_weights`** (see its `transition_lean`) — surface it as context, do **not** apply it a second time.
 - `flex_state` — **the intraday Flex engine's computed state** (it owns the flex sleeve end-to-end). Per held flex name: the **exit** decision (`next_action` ∈ hold/scale_out/trail/time_stop/stopped, `r_multiple`, `trail_stop`). Per nomination evaluated: the **entry** decision (`entry_trigger` pass/fail, `skip_reason`, `binding`, `size_shares`). Also `quadrant` (the deterministic quadrant the engine used), `as_of`, and **`reconciliation`** (`{status, engine_held, broker_held}` — the deterministic engine-vs-broker check). **When `reconciliation.status` is `ok`, echo the engine's numbers; never recompute or override a flex price/stop/size. When it is `mismatch`, the PAPER ACCOUNT is canonical** — count `broker_held` names as real flex holdings (🔴), run kill-criteria against the broker position using the last recorded kill price from flex/`TradeHistory`, and open no new flex entry in the affected symbol until resolved (see "Reading flex_state" above). Absent ⟹ engine disabled or not yet run that day — say so, don't invent flex levels.

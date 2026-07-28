@@ -210,6 +210,7 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
         "deployment_gate": (snapshot.get("regime_gate") or {}).get("status"),
         "exempt_holds": rex_cfg["exempt_holds"],
         "intl_leader_pick": (snapshot.get("intl_governance") or {}).get("leader_pick"),
+        "effective_selected": _snapshot_effective_selected(snapshot),
     }
 
     # Phase 4 — validate the override records the model emitted (Tier-2 enforcement):
@@ -368,6 +369,7 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
                 report_md += _quadrant_allocation_addendum(
                     snapshot.get("quadrant_allocation") or {}, trades_obj.get("trades", []),
                     gaps, float(vctx.get("equity_usd") or 0),
+                    vctx.get("effective_selected"),
                 )
             except Exception as e:  # noqa: BLE001
                 logger.error("Quadrant allocation addendum failed (non-fatal): %s", e)
@@ -429,6 +431,7 @@ _QUADRANT_ALLOCATION_ORDER = (
 
 def _quadrant_allocation_addendum(
     quadrant_allocation: dict, trades: list[dict], gaps: list[dict], equity: float,
+    effective_selected: dict[str, str] | None = None,
 ) -> str:
     """Markdown addendum: the deterministic POST-TRADE quadrant view — Table A's
     "Recommended" column (session 2026-07-17, Task D). The collector's
@@ -482,7 +485,7 @@ def _quadrant_allocation_addendum(
         if not px:
             unpriced.add(sym)
             continue
-        bucket = quadrant_allocation_bucket(sym)
+        bucket = quadrant_allocation_bucket(sym, effective_selected)
         delta_pp = qty * px / equity * 100.0
         post[bucket] = post.get(bucket, 0.0) + (delta_pp if side == "buy" else -delta_pp)
         # Conservation: a trade moves value BETWEEN buckets, it never creates or
@@ -725,6 +728,24 @@ def _post_validation_cash(trades: list[dict], gaps: list[dict], ctx: dict,
     return cash
 
 
+def _snapshot_effective_selected(snapshot: dict) -> dict[str, str]:
+    """role_id -> effective incumbent ticker (session 2026-07-27 blanket auto-switch),
+    sourced from the collector's `sleeve_selection` block (each scorecard role's
+    `effective_selected` field — the SleeveSelectionState-derived map, NOT the frozen
+    `sleeve-roles.json` config). `{}` when the block is unavailable (old snapshot, or
+    the scorecard build failed that day) — every consumer then falls back to plain
+    config behavior, exactly as before this feature. The analyzer only ECHOES this;
+    the collector-side persisted-state read (before price/earnings universe assembly)
+    is the real resilience layer."""
+    out: dict[str, str] = {}
+    for r in (snapshot.get("sleeve_selection") or {}).get("roles", []):
+        rid = r.get("role_id")
+        eff = r.get("effective_selected")
+        if rid and eff:
+            out[rid] = str(eff).upper()
+    return out
+
+
 def _build_reference_gaps(snapshot: dict) -> tuple[list[dict], dict]:
     """Per-sleeve current-vs-reference rows + account context for `reconcile()`.
 
@@ -859,6 +880,10 @@ def _build_reference_gaps(snapshot: dict) -> tuple[list[dict], dict]:
         # leader_pick passes even before sleeve-roles.json's `selected` is committed to
         # match (Task F, intl_governance).
         "intl_leader_pick": (snapshot.get("intl_governance") or {}).get("leader_pick"),
+        # Session 2026-07-27: role_id -> effective incumbent ticker for the Tier-1
+        # validator's V1 amplifier gate / V1.5 selected-member check / V3 floor
+        # bypass — see _snapshot_effective_selected.
+        "effective_selected": _snapshot_effective_selected(snapshot),
     }
     return gaps, ctx
 

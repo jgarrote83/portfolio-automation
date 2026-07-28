@@ -66,11 +66,32 @@ _ROLES_CONFIG = _load_roles_config()
 _ROLES: dict[str, dict] = {r["role_id"]: r for r in _ROLES_CONFIG.get("roles", [])}
 
 
-def selected_for_role(role_id: str) -> str | None:
-    """The currently `selected` incumbent ticker for a role (None if unknown)."""
-    r = _ROLES.get(role_id)
-    sel = r.get("selected") if r else None
+def _resolved_selected(role: dict, overrides: dict[str, str] | None) -> str | None:
+    """A role's effective `selected` incumbent: `overrides[role_id]` (the live
+    SleeveSelectionState effective map, session 2026-07-27) when present, else the
+    static config `selected`. ``overrides`` is None/empty for every existing caller
+    that predates auto-switch — this must resolve identically to the plain config
+    read in that case."""
+    rid = role.get("role_id")
+    if overrides:
+        eff = overrides.get(rid)
+        if eff:
+            return str(eff).upper()
+    sel = role.get("selected")
     return sel.upper() if isinstance(sel, str) else None
+
+
+def selected_for_role(role_id: str, overrides: dict[str, str] | None = None) -> str | None:
+    """The effective `selected` incumbent ticker for a role (None if unknown).
+
+    ``overrides`` (role_id -> ticker, the SleeveSelectionState effective-selected
+    map) resolves to the auto-switched incumbent when present; omitted/empty falls
+    back to the static `sleeve-roles.json` `selected` (unchanged zero-arg behavior).
+    """
+    r = _ROLES.get(role_id)
+    if r is None:
+        return None
+    return _resolved_selected(r, overrides)
 
 
 def role_of(ticker: str) -> str | None:
@@ -112,11 +133,11 @@ LEGACY_EXITS = ("AMZN", "GOOGL", "INTC", "MCK", "DBA", "TIP", "XSD", "PPA", "EUA
 EXEMPT_HOLDS: tuple[str, ...] = ()
 
 
-def _selected_by_block(block: str) -> tuple[str, ...]:
+def _selected_by_block(block: str, overrides: dict[str, str] | None = None) -> tuple[str, ...]:
     out: list[str] = []
     for r in _ROLES.values():
         if r.get("block") == block:
-            sel = (r.get("selected") or "").upper()
+            sel = _resolved_selected(r, overrides) or ""
             if sel and sel not in out:
                 out.append(sel)
     return tuple(out)
@@ -129,15 +150,30 @@ AMPLIFIER_INTL = _selected_by_block("amplifier_intl")
 DAMPER = _selected_by_block("damper")
 
 
-def _build_quadrant_concentrate() -> dict[str, tuple[str, ...]]:
-    """Per-quadrant CONCENTRATE list = the SELECTED member of every quadrant-governed
-    role tagged with that quadrant. Rotation (intl) and cash roles are excluded."""
+def amplifier_set(overrides: dict[str, str] | None = None) -> set[str]:
+    """The effective Amplifier ticker set (US ∪ intl), recomputed per-call when
+    ``overrides`` (the SleeveSelectionState effective-selected map) is given —
+    e.g. after semis auto-switches SMH→SOXX, SOXX (not SMH) is the amplifier for
+    gate/roster checks. Omitted/empty returns the same frozen ``AMPLIFIER_US ∪
+    AMPLIFIER_INTL`` set every existing caller already relies on."""
+    if not overrides:
+        return set(AMPLIFIER_US) | set(AMPLIFIER_INTL)
+    return (set(_selected_by_block("amplifier_us", overrides))
+            | set(_selected_by_block("amplifier_intl", overrides)))
+
+
+def _build_quadrant_concentrate(overrides: dict[str, str] | None = None) -> dict[str, tuple[str, ...]]:
+    """Per-quadrant CONCENTRATE list = the EFFECTIVE selected member of every
+    quadrant-governed role tagged with that quadrant. Rotation (intl) and cash
+    roles are excluded. ``overrides`` (role_id -> ticker) substitutes an
+    auto-switched incumbent for its role's static config `selected`; omitted/empty
+    reproduces the frozen module-level ``QUADRANT_CONCENTRATE`` exactly."""
     out: dict[str, list[str]] = {"Q1": [], "Q2": [], "Q3": [], "Q4": []}
     for r in _ROLES.values():
         quads = r.get("quadrants")
         if not isinstance(quads, list):   # "rotation" / "cash"
             continue
-        sel = (r.get("selected") or "").upper()
+        sel = _resolved_selected(r, overrides) or ""
         if not sel:
             continue
         for q in quads:
@@ -168,10 +204,11 @@ CORE_ROSTER = _build_core_roster()
 # reference weights by quadrant. A ticker's primary is the FIRST quadrant (Q1→Q4 order)
 # whose concentrate list contains it. International (rotation) role members map to the
 # "intl" bucket (they no longer carry a US-quadrant label); SGOV is the cash sleeve.
-def _build_primary_quadrant_map() -> dict[str, str]:
+def _build_primary_quadrant_map(overrides: dict[str, str] | None = None) -> dict[str, str]:
     m: dict[str, str] = {}
+    concentrate = QUADRANT_CONCENTRATE if not overrides else _build_quadrant_concentrate(overrides)
     for q in ("Q1", "Q2", "Q3", "Q4"):
-        for t in QUADRANT_CONCENTRATE.get(q, ()):
+        for t in concentrate.get(q, ()):
             m.setdefault(t.upper(), q)
     for rid in intl_roles():
         for t in _ROLES[rid].get("pool", ()):
@@ -183,11 +220,18 @@ def _build_primary_quadrant_map() -> dict[str, str]:
 PRIMARY_QUADRANT = _build_primary_quadrant_map()
 
 
-def primary_quadrant(ticker: str) -> str:
+def primary_quadrant(ticker: str, overrides: dict[str, str] | None = None) -> str:
     """The single deterministic bucket for a core ticker: Q1-Q4, "intl" for a
     rotation-governed international name, "cash_sleeve" for SGOV, or "unclassified"
-    for an off-roster/unknown name (never silently dropped)."""
-    return PRIMARY_QUADRANT.get((ticker or "").upper(), "unclassified")
+    for an off-roster/unknown name (never silently dropped).
+
+    ``overrides`` (role_id -> effective ticker) recomputes the map so an
+    auto-switched incumbent (e.g. IHE replacing XLV) lands in its role's quadrant
+    and the deselected old incumbent demotes to "unclassified" — the same
+    treatment any other non-selected pool member already gets. Omitted/empty
+    reproduces the frozen module-level lookup exactly."""
+    m = PRIMARY_QUADRANT if not overrides else _build_primary_quadrant_map(overrides)
+    return m.get((ticker or "").upper(), "unclassified")
 
 
 def favored_bucket(growth_direction: str | None, inflation_direction: str | None) -> list[str]:
@@ -224,31 +268,42 @@ def favored_bucket(growth_direction: str | None, inflation_direction: str | None
     return []
 
 
-def concentrate_names(quadrant: str | None) -> tuple[str, ...]:
-    """Core names to concentrate into for a quadrant label (() if unknown)."""
-    return QUADRANT_CONCENTRATE.get((quadrant or "").upper(), ())
+def concentrate_names(quadrant: str | None, overrides: dict[str, str] | None = None) -> tuple[str, ...]:
+    """Core names to concentrate into for a quadrant label (() if unknown).
+
+    ``overrides`` substitutes an auto-switched role's effective incumbent for its
+    config `selected`; omitted/empty reproduces the frozen zero-arg lookup."""
+    concentrate = QUADRANT_CONCENTRATE if not overrides else _build_quadrant_concentrate(overrides)
+    return concentrate.get((quadrant or "").upper(), ())
 
 
-def intersection_names(buckets: list[str]) -> list[str]:
+def intersection_names(buckets: list[str], overrides: dict[str, str] | None = None) -> list[str]:
     """Core names that concentrate in EVERY quadrant in ``buckets`` (the borderline
     intersection — assets that work across the candidate regimes, e.g. GLD across
-    Q3/Q4). Empty list for an empty/unknown bucket."""
+    Q3/Q4). Empty list for an empty/unknown bucket. ``overrides`` threads an
+    auto-switched incumbent through the same way `concentrate_names` does."""
     if not buckets:
         return []
-    sets = [set(QUADRANT_CONCENTRATE.get(q.upper(), ())) for q in buckets]
+    concentrate = QUADRANT_CONCENTRATE if not overrides else _build_quadrant_concentrate(overrides)
+    sets = [set(concentrate.get(q.upper(), ())) for q in buckets]
     if not sets:
         return []
     common = set.intersection(*sets) if len(sets) > 1 else sets[0]
-    # Preserve a stable, deterministic order (roster order).
+    # Preserve a stable, deterministic order (roster order). Pool membership
+    # (CORE_ROSTER) is unaffected by a selection override.
     return [t for t in CORE_ROSTER if t in common]
 
 
-def is_amplifier(ticker: str) -> bool:
+def is_amplifier(ticker: str, overrides: dict[str, str] | None = None) -> bool:
+    """``overrides`` (role_id -> ticker) recognizes an auto-switched incumbent of an
+    amplifier-block role (e.g. SOXX after semis SMH→SOXX) as an amplifier; the
+    deselected old incumbent is no longer counted. Omitted/empty is the frozen
+    zero-arg ``AMPLIFIER_US ∪ AMPLIFIER_INTL`` check."""
     t = (ticker or "").upper()
-    return t in AMPLIFIER_US or t in AMPLIFIER_INTL
+    return t in amplifier_set(overrides)
 
 
-def quadrant_allocation_bucket(ticker: str) -> str:
+def quadrant_allocation_bucket(ticker: str, overrides: dict[str, str] | None = None) -> str:
     """The Table-A bucket a HELD name's dollars land in (session 2026-07-17, Task D)
     — shared by the collector's pre-trade `quadrant_allocation` block and the
     analyzer's post-trade addendum, so the two can never disagree about which
@@ -268,16 +323,18 @@ def quadrant_allocation_bucket(ticker: str) -> str:
         return "legacy_exits"
     if t not in CORE_ROSTER:
         return "off_roster"
-    pq = primary_quadrant(t)
+    pq = primary_quadrant(t, overrides)
     return pq if pq in ("Q1", "Q2", "Q3", "Q4", "intl", "cash_sleeve") else "unmapped"
 
 
-def selected_core_members() -> tuple[str, ...]:
-    """The `selected` incumbent of every role — the only names the reference
-    can target. Used by the collector to guarantee they are always priced."""
+def selected_core_members(overrides: dict[str, str] | None = None) -> tuple[str, ...]:
+    """The effective `selected` incumbent of every role — the only names the
+    reference can target. Used by the collector to guarantee they are always
+    priced (including a freshly auto-switched incumbent, e.g. IHE, when
+    ``overrides`` — the SleeveSelectionState effective-selected map — is given)."""
     out: list[str] = []
     for r in _ROLES.values():
-        sel = (r.get("selected") or "").upper()
+        sel = _resolved_selected(r, overrides) or ""
         if sel and sel not in out:
             out.append(sel)
     return tuple(out)

@@ -549,9 +549,12 @@ def _load_equity_spy_series(
     return series
 
 
-def _build_price_universe(tickers: list[str], flex_candidate_tickers: list[str]) -> list[str]:
-    """The EOD-price fetch list: held tickers, every role's `selected` incumbent,
-    the ETF watchlist, and flex candidates (order-preserving, deduped).
+def _build_price_universe(
+    tickers: list[str], flex_candidate_tickers: list[str],
+    effective_selected: dict[str, str] | None = None,
+) -> list[str]:
+    """The EOD-price fetch list: held tickers, every role's EFFECTIVE `selected`
+    incumbent, the ETF watchlist, and flex candidates (order-preserving, deduped).
 
     Flex candidates are included so the analyzer can size a buy (weight→shares
     needs a price) and so gatekeeper G2 sees a price for the candidate. Every
@@ -559,10 +562,14 @@ def _build_price_universe(tickers: list[str], flex_candidate_tickers: list[str])
     those are exactly the names `reference_weights` can target — a name with no
     held position and no other reason to be fetched (e.g. KMLM, IEF, VXUS while
     unheld) previously had no price, no gap row, and no way for band enforcement
-    to synthesize the buy that would close its underweight.
+    to synthesize the buy that would close its underweight. ``effective_selected``
+    (session 2026-07-27, blanket auto-switch) substitutes a freshly auto-switched
+    incumbent (e.g. IHE) for its role's static config `selected` — otherwise a
+    switch would target an unpriced name until the NEXT day it happened to also be
+    held or watchlisted (`selected_core_members` handles the substitution).
     """
     return list(dict.fromkeys(
-        tickers + list(selected_core_members()) + _ETF_WATCHLIST
+        tickers + list(selected_core_members(effective_selected)) + _ETF_WATCHLIST
         + list(_LEADING_GROWTH_EXTRAS) + flex_candidate_tickers
     ))
 
@@ -1536,10 +1543,57 @@ def run() -> None:
     to_2w   = (date.today() + timedelta(days=14)).isoformat()
     from_30d = (date.today() - timedelta(days=30)).isoformat()
 
+    # --- Sleeve selection scorecard (Task E; blanket auto-switch, session ---------
+    # 2026-07-27) — describe-only role-member ranking that now ALSO auto-advances an
+    # UNPINNED role's effective `selected` under hysteresis (see _build_sleeve_selection
+    # for the full doctrine: pin / config-edit adoption / LEGACY_EXITS guard). Moved
+    # EARLY — before the earnings/price universe and reference_weights — so a switch
+    # that fires THIS run is priced and targeted THIS run ("ships hot", 2026-07-27
+    # decision), rather than only taking effect the following day.
+    #
+    # `effective_selected`/`substitution` are derived from the PERSISTED table state
+    # FIRST (a plain table read that can't fail the way an FMP-dependent metrics
+    # fetch can), then overwritten with this run's fresh decision on success. A bad
+    # FMP day therefore degrades to yesterday's already-committed state (no
+    # config/effective whipsaw) instead of losing every role's override for the day —
+    # consumers below never see `_new_streak` directly, only these two maps.
+    _roles = roles_config()
+    _prev_streak = _load_sleeve_streak_state()
+    effective_selected: dict[str, str] = _effective_selected_map(_roles, _prev_streak)
+    substitution: dict[str, str] = _substitution_map(_roles, effective_selected)
+    sleeve_selection: dict = {"available": False}
+    _new_streak: dict = {}
+    _sleeve_closes_cache: dict[str, dict[str, float]] = {}
+    try:
+        _metrics = _sleeve_selection_metrics(fmp, _roles, cache=_sleeve_closes_cache)
+        sleeve_selection, _new_streak = _build_sleeve_selection(
+            _roles, _metrics, _prev_streak, selection_config()
+        )
+        _save_sleeve_streak_state(_new_streak)
+        effective_selected = {
+            rid: ns["selected"] for rid, ns in _new_streak.items() if ns.get("selected")
+        }
+        substitution = _substitution_map(_roles, effective_selected)
+        _sig = [r["role_id"] for r in sleeve_selection.get("roles", []) if r.get("switch_signal")]
+        _switched = [r["role_id"] for r in sleeve_selection.get("roles", []) if r.get("auto_switched")]
+        logger.info(
+            "Sleeve selection: %d roles scored, switch_signals=%s, auto_switched=%s, "
+            "substitution=%s",
+            len(sleeve_selection.get("roles", [])), _sig or "none", _switched or "none",
+            substitution or "none",
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Sleeve selection build failed (non-fatal) — effective_selected/"
+            "substitution fall back to the persisted-state read above (no whipsaw)"
+        )
+
     earnings           = fmp.get_earnings_calendar(from_2w, to_2w)
     # B2 (deferred finding 4): filter the market-wide calendar to the book's universe
     # so held names' dates surface and irrelevant names don't. No extra FMP calls.
-    _earn_universe = (set(tickers) | set(selected_core_members())
+    # selected_core_members(effective_selected) includes a freshly auto-switched
+    # incumbent (e.g. IHE) so its earnings date is never dropped mid-rotation.
+    _earn_universe = (set(tickers) | set(selected_core_members(effective_selected))
                       | set(flex_candidate_tickers) | (set(tickers) & set(LEGACY_EXITS)))
     _earn_pre = len(earnings)
     earnings           = _filter_earnings_to_universe(earnings, _earn_universe)
@@ -1659,7 +1713,7 @@ def run() -> None:
     logger.info("FRED: %d series collected", sum(1 for v in macro_data.values() if v))
 
     # --- EOD prices (FMP batch-quote, single call) --------------------------
-    all_tickers = _build_price_universe(tickers, flex_candidate_tickers)
+    all_tickers = _build_price_universe(tickers, flex_candidate_tickers, effective_selected)
     prices = fmp.get_eod_prices(all_tickers)
     logger.info("FMP prices: %d/%d collected (universe: held+selected-core+watchlist+flex)",
                 len(prices), len(all_tickers))
@@ -1913,6 +1967,7 @@ def run() -> None:
             paper_account, growth_axis, inflation_axis, regime_gate,
             regional_rotation, bond_signals, labor_signals, market_shock,
             _load_risk_limits(), transition_watch, intl_governance,
+            effective_selected,
         )
         logger.info(
             "Reference weights: quad=%s conviction=%s(%s) active_target=%s%%core tilt=%s lean=%s binding=%s",
@@ -1938,6 +1993,7 @@ def run() -> None:
             paper_account.get("positions") or [],
             float(paper_account.get("equity") or 0),
             float(paper_account.get("cash") or 0),
+            effective_selected,
         )
         logger.info(
             "Quadrant allocation: buckets=%s total=%s%%",
@@ -1963,28 +2019,6 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Functional coverage build failed (non-fatal)")
 
-    # --- Sleeve selection scorecard (Task E) — describe-only role-member ranking. -
-    # Proposes (never disposes) core member switches; a human commits `selected`.
-    sleeve_selection: dict = {"available": False}
-    _prev_streak: dict = {}
-    _new_streak: dict = {}
-    _sleeve_closes_cache: dict[str, dict[str, float]] = {}
-    try:
-        _roles = roles_config()
-        _metrics = _sleeve_selection_metrics(fmp, _roles, cache=_sleeve_closes_cache)
-        _prev_streak = _load_sleeve_streak_state()
-        sleeve_selection, _new_streak = _build_sleeve_selection(
-            _roles, _metrics, _prev_streak, selection_config()
-        )
-        _save_sleeve_streak_state(_new_streak)
-        _sig = [r["role_id"] for r in sleeve_selection.get("roles", []) if r.get("switch_signal")]
-        logger.info(
-            "Sleeve selection: %d roles scored, switch_signals=%s",
-            len(sleeve_selection.get("roles", [])), _sig or "none",
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("Sleeve selection build failed (non-fatal)")
-
     # --- Session 2026-07-17, Task C: role_selection (static vs runtime doctrine) --
     # Non-fatal, independent of the sleeve_selection try above (a fresh roles_config()
     # read so this never depends on that block's success). `sleeve_selection` only
@@ -1994,7 +2028,7 @@ def run() -> None:
     role_selection: dict = {"roles": []}
     try:
         role_selection = _build_role_selection(
-            roles_config(), (intl_governance or {}).get("leader_pick")
+            roles_config(), (intl_governance or {}).get("leader_pick"), effective_selected
         )
     except Exception:  # noqa: BLE001
         logger.exception("Role selection build failed (non-fatal)")
@@ -2695,15 +2729,18 @@ def _build_series_deltas(macro_data: dict, today: str) -> dict:
         return {"available": False, "reason": str(e)}
 
 
-def _aggregate_by_quadrant(target_weights_pct: dict, literal_cash_pct: float) -> dict:
+def _aggregate_by_quadrant(target_weights_pct: dict, literal_cash_pct: float,
+                           effective_selected: dict[str, str] | None = None) -> dict:
     """Deterministic per-quadrant aggregation of the reference `target_weights_pct`
     (Task 5). Each ticker lands in exactly one bucket via `primary_quadrant`; SGOV's
     target plus the literal-cash buffer form the `cash_sleeve` bucket. The analyzer
     echoes this verbatim rather than re-deriving quadrant totals freehand. Sums to
-    ~100 within rounding (sub-0.05% floors already dropped from target_weights_pct)."""
+    ~100 within rounding (sub-0.05% floors already dropped from target_weights_pct).
+    ``effective_selected`` (session 2026-07-27) buckets a freshly auto-switched
+    incumbent (e.g. IHE) into its role's quadrant instead of "unclassified"."""
     buckets = {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0, "intl": 0.0, "cash_sleeve": 0.0}
     for tkr, w in (target_weights_pct or {}).items():
-        q = primary_quadrant(tkr)
+        q = primary_quadrant(tkr, effective_selected)
         buckets[q] = buckets.get(q, 0.0) + float(w or 0.0)
     buckets["cash_sleeve"] += float(literal_cash_pct or 0.0)
     return {k: round(v, 2) for k, v in buckets.items()}
@@ -2781,7 +2818,8 @@ def _build_functional_coverage(positions: list[dict], equity: float) -> dict:
     }
 
 
-def _build_quadrant_allocation(positions: list[dict], equity: float, cash_usd: float) -> dict:
+def _build_quadrant_allocation(positions: list[dict], equity: float, cash_usd: float,
+                               effective_selected: dict[str, str] | None = None) -> dict:
     """Deterministic Table-A "Current % of equity" view (session 2026-07-17, Task D).
 
     Companion to `_aggregate_by_quadrant` (the Reference column) — uses the SAME
@@ -2819,7 +2857,7 @@ def _build_quadrant_allocation(positions: list[dict], equity: float, cash_usd: f
         except (TypeError, ValueError):
             mv = 0.0
         pct = round(mv / equity * 100.0, 4)
-        bucket = quadrant_allocation_bucket(sym)
+        bucket = quadrant_allocation_bucket(sym, effective_selected)
         buckets[bucket] = round(buckets[bucket] + pct, 4)
         contributions[bucket].append({"symbol": sym, "pct_of_equity": pct})
 
@@ -4439,6 +4477,63 @@ def _member_momentum_score(metrics: dict, expense_ratio: float,
     return terms / wsum - er_mult * float(expense_ratio or 0.0)
 
 
+def _resolve_effective_incumbent(cfg_selected: str, pinned: bool, prev: dict) -> str:
+    """The effective incumbent for a scorecard role, given its PERSISTED state
+    (SleeveSelectionState) — shared by `_build_sleeve_selection` and
+    `_effective_selected_map` so the two can never disagree on what "effective"
+    means for the same input state (session 2026-07-27, blanket auto-switch).
+
+    `"pin": true` (config) always wins: config is the live authority. Otherwise, an
+    UNPINNED role whose config `selected` changed since the last run
+    (`config_selected` mismatch — a human commit) is treated as freshly
+    authoritative (D-G2): the config edit is adopted immediately, never silently
+    shadowed by a stale auto-switch. Absent either condition, the persisted
+    `selected` (which may be an auto-switched challenger) is the incumbent — falling
+    back to config on a role never seen before (empty/missing prior state).
+    """
+    prev_cfg = (prev.get("config_selected") or "").upper()
+    if pinned or (prev_cfg and prev_cfg != cfg_selected):
+        return cfg_selected
+    return (prev.get("selected") or cfg_selected).upper()
+
+
+def _effective_selected_map(roles: list[dict], streak_state: dict) -> dict[str, str]:
+    """role_id -> effective incumbent ticker for every SCORECARD role, resolved
+    purely from PERSISTED state (no scores/metrics) — the safe, always-available
+    basis every non-report consumer (price/earnings universe, reference weights,
+    the D2 zeroing loop, quadrant bucketing, the Tier-1 validator) reads. Rotation
+    roles (intl_broad/intl_leader) and the cash role are excluded — untouched by
+    this feature (intl_leader keeps its own leader_pick auto-rotation path)."""
+    out: dict[str, str] = {}
+    for r in roles:
+        if r.get("selection") != "scorecard":
+            continue
+        rid = r["role_id"]
+        cfg_selected = (r.get("selected") or "").upper()
+        pinned = bool(r.get("pin"))
+        prev = streak_state.get(rid) or {}
+        out[rid] = _resolve_effective_incumbent(cfg_selected, pinned, prev)
+    return out
+
+
+def _substitution_map(roles: list[dict], effective_selected: dict[str, str]) -> dict[str, str]:
+    """config `selected` ticker -> effective ticker, only where an unpinned
+    auto-switch has moved them apart. Lets a name statically listed in config
+    elsewhere (e.g. `risk-limits.json`'s `no_read_ballast.ballast_names`) be
+    remapped to the live incumbent instead of routing weight to a name the D2
+    zeroing loop is about to zero (session 2026-07-27, Change 2 item 4)."""
+    out: dict[str, str] = {}
+    for r in roles:
+        if r.get("selection") != "scorecard":
+            continue
+        rid = r["role_id"]
+        cfg_sel = (r.get("selected") or "").upper()
+        eff = effective_selected.get(rid)
+        if cfg_sel and eff and cfg_sel != eff:
+            out[cfg_sel] = eff
+    return out
+
+
 def _build_sleeve_selection(roles: list[dict], metrics_by_ticker: dict,
                             streak_state: dict, cfg: dict) -> tuple[dict, dict]:
     """Rank each SCORECARD role's pool. Returns (block, new_streak_state).
@@ -4446,8 +4541,20 @@ def _build_sleeve_selection(roles: list[dict], metrics_by_ticker: dict,
     A member is INELIGIBLE this run if its 120d return correlation to the role
     benchmark_proxy < min_benchmark_corr (no off-role chasing). The `switch_signal`
     fires only under hysteresis: a challenger must lead the incumbent by >=
-    hysteresis_lead for >= hysteresis_runs consecutive runs (streak persisted, reset on
-    lead loss / challenger change). Never auto-trades; never edits `selected`.
+    hysteresis_lead for >= hysteresis_runs consecutive runs (streak persisted, reset
+    on lead loss / challenger change).
+
+    Blanket autonomous switching (session 2026-07-27): a `switch_signal` on an
+    UNPINNED role auto-advances the streak state's `selected` field — this IS the
+    effective incumbent (see `_resolve_effective_incumbent` / `_effective_selected_map`,
+    consumed by reference weights, the D2 zeroing loop, quadrant bucketing, and the
+    Tier-1 validator). `sleeve-roles.json`'s `selected` is the baseline/pin, not the
+    live authority: `"pin": true` disables auto-switch for that role and its state is
+    forced back to config every run; an unpinned role whose config `selected` changed
+    since the last run is adopted as freshly authoritative (D-G2), resetting the
+    streak. A challenger inside LEGACY_EXITS is never adopted (it would create a
+    buy-side deadlock — legacy names can never be bought back into core, so a
+    reference that targeted one would be structurally unfillable, the VXUS pattern).
     """
     weights = cfg.get("momentum_weights") or {"r120": 0.5, "r60": 0.3, "r252": 0.2}
     er_mult = float(cfg.get("expense_penalty_mult", 1.0))
@@ -4461,9 +4568,14 @@ def _build_sleeve_selection(roles: list[dict], metrics_by_ticker: dict,
         if r.get("selection") != "scorecard":
             continue
         rid = r["role_id"]
-        incumbent = (r.get("selected") or "").upper()
+        cfg_selected = (r.get("selected") or "").upper()
+        pinned = bool(r.get("pin"))
         pool = [str(m).upper() for m in r.get("pool", [])]
         ers = {str(k).upper(): v for k, v in (r.get("expense_ratio") or {}).items()}
+
+        prev = streak_state.get(rid) or {}
+        incumbent = _resolve_effective_incumbent(cfg_selected, pinned, prev)
+
         scores: dict = {}
         ineligible: list[str] = []
         for m in pool:
@@ -4482,59 +4594,96 @@ def _build_sleeve_selection(roles: list[dict], metrics_by_ticker: dict,
             challenger, ch_score = max(cand, key=lambda kv: kv[1])
             if inc_score is not None:
                 lead = round(ch_score - inc_score, 2)
-        prev = streak_state.get(rid) or {}
+
         if challenger and inc_score is not None and lead >= lead_thr:
             streak = prev.get("streak", 0) + 1 if prev.get("challenger") == challenger else 1
-            new_state[rid] = {"challenger": challenger, "streak": streak, "selected": incumbent}
+            switch_now = (streak >= runs_thr and not pinned
+                          and challenger not in LEGACY_EXITS)
+            new_sel = challenger if switch_now else incumbent
+            new_state[rid] = {
+                "challenger": None if switch_now else challenger,
+                "streak": 0 if switch_now else streak,
+                "selected": new_sel,
+                "config_selected": cfg_selected,
+            }
         else:
             streak = 0
-            new_state[rid] = {"challenger": None, "streak": 0, "selected": incumbent}
+            switch_now = False
+            new_state[rid] = {
+                "challenger": None,
+                "streak": 0,
+                "selected": incumbent,
+                "config_selected": cfg_selected,
+            }
         out_roles.append({
             "role_id": rid,
             "incumbent": incumbent,
+            "config_selected": cfg_selected,
+            "effective_selected": new_state[rid]["selected"],
             "scores": scores,
             "ineligible": ineligible,
             "challenger": challenger,
             "lead": lead,
             "streak": streak,
             "switch_signal": streak >= runs_thr,
+            "auto_switched": switch_now,
+            "pinned": pinned,
         })
     return (
         {
             "available": True,
             "roles": out_roles,
             "_note": (
-                "Describe-only. A switch_signal NEVER auto-trades and NEVER edits "
-                "`selected` — a human commits the new selected to sleeve-roles.json."
+                "A switch_signal on an UNPINNED role auto-advances the EFFECTIVE "
+                "incumbent via SleeveSelectionState (logged as a sleeve_switch "
+                "OverrideHistory row, graded by Phase C vs the incumbent "
+                "counterfactual); `sleeve-roles.json`'s `selected` is the "
+                "baseline/pin, not the live authority — an unpinned config edit is "
+                "adopted as freshly authoritative on the next run, and "
+                "`\"pin\": true` on a role disables auto-switch and reverts it to "
+                "config."
             ),
         },
         new_state,
     )
 
 
-def _build_role_selection(roles: list[dict], intl_leader_pick: str | None) -> dict:
-    """Static `selected` incumbent per role, EVERY role (session 2026-07-17, Task C)
-    — `sleeve_selection` (Task E, above) only ranks "scorecard" roles' candidate
-    pools, so a "rotation" role like `intl_leader` never appears there at all. That
-    left the model nothing to check before conflating `intl_governance`'s RUNTIME
-    `leader_pick` going null (normal daily de-rotation modulation — the lead faded,
-    not a deselection) with an actual deselection of the role's `selected` member
-    (2026-07-17: the model proposed selling AIA's 1-share floor because
-    `leader_pick` went null, which the Tier-1 validator correctly rejected — the
-    static `selected` only changes via a committed `sleeve-roles.json` edit,
-    triggered by a human disposing of a `switch_signal`/`leader_pick` rotation
-    proposal, never automatically).
+def _build_role_selection(
+    roles: list[dict], intl_leader_pick: str | None,
+    effective_selected: dict[str, str] | None = None,
+) -> dict:
+    """Static `selected` (config baseline/pin) + EFFECTIVE `selected` incumbent per
+    role, EVERY role (session 2026-07-17, Task C; extended 2026-07-27 for the
+    blanket scorecard auto-switch) — `sleeve_selection` (Task E, above) only ranks
+    "scorecard" roles' candidate pools, so a "rotation" role like `intl_leader`
+    never appears there at all. That left the model nothing to check before
+    conflating `intl_governance`'s RUNTIME `leader_pick` going null (normal daily
+    de-rotation modulation — the lead faded, not a deselection) with an actual
+    deselection of the role's `selected` member (2026-07-17: the model proposed
+    selling AIA's 1-share floor because `leader_pick` went null, which the Tier-1
+    validator correctly rejected).
 
-    Describe-only, like `sleeve_selection` — never trades, never edits `selected`.
+    `selected` is the config baseline/pin — it changes ONLY via a committed
+    `sleeve-roles.json` edit. `effective_selected` (session 2026-07-27) is the
+    LIVE incumbent a scorecard role's `switch_signal` may have already advanced to
+    via `SleeveSelectionState` (auto-advance on an unpinned role); it equals
+    `selected` for every rotation/cash role and for any scorecard role that hasn't
+    auto-switched (or is pinned). The floor guarantee follows `effective_selected`,
+    not the static config value — a deselected-by-state member (D-G1) loses it.
+    Describe-only — never trades, never itself edits `selected`.
     """
+    eff = effective_selected or {}
     out = []
     for r in roles:
+        rid = r.get("role_id")
+        cfg_selected = (r.get("selected") or "").upper()
         entry = {
-            "role_id": r.get("role_id"),
-            "selected": (r.get("selected") or "").upper(),
+            "role_id": rid,
+            "selected": cfg_selected,
+            "effective_selected": eff.get(rid, cfg_selected),
             "selection": r.get("selection"),
         }
-        if r.get("role_id") == "intl_leader":
+        if rid == "intl_leader":
             entry["leader_pick"] = intl_leader_pick
             entry["note"] = (
                 "`selected` changes ONLY via a committed sleeve-roles.json edit "
@@ -4548,10 +4697,15 @@ def _build_role_selection(roles: list[dict], intl_leader_pick: str | None) -> di
     return {
         "roles": out,
         "_note": (
-            "Describe-only, mirrors sleeve_selection's non-authorization doctrine. "
-            "The static `selected` member of every role keeps its floor regardless "
+            "`selected` is the config baseline/pin (changes only via a committed "
+            "edit); `effective_selected` is the LIVE incumbent, which a scorecard "
+            "role's switch_signal may have already auto-advanced to via "
+            "SleeveSelectionState (logged sleeve_switch, graded by Phase C) — "
+            "`\"pin\": true` on a role keeps the two identical. The floor guarantee "
+            "follows effective_selected: it keeps its 0.1%/≥1-share floor regardless "
             "of runtime modulation (leader_pp=0, leader_pick=null, switch_signal "
-            "true) — only a committed config change deselects it."
+            "true), while a member DESELECTED by an auto-switch loses the floor "
+            "(sell-to-zero, same as a committed config change)."
         ),
     }
 
@@ -4588,7 +4742,10 @@ def _sleeve_selection_metrics(fmp: FMPClient, roles: list[dict],
 
 
 def _load_sleeve_streak_state() -> dict:
-    """Per-role hysteresis streak + last-seen selected from Table Storage (→ {})."""
+    """Per-role hysteresis streak + last-seen selected (+ `config_selected`, the
+    D-G2 adoption anchor, session 2026-07-27) from Table Storage (→ {}). A row
+    written before this feature lacks `config_selected` — read back as ``None``,
+    which `_resolve_effective_incumbent` treats as "no adoption trigger yet"."""
     state: dict = {}
     for e in query_entities(_SLEEVE_STATE_TABLE):
         rid = e.get("RowKey")
@@ -4597,6 +4754,7 @@ def _load_sleeve_streak_state() -> dict:
                 "challenger": (e.get("challenger") or None) or None,
                 "streak": int(e.get("streak") or 0),
                 "selected": (e.get("selected") or None) or None,
+                "config_selected": (e.get("config_selected") or None) or None,
             }
     return state
 
@@ -4609,6 +4767,7 @@ def _save_sleeve_streak_state(new_state: dict) -> None:
             "challenger": s.get("challenger") or "",
             "streak": int(s.get("streak") or 0),
             "selected": s.get("selected") or "",
+            "config_selected": s.get("config_selected") or "",
         })
 
 
@@ -4828,6 +4987,7 @@ def _build_reference_weights(
     cfg: dict,
     transition_watch: dict | None = None,
     intl_governance: dict | None = None,
+    effective_selected: dict[str, str] | None = None,
 ) -> dict:
     """Deterministic per-ticker REFERENCE allocation the analyzer executes toward.
 
@@ -4924,10 +5084,10 @@ def _build_reference_weights(
     if borderline:
         # Intersection blend: cross-regime names take the lion's share; the divergent
         # (single-bucket) names are staged at partial size. Never a freeze.
-        inter = intersection_names(bucket)
+        inter = intersection_names(bucket, effective_selected)
         union = []
         for q in bucket:
-            for t in concentrate_names(q):
+            for t in concentrate_names(q, effective_selected):
                 if t not in union:
                     union.append(t)
         divergent = [t for t in union if t not in inter]
@@ -4945,14 +5105,14 @@ def _build_reference_weights(
                 raw_core[t] = raw_core.get(t, 0.0) + per
         concentrate = list(raw_core.keys())
     else:
-        concentrate = list(concentrate_names(quad))
+        concentrate = list(concentrate_names(quad, effective_selected))
         raw_core = {}
         if concentrate:
             # Split the active-quadrant target. If the quadrant has an amplifier
             # (Q1/Q2), bias the US-vs-intl halves by the dollar switch; otherwise
             # equal-weight the concentrate names.
-            amp = [t for t in concentrate if is_amplifier(t)]
-            non_amp = [t for t in concentrate if not is_amplifier(t)]
+            amp = [t for t in concentrate if is_amplifier(t, effective_selected)]
+            non_amp = [t for t in concentrate if not is_amplifier(t, effective_selected)]
             if amp and (quad in ("Q1", "Q2")):
                 intl = [t for t in amp if t in set(AMPLIFIER_INTL)]
                 us = [t for t in amp if t not in set(AMPLIFIER_INTL)]
@@ -4985,7 +5145,16 @@ def _build_reference_weights(
     nrb = cfg.get("no_read_ballast") or _RISK_LIMITS_DEFAULTS["no_read_ballast"]
     no_read = proxy["score"] >= float(nrb.get("conviction_score_min", 7.0))
     if no_read:
-        ballast = [t for t in nrb.get("ballast_names", ["GLD", "TLT"]) if t in CORE_ROSTER]
+        # Session 2026-07-27: route each static ballast name through `substitution`
+        # (config ticker -> live auto-switched ticker) FIRST. Without this, a
+        # ballast name whose role has since auto-switched (e.g. a future gold
+        # GLD→GLDM switch) would have its ~55%-of-core weight assigned here, only
+        # for the D2 zeroing loop below to zero it right back (GLD is no longer
+        # `gold`'s effective selected member) — a degenerate no-read reference that
+        # silently drops the ballast money instead of routing it to GLDM.
+        _ballast_sub = _substitution_map(roles_config(), effective_selected or {})
+        ballast = [_ballast_sub.get(t, t) for t in nrb.get("ballast_names", ["GLD", "TLT"])]
+        ballast = [t for t in ballast if t in CORE_ROSTER]
         if ballast:
             ballast_share = float(nrb.get("ballast_target_pct_of_core", 55.0))
             per = ballast_share / len(ballast)
@@ -5002,7 +5171,7 @@ def _build_reference_weights(
     tw_applied = False
     if tw.get("active") and tw.get("projected_quadrant"):
         f = float(tw.get("staged_fraction") or 0.0)
-        proj_names = list(concentrate_names(tw["projected_quadrant"]))
+        proj_names = list(concentrate_names(tw["projected_quadrant"], effective_selected))
         base_total = sum(raw_core.values())
         if f > 0 and proj_names and base_total > 0:
             blended = {t: w * (1.0 - f) for t, w in raw_core.items()}
@@ -5042,7 +5211,15 @@ def _build_reference_weights(
     # selected member keeps its floor, so a future `selected` commit (e.g. XLV→IHE)
     # transfers the floor+reference to the new incumbent on the next collector run —
     # the mechanism follows the config, not the ticker. Rotation roles already zeroed.
-    _selected_incumbents = {(r.get("selected") or "").upper() for r in roles_config()}
+    #
+    # Session 2026-07-27: keyed on the EFFECTIVE selected set, not the frozen config
+    # one — an auto-switched role's OLD incumbent (e.g. XLV after healthcare_def
+    # switches to IHE) must be zeroed here (D-G1: sell-to-zero, committed-switch
+    # parity), while the NEW effective incumbent (IHE) must NOT be — it is what
+    # `selected_core_members(effective_selected)` now returns for that role instead
+    # of the config value. Left config-based, this loop would zero IHE's freshly
+    # substituted target right back the moment it appears in `raw_core`.
+    _selected_incumbents = set(selected_core_members(effective_selected))
     for _r in roles_config():
         if _r.get("quadrants") == "rotation":
             continue
@@ -5105,7 +5282,7 @@ def _build_reference_weights(
     # its own footnote summed to ~58% and the column totalled ~89.5%).
     literal_cash_pct = round(weights.pop("__cash__", 0.0), 3)
     target_pct = {t: w for t, w in sorted(weights.items()) if w >= 0.05}
-    by_quadrant = _aggregate_by_quadrant(target_pct, literal_cash_pct)
+    by_quadrant = _aggregate_by_quadrant(target_pct, literal_cash_pct, effective_selected)
 
     # --- which constraints bound (surface, like flex `binding`) -----------------
     binding: list[str] = []

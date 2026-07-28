@@ -89,12 +89,11 @@ import logging
 import math
 
 from shared.quadrants import (
-    AMPLIFIER_INTL,
-    AMPLIFIER_US,
     CORE_ROSTER,
     DAMPER,
     EXEMPT_HOLDS,
     LEGACY_EXITS,
+    amplifier_set,
     role_of,
     selected_for_role,
 )
@@ -102,21 +101,27 @@ from shared.reference_execution import REFERENCE_EXECUTION_DEFAULTS, allowed_res
 
 logger = logging.getLogger(__name__)
 
-_AMPLIFIER = set(AMPLIFIER_US) | set(AMPLIFIER_INTL)
 _DEFENSIVE = set(DAMPER) | {"SGOV"}
 _EPS_PP = 0.05
 
 
-def _non_selected_pool_member(sym: str, intl_leader_pick: str | None) -> bool:
-    """True when `sym` belongs to a role's pool but isn't that role's `selected`
-    incumbent — mirrors V1.5's selection logic (including the `intl_leader` /
-    `leader_pick` auto-rotation exception) so the sell-side floor bypass (Task B,
-    2026-07-13 audit finding 2) can never disagree with V1.5's buy-side block on
-    which member is "the" selected one."""
+def _non_selected_pool_member(
+    sym: str, intl_leader_pick: str | None,
+    effective_selected: dict[str, str] | None = None,
+) -> bool:
+    """True when `sym` belongs to a role's pool but isn't that role's EFFECTIVE
+    `selected` incumbent — mirrors V1.5's selection logic (including the
+    `intl_leader` / `leader_pick` auto-rotation exception, and now the blanket
+    scorecard auto-switch's `effective_selected` map, session 2026-07-27) so the
+    sell-side floor bypass (Task B, 2026-07-13 audit finding 2) can never disagree
+    with V1.5's buy-side block on which member is "the" selected one — after an
+    auto-switch (e.g. semis SMH→SOXX) the DESELECTED old incumbent must get this
+    bypass (D-G1: sell-to-zero, committed-switch parity) while the newly effective
+    incumbent keeps its floor."""
     r = role_of(sym)
     if r is None:
         return False
-    if sym == selected_for_role(r):
+    if sym == selected_for_role(r, effective_selected):
         return False
     if r == "intl_leader" and intl_leader_pick and sym == intl_leader_pick:
         return False
@@ -146,7 +151,12 @@ def validate_trades(
 
     Args mirror ``reconcile``; ``gaps`` rows additionally carry ``held_qty``.
     ``quadrant_ctx`` may carry ``intl_leader_pick`` (the current
-    ``intl_governance.leader_pick``) for the V1.5 intl_leader auto-rotation exception.
+    ``intl_governance.leader_pick``) for the V1.5 intl_leader auto-rotation exception,
+    and ``effective_selected`` (role_id -> ticker, the SleeveSelectionState
+    effective-selected map, session 2026-07-27) so V1's amplifier gate, V1.5's
+    selected-member check, and the V3 floor bypass all resolve a scorecard role's
+    LIVE auto-switched incumbent rather than the frozen `sleeve-roles.json` config
+    — absent/empty behaves exactly as before (every check resolves to config).
     Returns ``{"trades": [stamped, possibly clamped, sells-first], "rejected":
     [records with reasons], "summary": {"passed", "clamped", "rejected"}}``.
     With no ``gaps``/equity (reference or account unavailable) the weight-based rules
@@ -167,6 +177,10 @@ def validate_trades(
     gate = str(ctx.get("deployment_gate") or "").lower()
     exempt = {str(t).upper() for t in (ctx.get("exempt_holds") or EXEMPT_HOLDS)}
     intl_leader_pick = str(ctx.get("intl_leader_pick") or "").upper() or None
+    effective_selected = {
+        str(k): str(v).upper() for k, v in (ctx.get("effective_selected") or {}).items() if v
+    }
+    _amp = amplifier_set(effective_selected)
     # Task 2: the literal-cash buffer (SGOV carve-out) — reference_weights.
     # literal_cash_target_pct, defaulting to the 1.5% cash buffer if absent.
     literal_cash_buffer_pct = float(ctx.get("literal_cash_target_pct") or 1.5)
@@ -251,7 +265,7 @@ def validate_trades(
                     "through flex_nominations)"
                 ])
                 continue
-            if gate != "open" and sym in _AMPLIFIER:
+            if gate != "open" and sym in _amp:
                 # Equal-weight within-role substitution carve-out (Task D): a buy of the
                 # role's new selected member funded by selling the old member of the SAME
                 # role at >= this buy's notional is regime-neutral, not net-new beta.
@@ -276,7 +290,7 @@ def validate_trades(
         if side == "buy":
             brole = role_of(sym)
             if brole is not None:
-                sel = selected_for_role(brole)
+                sel = selected_for_role(brole, effective_selected)
                 if sym != sel and not (brole == "intl_leader"
                                         and intl_leader_pick and sym == intl_leader_pick):
                     _reject(t, reasons + [
@@ -320,7 +334,8 @@ def validate_trades(
             # selected out-of-favor name can legitimately show ref 0 while still owed
             # its floor.
             floor_lb = 0.0 if (
-                sym in LEGACY_EXITS or _non_selected_pool_member(sym, intl_leader_pick)
+                sym in LEGACY_EXITS
+                or _non_selected_pool_member(sym, intl_leader_pick, effective_selected)
             ) else (floor_pct if sym in CORE_ROSTER else 0.0)
             lo = max(ref - w, floor_lb, 0.0)
             hi = ref + w
@@ -452,11 +467,11 @@ def validate_trades(
         pre_core = sum(float(r.get("current_pct") or 0) for s, r in rows.items()
                        if s in CORE_ROSTER)
         pre_amp = sum(float(r.get("current_pct") or 0) for s, r in rows.items()
-                      if s in _AMPLIFIER)
+                      if s in _amp)
         pre_share = pre_amp / pre_core * 100.0 if pre_core > 0 else 0.0
         threshold = max(ceiling, pre_share)
         core_total = sum(v for s, v in cur_pct.items() if s in CORE_ROSTER)
-        amp_total = sum(v for s, v in cur_pct.items() if s in _AMPLIFIER)
+        amp_total = sum(v for s, v in cur_pct.items() if s in _amp)
         if core_total > 0 and amp_total / core_total * 100.0 > threshold + _EPS_PP:
             logger.error(
                 "Tier-1 aggregate assertion HIT (should be unreachable if V3 holds): "
@@ -466,7 +481,7 @@ def validate_trades(
             )
             for i in range(len(passed) - 1, -1, -1):
                 sym, side, _ = _norm(passed[i])
-                if side == "buy" and sym in _AMPLIFIER:
+                if side == "buy" and sym in _amp:
                     victim = passed.pop(i)
                     delta_pp = victim["quantity"] * float(rows.get(sym, {}).get("price") or 0) \
                         / equity * 100.0
