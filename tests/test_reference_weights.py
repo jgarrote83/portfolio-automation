@@ -342,12 +342,12 @@ def test_non_selected_pool_members_zeroed_selected_present():
     assert tw.get("GLD", 0.0) > 0.0
 
 
-def test_b1_mechanism_follows_config_not_ticker(monkeypatch):
-    """Flipping `selected` for healthcare_def to IHE moves the zeroing: XLV (no longer
-    selected) is now zeroed. The mechanism follows the config, not the ticker."""
-    import copy
-
-    from collector import handler as H
+def test_b1_mechanism_follows_effective_selected_not_ticker():
+    """Overriding healthcare_def's effective incumbent to IHE (session 2026-07-27
+    blanket auto-switch — the SAME `effective_selected` map a config commit OR a
+    scorecard auto-switch produces) moves BOTH halves: XLV (no longer effective)
+    is zeroed AND IHE (now effective) inherits the target. The mechanism follows
+    `effective_selected`, not the ticker."""
     g, i = _axes("falling", "rising")  # Q3
     paper = _paper({"XLV": 3, "GLD": 5, "SGOV": 10})
 
@@ -355,10 +355,11 @@ def test_b1_mechanism_follows_config_not_ticker(monkeypatch):
     assert rw_real["target_weights_pct"].get("XLV", 0.0) > 0.0   # selected incumbent
     assert rw_real["target_weights_pct"].get("IHE", 0.0) == 0.0  # non-selected → zeroed
 
-    patched = copy.deepcopy(H.roles_config())
-    for r in patched:
-        if r["role_id"] == "healthcare_def":
-            r["selected"] = "IHE"
-    monkeypatch.setattr(H, "roles_config", lambda: patched)
-    rw_flip = _build(paper, g, i, _gate("closed", "neutral"))
-    assert rw_flip["target_weights_pct"].get("XLV", 0.0) == 0.0  # now non-selected → zeroed
+    rw_flip = _build_reference_weights(
+        paper, g, i, _gate("closed", "neutral"), _rot(), {}, {}, {}, CFG,
+        effective_selected={"healthcare_def": "IHE"},
+    )
+    assert rw_flip["target_weights_pct"].get("XLV", 0.0) == 0.0    # now non-selected → zeroed
+    assert rw_flip["target_weights_pct"].get("IHE", 0.0) > 0.0     # now effective → gets the target
+    assert (rw_flip["target_weights_pct"]["IHE"]
+            == rw_real["target_weights_pct"]["XLV"])               # inherits the old target exactly

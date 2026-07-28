@@ -3,8 +3,11 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-07-23 (regime responsiveness cycle, branch `feat/20260723-leading-growth-market-implied`).**
-Tasks: A (#17 leading-growth composite + growth-side transition_watch), B (#18 market_implied_quadrant + daily dollar proxy), C (pnl_decomposition inception-shortfall block), D (F6 sweep sizing / cash-floor guard), E (F7 price-sanity quarantine), F (F8 A4 watch_candidates wording). Suite 721→789 green, ruff clean. PR pending review (see entry **#46** below). **Merge timing note:** 07-24 carries the SOXX/IHE sleeve-switch event; review/merge AFTER that day's report is graded so switch behavior is observed on unchanged code.
+**▶ START HERE — last session 2026-07-27 (blanket autonomous sleeve switching, branch `feat/20260727-sleeve-auto-switch`).**
+Scorecard role switches are now fully autonomous — a `switch_signal` on an unpinned role auto-advances the effective incumbent via `SleeveSelectionState`, mirroring the existing `intl_leader` pattern. `sleeve-roles.json`'s `selected` is now the baseline/pin, not the live authority. Suite 805→817 green, ruff clean. **Auto-merge: NO, human review required** — see entry **#47** below for the full design, the "ships hot" consequence (semis SMH→SOXX + healthcare_def XLV→IHE both fire on first post-deploy run), and the FOMC 07-29 deploy-timing flag.
+
+**▶ Prior session 2026-07-23 (regime responsiveness cycle, branch `feat/20260723-leading-growth-market-implied`).**
+Tasks: A (#17 leading-growth composite + growth-side transition_watch), B (#18 market_implied_quadrant + daily dollar proxy), C (pnl_decomposition inception-shortfall block), D (F6 sweep sizing / cash-floor guard), E (F7 price-sanity quarantine), F (F8 A4 watch_candidates wording). Suite 721→789 green, ruff clean. **Merged to master** (see entry **#46** below — its features are live in the 2026-07-24 report).
 
 **▶ Prior session 2026-07-22 post-merge (prompt-completion, branch `fix/20260722-prompt-completion`).**
 PR #28 merged to master (`7be613a`); decision gates A-G1 (last-emission-only persistence)
@@ -1359,10 +1362,96 @@ ticks — is covered by the new F2 orphan sweep + the very next tick's repair).
   position/stale-order state (expected already resolved by the merged executor fix
   at the 07-17 09:35 ET run — confirm via the next `execution_review`).
 
+### 48. XLV/IHE forced-band-buy interlock (2026-07-27 audit F4) — verify post-deploy, closed if clean
+With blanket auto-switch (#47), the healthcare_def rotation (XLV→IHE) now EXECUTES
+(sell-down XLV + buy-up IHE via band enforcement) instead of the pre-47 world where a
+switch_signal was merely a proposal and the model could have kept topping up the
+switched-OUT incumbent (XLV) toward its old reference — the "top-up-the-loser" tension
+#47's design is meant to resolve by construction (D-G1: XLV's reference goes to 0 the
+same run IHE becomes effective). **Action:** confirm post-deploy, once the override
+flips, that XLV's gap row shows `reference_pct: 0.0` and is sold down via
+`band_enforcement` (never band-bought back up) in the actual `daily-trades`/
+`reference_execution` output. If clean, close this item; if a residual top-up path is
+found, it needs an explicit interlock (not designed in #47, since the deterministic
+reference/D2-zeroing/validator layers were verified pure-function correct — this item
+is about confirming their live interaction, not their unit logic).
+
 ---
 
 ## Done
-### 46. 2026-07-23 session: Regime responsiveness cycle + hygiene batch — Done, branch `feat/20260723-leading-growth-market-implied` (PR pending review)
+### 47. 2026-07-27 session: Blanket autonomous sleeve switching — Done, branch `feat/20260727-sleeve-auto-switch` (auto-merge: NO, human review required)
+Jorge's decision (2026-07-27): scorecard sleeve switches become **fully autonomous** —
+a `switch_signal` on an unpinned role auto-advances the role's effective incumbent via
+`SleeveSelectionState`, mirroring the pre-existing `intl_leader` auto-rotation pattern
+(V1.5 already had a runtime-pick exception for that one role). **Blanket:** every
+`switch_signal` fires, no size gate (`pin` is the only per-role brake). `sleeve-roles.json`'s
+`selected` becomes the baseline/pin, not the live authority. **Ships hot:** both live
+signals as of 07-27 (semis SMH→SOXX, healthcare_def XLV→IHE, both streak ≥11) auto-fire
+on the first post-deploy run — the XLV→IHE leg is a ~14% rotation, tranched at
+`tranche_pp_max` (10pp/day); flagged for the reviewer to confirm deploy timing against
+the 2026-07-29 FOMC meeting.
+- **Change 1 (`collector._build_sleeve_selection`):** added `pin` support (a pinned role
+  never auto-switches, state forced back to config); the effective-incumbent read is
+  sticky across runs via a new `config_selected` column on `SleeveSelectionState`
+  (D-G2: an unpinned role's config `selected` change is adopted as freshly authoritative
+  next run, never silently shadowed by an in-flight auto-switch); a challenger inside
+  `LEGACY_EXITS` is never adopted (core re-entry is closed to those names). New
+  `_resolve_effective_incumbent` helper shared by the build function and the two new
+  early-derivation helpers below, so they can never disagree on the same input state.
+- **Change 1b (ordering):** `_effective_selected_map`/`_substitution_map` derive
+  `effective_selected`/`substitution` from the PERSISTED table state; the whole sleeve-
+  selection scorecard build (metrics fetch + `_build_sleeve_selection` + save) was moved
+  EARLY in `collector.run()` — before the price/earnings universe and `reference_weights`
+  — so a switch that fires THIS run is priced and targeted THIS run ("ships hot").
+  Failure-isolated: `effective_selected` is seeded from the plain persisted-state read
+  BEFORE the try block and only overwritten with the fresh decision on success, so an
+  FMP hiccup degrades to yesterday's already-committed state rather than whipsawing the
+  reference back to config for a day.
+- **Change 2 (`shared/quadrants.py`):** new override-aware helpers — `concentrate_names`,
+  `selected_for_role`, `is_amplifier`, `primary_quadrant`, `quadrant_allocation_bucket`,
+  `selected_core_members`, `amplifier_set` — each takes an optional `overrides` (role→
+  ticker) map; omitted/empty reproduces the frozen zero-arg behavior exactly (every
+  existing caller unaffected). Applied throughout `_build_reference_weights` (concentrate/
+  borderline-intersection materialization, the Q1/Q2 amplifier split, a new
+  `no_read_ballast.ballast_names` substitution so a future ballast-role auto-switch, e.g.
+  gold GLD→GLDM, doesn't route weight to a name the D2 loop is about to zero), the D2
+  non-selected-pool-member zeroing loop (now keyed on the EFFECTIVE set — D-G1: the
+  deselected old incumbent is sold to zero, exact parity with a committed config edit),
+  `_aggregate_by_quadrant`, `collector._build_quadrant_allocation`, and the analyzer's
+  post-trade `_quadrant_allocation_addendum`.
+- **Change 3 (`shared/trade_validation.py` + `analyzer/handler.py`):** V1's amplifier gate
+  now resolves the effective amplifier set per call (`amplifier_set`) — closes a genuine
+  Tier-1 gate leak (a gate-closed buy of a newly-effective amplifier incumbent, e.g. SOXX,
+  would otherwise pass V1 since the frozen module-level set still says SMH); V1.5's
+  selected-member check and `_non_selected_pool_member`'s sell-side floor bypass both
+  resolve `effective_selected` too. The analyzer threads `effective_selected` into the
+  validator's `quadrant_ctx`, sourced from the snapshot's `sleeve_selection.roles[]`
+  (`{}` fallback → config behavior if the block is absent).
+- **Change 4 (report/prompt/config surface):** `_build_role_selection` now carries
+  `effective_selected` per role; `project-instructions.md` (core-roster doctrine,
+  "Sleeve selection" section, input-list echo) rewritten to trade toward the effective
+  incumbent and retire "proposed — awaiting config commit" wording for an auto-switched
+  (as opposed to pinned) role; `sleeve-roles.json`'s `_note` + `selection_config._note`
+  document `pin` and the auto-switch/adoption doctrine.
+- **Verified selection-agnostic, not touched:** `flex/regime.py`'s `flex_separation_set`
+  blocks every POOL member of every role (not the `selected` one), so effective ≠ config
+  changes nothing for the flex book. `_build_functional_coverage` (Table B) is
+  role/pool-based, already correct, untouched.
+- **Tests:** 12 new prove-failure-before-fix tests in `tests/test_sleeve_auto_switch.py`
+  (confirmed failing on pre-fix source — the whole module fails to even IMPORT, since
+  `_effective_selected_map` doesn't exist there — then passing post-fix), plus 2 existing
+  tests updated to the new doctrine (`test_sleeve_selection.py`'s
+  `test_switch_signal_never_edits_selected` → `test_single_run_does_not_switch_before_
+  hysteresis_met`; `test_reference_weights.py`'s `test_b1_mechanism_follows_config_not_
+  ticker` → `test_b1_mechanism_follows_effective_selected_not_ticker`, now exercising the
+  real `effective_selected` mechanism instead of monkeypatching `roles_config`). Suite
+  805→817 green, ruff clean.
+- **Out of scope (guardrails):** no git auto-commit (state-override only); no size gate
+  (Jorge's blanket-autonomy decision); hysteresis (`hysteresis_lead`/`hysteresis_runs`)
+  untouched; `flex/regime.py` re-verified, not rebuilt; F1 `series_deltas` weekend-
+  walkback fix is a separate branch (`fix/20260727-series-deltas-weekend-walkback`).
+
+### 46. 2026-07-23 session: Regime responsiveness cycle + hygiene batch — Done, branch `feat/20260723-leading-growth-market-implied` (merged to master, features live in the 2026-07-24 report)
 Six-task PR: Tasks A (#17), B (#18), C (pnl_decomposition), D (F6), E (F7), F (F8). Suite 721→789, ruff clean.
 
 **Completion note (2026-07-24):** The 2026-07-23 push was `0e5258c`. A follow-up

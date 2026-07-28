@@ -119,10 +119,16 @@ def test_streak_resets_when_challenger_changes():
     assert r["challenger"] == "C" and r["streak"] == 1
 
 
-def test_switch_signal_never_edits_selected():
-    # The block reports incumbent = the config `selected`; it is describe-only.
+def test_single_run_does_not_switch_before_hysteresis_met():
+    # A single run (streak 1 of 10 required) never advances `selected` — the
+    # blanket auto-switch (session 2026-07-27) still requires the full hysteresis
+    # streak, just like the human-gated predecessor it replaces.
     roles = [_role(["A", "B"], "A", {"A": 0.1, "B": 0.1})]
     metrics = {"A": _metrics(10, 10, 10, 1.0), "B": _metrics(30, 30, 30, 0.9)}
-    block, _ = _build_sleeve_selection(roles, metrics, {}, CFG)
+    block, state = _build_sleeve_selection(roles, metrics, {}, CFG)
     assert block["roles"][0]["incumbent"] == "A"
-    assert "never" in block["_note"].lower()
+    assert block["roles"][0]["auto_switched"] is False
+    assert state["semis"]["selected"] == "A"
+    # The note documents the auto-switch/pin/adoption doctrine, not a blanket "never".
+    note = block["_note"].lower()
+    assert "auto-advances" in note and "pin" in note
