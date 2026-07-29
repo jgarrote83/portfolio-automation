@@ -123,6 +123,38 @@ def test_missing_value_marker_treated_as_none(monkeypatch):
     assert cpi["delta"] is None
 
 
+def test_weekend_walkback_survives_missing_blob_raises(monkeypatch):
+    """F1 bug (2026-07-27 Monday incident): `read_snapshot` RAISES on a missing
+    blob (unlike `read_executions`'s best-effort None) — back=1/2 hitting a
+    weekend gap must not abort the whole 7-day walkback. back=3 (Friday) has the
+    prior snapshot."""
+    from azure.core.exceptions import ResourceNotFoundError
+
+    def _read(d):
+        if d in ("2026-07-26", "2026-07-25"):   # Sun/Sat — no blob
+            raise ResourceNotFoundError("blob not found")
+        if d == "2026-07-24":   # Friday — the real prior snapshot
+            return {"macro": {"data": _macro("2.81", "2026-06-01")}}
+        raise ResourceNotFoundError("blob not found")
+
+    monkeypatch.setattr(ch, "read_snapshot", _read)
+    result = _build_series_deltas(_macro("2.81", "2026-06-01"), "2026-07-27")
+    assert result["available"] is True
+    assert result["prior_date"] == "2026-07-24"
+
+
+def test_no_snapshot_in_window_all_raising_returns_unavailable_not_crash(monkeypatch):
+    from azure.core.exceptions import ResourceNotFoundError
+
+    def _read(d):
+        raise ResourceNotFoundError("blob not found")
+
+    monkeypatch.setattr(ch, "read_snapshot", _read)
+    result = _build_series_deltas(_macro("2.81", "2026-06-01"), "2026-07-27")
+    assert result["available"] is False
+    assert "no prior snapshot" in result["reason"]
+
+
 def test_untracked_series_not_included(monkeypatch):
     def _read(d):
         if d == "2026-07-16":

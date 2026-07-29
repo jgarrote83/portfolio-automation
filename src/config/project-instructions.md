@@ -75,6 +75,21 @@ executed** — check `execution_review` before repeating or building on it:
   repeated failure across multiple sessions is itself evidence worth naming (e.g. a
   stale resting order, a persistent liquidity issue) — do not just resubmit silently.
 
+### Day P/L zero-watch (diagnostics only — session 2026-07-28)
+
+`day_pl_zero_watch` flags a held position whose reported day P/L printed exactly
+$0.00 while its total P/L moved by more than the configured threshold since the
+prior snapshot — a symptom, not a diagnosis (KMLM printed this three reports
+running, 07-24/07-27/07-28, while USMV/AIA showed the same pattern briefly and
+healed). **This is diagnostics only — you cannot adjudicate upstream-Alpaca-bug
+vs. our-pipeline-mapping-bug from the report alone, so don't try.** If
+`day_pl_zero_watch.flagged` is non-empty, surface each row verbatim (symbol,
+`day_pl_reported`, `total_pl_delta`, and the raw Alpaca fields it echoes —
+`lastday_price`, `current_price`, `unrealized_intraday_pl`, `change_today`) under
+the Data Integrity Warning heading, and note the streak if a symbol has appeared
+before (check `recent_reports`). Do not speculate about root cause beyond what the
+raw fields show; the next session (with more data) adjudicates it.
+
 ---
 
 ## Portfolio structure — role-based core + flex
@@ -147,27 +162,41 @@ future human `selected`/`leader_pick` change can bring it back. Label these trad
   amplifier weight remains gated** — only the substituted portion (≤ what you sold of the
   old member) is exempt; anything above that is a normal gated amplifier buy.
 
-| Role | Selected | Governance |
-|--------|--------|--------------------------------------------------------|
-| us_anchor | SPY | Q1 — US large-cap beta anchor |
-| us_growth | QQQ | Q1 — US mega-cap growth (holds AMZN/GOOGL at index weight) |
-| semis | SMH | Q1 — semiconductors (pool: SMH, XSD, SOXX) |
-| industrials | XLI | Q2 — reflation industrials (pool: XLI, PAVE) |
-| financials | XLF | Q2 — reflation financials |
-| cyclical_value | COWZ | Q2+Q3 — cash-flow/value cyclicals (pool: COWZ, XLB) |
-| energy | VDE | Q2+Q3 — energy real asset (pool: VDE, XLE) |
-| gold | GLD | Q3+Q4 — gold hedge (pool: GLD, GLDM, IAU) |
-| commodities | PDBC | Q2+Q3 — broad commodities |
-| staples | XLP | Q3+Q4 — defensive staples |
-| healthcare_def | XLV | Q3+Q4 — defensive healthcare (pool: XLV, IHE) |
-| tips_short | VTIP | Q2+Q3 — SHORT TIPS (inflation carry, low duration; pool: VTIP, STIP) |
-| trend | KMLM | Q3+Q4 — managed-futures trend / cross-tail convexity (pool: KMLM, DBMF, CTA) |
-| duration_long | TLT | Q4 — long-duration Treasuries (barbell long leg) |
-| duration_mid | IEF | Q4 — intermediate Treasuries (barbell mid leg) |
-| defensive_equity | USMV | Q4 — low-vol defensive equity (pool: USMV, SPLV) |
-| cash | SGOV | cash sleeve (5–15% band, not the quadrant) |
-| intl_broad | VXUS | **rotation-governed** ex-US base (pool: VXUS, ACWX, IXUS) |
-| intl_leader | AIA | **rotation-governed** leader slot — follows `leader_pick` (pool: AIA, EWJ, IEMG, IDMO, VSS, EWZ) |
+| Role | Selected | Block | Governance |
+|--------|--------|--------|--------------------------------------------------------|
+| us_anchor | SPY | **amplifier** | Q1 — US large-cap beta anchor |
+| us_growth | QQQ | **amplifier** | Q1 — US mega-cap growth (holds AMZN/GOOGL at index weight) |
+| semis | SMH | **amplifier** | Q1 — semiconductors (pool: SMH, XSD, SOXX) |
+| industrials | XLI | damper | Q2 — reflation industrials (pool: XLI, PAVE) |
+| financials | XLF | damper | Q2 — reflation financials |
+| cyclical_value | COWZ | damper | Q2+Q3 — cash-flow/value cyclicals (pool: COWZ, XLB) |
+| energy | VDE | damper | Q2+Q3 — energy real asset (pool: VDE, XLE) |
+| gold | GLD | damper | Q3+Q4 — gold hedge (pool: GLD, GLDM, IAU) |
+| commodities | PDBC | damper | Q2+Q3 — broad commodities |
+| staples | XLP | damper | Q3+Q4 — defensive staples |
+| healthcare_def | XLV | damper | Q3+Q4 — defensive healthcare (pool: XLV, IHE) |
+| tips_short | VTIP | damper | Q2+Q3 — SHORT TIPS (inflation carry, low duration; pool: VTIP, STIP) |
+| trend | KMLM | damper | Q3+Q4 — managed-futures trend / cross-tail convexity (pool: KMLM, DBMF, CTA) |
+| duration_long | TLT | damper | Q4 — long-duration Treasuries (barbell long leg) |
+| duration_mid | IEF | damper | Q4 — intermediate Treasuries (barbell mid leg) |
+| defensive_equity | USMV | damper | Q4 — low-vol defensive equity (pool: USMV, SPLV) |
+| cash | SGOV | cash | cash sleeve (5–15% band, not the quadrant) |
+| intl_broad | VXUS | **amplifier** | **rotation-governed** ex-US base (pool: VXUS, ACWX, IXUS) |
+| intl_leader | AIA | **amplifier** | **rotation-governed** leader slot — follows `leader_pick` (pool: AIA, EWJ, IEMG, IDMO, VSS, EWZ) |
+
+**Only the bolded `amplifier` rows are gated by a closed deployment gate (session
+2026-07-28, decision D-1a).** A closed gate blocks a BUY of the **effective**
+amplifier incumbent (`us_anchor`/SPY, `us_growth`/QQQ, `semis`'s effective member —
+SOXX after the 07-28 auto-switch, not SMH — `intl_broad`, `intl_leader`) and nothing
+else. Every `damper`-block role's buy is **PERMITTED** under a closed gate. Never
+label a damper-block name "amplifier", and never write "cannot buy — gate closed"
+for one — the choices for a permitted-but-not-taken damper convergence buy are:
+trade toward reference, or file a `re_risk` override citing evidence that actually
+applies to THAT sleeve (shock level, tape divergence, FOMC proximity — never the
+gate, which does not bind it). *(2026-07-28 labeled PDBC, VDE, VTIP, XLF, XLI, COWZ
+— all dampers — "amplifier... cannot buy" and filed overrides citing a rule that
+does not apply to them; a Tier-1 probe confirmed those buys pass validation under
+the closed gate that day.)*
 
 ### Flex (up to 10 tickers, rotatable) — an intraday CATALYST engine
 
@@ -501,6 +530,33 @@ the datum the block cites, and its as-of date.
 Corrected call: {Qy}. What changed: {the specific data that moved it}.` If the call
 is unchanged, justify it against the realized-CPI and GDPNow evidence specifically —
 not against the prior label.
+
+**Axis-flip confirmation (session 2026-07-28, Task A) — `direction` is now the
+CONFIRMED value; a raw flip needs a second run.** Each axis (`growth_axis`,
+`inflation_axis`) and the policy stance now also carry `raw_direction`/
+`raw_stance`, `direction_pending`/`stance_pending`, and `raw_streak` — a label
+change (to ANY value, including `flat`) only reaches the CONSUMED `direction`/
+`stance` field (the one everything else, including this quadrant call, already
+reads) after the raw classification has persisted for **2 consecutive runs**.
+`direction`/`stance` is still what you echo as the call; the new fields are what
+you cite when the raw classification just moved:
+
+- **When `direction_pending` (or `stance_pending`) is true**, the required
+  sentence shape is: *"raw `{raw_direction}`, unconfirmed (`{raw_streak}` of 2) —
+  reference still anchored `{direction}` [prior regime]."* Do not narrate the raw
+  value as if it were the call.
+- **When a flip just CONFIRMED** (this run's `direction` differs from the prior
+  report's), state that explicitly and, for the growth axis, echo
+  `growth_axis.direction_change_diagnostics.attribution` if present:
+  `"window_rolloff"` means the flip is a windowing artifact (the oldest GDPNow
+  vintage aged out while the newest print's own delta did NOT support the flip
+  direction) — say so plainly and treat the confirmed call with appropriate
+  humility; `"new_print"` means genuine new data. **Never assert the vintage
+  trajectory is "the same" without actually comparing head-to-tail against the
+  prior report** — name a head-vintage rolloff explicitly when
+  `head_vintage_dropped` is true. *(2026-07-28 wrote "the trajectory is the same
+  six vintages" when the window had in fact slid by one — five shared, one new —
+  and the flip it produced was exactly a `window_rolloff` case.)*
 
 **Data Freshness table (mandatory — ship it with every quadrant call).** Before you
 finalize the call, emit this table in Section 2 so the reviewer can see what you
@@ -1199,6 +1255,15 @@ analysis. Use exactly these rows, in this order, with a status glyph (🟢 ok /
 Keep every Note cell to a short phrase. The dashboard is the summary *view*; the
 detail (Freshness table, gate reasoning, axis re-derivation) lives in Section 2.
 
+**"N stale" convention (session 2026-07-28 hygiene).** The Data-trust row's `N`
+MUST equal the count of rows flagged `stale: true` in the `freshness` block,
+counted **per ROW, not per underlying series** — WTI and Brent are two separate
+freshness rows and count as two, even though both describe "oil." Recompute this
+count from `freshness.series` every report; never carry over yesterday's count or
+estimate it. *(2026-07-27 and 07-28 both showed a dashboard count one lower than
+the table's own flagged-row count — 7 vs 8, then 5 vs 6 — the same off-by-one
+drift two sessions running.)*
+
 Then the numbered sections, in this order:
 
 1. **Summary** — 3–5 sentences. State today's quadrant call, the projected 6-month
@@ -1412,6 +1477,22 @@ Then the numbered sections, in this order:
 
       **SGOV sweep sizing rule (Task D F6, 2026-07-23):** any cash→SGOV sweep MUST be sized on the **available surplus** = `literal_cash − literal_cash_target_pct − Σ(same-session proposed buy notionals)`. State the arithmetic in §9 prose (e.g. "literal_cash $X − target $Y − buy notionals $Z = surplus $W → N shares @ $P/share"). Never size the sweep before netting out same-session buys — the 07-22 sweep sized without netting left cash at 0.79% vs the 1.50% target. A deterministic post-model guard trims the sweep if post-all-trades literal cash would fall below `execution_config.literal_cash_floor_pct` (0.75% of equity); if that guard fires it will appear in the validation addendum.
 
+      **The carve-out's budget is PRE-TRADE literal cash only (session 2026-07-28
+      hygiene) — same-day sell proceeds are deliberately EXCLUDED**, even though
+      they land as cash before the SGOV buy executes: crediting them would let a
+      literal-cash→SGOV swap backdoor-grow the cash sleeve past what pre-trade cash
+      supports, which the carve-out exists specifically to prevent (see "Execute
+      toward the reference" / Tier-1 validator notes). Size the proposed sweep to
+      `max(0, pre_trade_literal_cash − literal_cash_target_pct·equity) / SGOV_price`
+      — nothing more — and if the true surplus (including this session's sell
+      proceeds) is larger, say so and state that the remainder completes **T+1**
+      once those proceeds become pre-trade cash. **Never present a sweep quantity
+      the carve-out cannot fund** — if you're unsure, compute the budget explicitly
+      rather than guessing a round number. *(2026-07-28 proposed a 77-share sweep;
+      the pre-trade-cash budget only funded 6 — the validator correctly clamped it
+      there (77 shares would have landed SGOV at 35.63%, past the 28.50% window
+      ceiling), and the report never mentioned the clamp or the remainder.)*
+
       **Size-floored ≠ impossible (2026-07-21 XLV).** When the *tranche minimum*
       (`required_move_today`) floors to 0 shares / below `min_notional_usd`, that is a
       pacing limit, NOT a wall — a **larger discretionary move** toward reference is
@@ -1551,6 +1632,18 @@ Then the numbered sections, in this order:
 
    Include every position you propose to change. Recommended weights should sum
    roughly to 100% across the book.
+
+   **Recommended Weight provenance (session 2026-07-28 hygiene) — never freehand
+   it.** Derive each row's Recommended Weight from the deterministic post-trade
+   view: the quadrant-allocation addendum's post-trade bucket figures, or —
+   per-ticker — `current% ± (validated trade quantity · price / equity · 100)`
+   using the FINAL, validated (possibly clamped) quantity, never the quantity you
+   originally proposed before Tier-1 validation. If a trade you're tabling could be
+   clamped or rejected, state the Recommended Weight as conditional on that outcome
+   rather than asserting a number the validator hasn't confirmed. *(2026-07-28
+   showed SGOV at 28.59% in this table — matching neither the originally-proposed
+   77-share sweep's 35.63%, nor the validator-clamped 6-share outcome's 28.42%: a
+   third, freehand number that matched nothing.)*
 9. **Recommendations** — prose summary of the trades proposed in Part 2.
 
    **Narrative-vs-addendum consistency (Task D):** any claim about post-trade totals

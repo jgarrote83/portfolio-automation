@@ -1425,6 +1425,7 @@ def run() -> None:
     balances: dict = {}
     portfolio_source = "fallback"
     paper_account: dict = {"available": False}
+    day_pl_zero_watch: dict = {"available": False}
 
     ak = secrets.get("AlpacaApiKey")
     asec = secrets.get("AlpacaApiSecret")
@@ -1499,6 +1500,19 @@ def run() -> None:
                 "Alpaca portfolio: %d positions, equity=$%.2f, cash=$%.2f, total_gain=$%.2f",
                 len(positions), equity, cash, total_gain,
             )
+
+            # Task D (2026-07-28): diagnostics-only KMLM day-P/L zero-watch. Non-fatal.
+            try:
+                _prior_total_pl = _load_prior_position_total_pl(today)
+                day_pl_zero_watch = _build_day_pl_zero_watch(pos, _prior_total_pl)
+                if day_pl_zero_watch.get("flagged"):
+                    logger.warning(
+                        "Day-P/L zero-watch: %d position(s) flagged: %s",
+                        len(day_pl_zero_watch["flagged"]),
+                        [f["symbol"] for f in day_pl_zero_watch["flagged"]],
+                    )
+            except Exception:  # noqa: BLE001
+                logger.exception("Day-P/L zero-watch build failed (non-fatal)")
         except Exception:  # noqa: BLE001
             logger.exception("Alpaca portfolio fetch failed — falling back to portfolio.json")
             positions = []
@@ -1812,20 +1826,96 @@ def run() -> None:
     # Growth + inflation direction are the two axes that decide the quadrant. They
     # were previously left to the LLM on raw macro.data — the discretion point where
     # it rationalized its prior label. Now pre-computed like bond/labor signals.
-    growth_axis = _build_growth_axis(macro_data)
-    inflation_axis = _build_inflation_axis(macro_data)
+    growth_axis_raw = _build_growth_axis(macro_data)
+    inflation_axis_raw = _build_inflation_axis(macro_data)
+
+    # Session 2026-07-28 (Task A, decision D-2): N=2 confirmation on the CONSUMED
+    # `direction` field — a label change (any value, including flat) only reaches
+    # every downstream consumer (active_quadrant, reference_weights, regime_gate,
+    # market_vs_macro, ...) after persisting 2 consecutive runs. Non-fatal: a table
+    # read failure degrades to `{}` (D-A2's "first run" path — adopt raw
+    # immediately), never blocks the snapshot.
+    try:
+        _axis_state = _load_axis_direction_state()
+    except Exception:  # noqa: BLE001
+        logger.exception("Axis direction state load failed (non-fatal, D-A2 applies)")
+        _axis_state = {}
+
+    _growth_confirm = _confirm_axis_direction(
+        growth_axis_raw["direction"], _axis_state.get("growth"), today
+    )
+    _inflation_confirm = _confirm_axis_direction(
+        inflation_axis_raw["direction"], _axis_state.get("inflation"), today
+    )
+    growth_axis = {**growth_axis_raw, **_growth_confirm}
+    inflation_axis = {**inflation_axis_raw, **_inflation_confirm}
+
+    # Rolloff diagnostic (growth/GDPNow only) — only meaningful when the RAW
+    # classification actually flipped vs the last persisted raw value (never on
+    # the very first run, where there is no known prior raw to compare against).
+    _prior_growth_raw = (_axis_state.get("growth") or {}).get("raw_direction")
+    if _axis_state.get("growth") and _growth_confirm["raw_direction"] != _prior_growth_raw:
+        try:
+            _prior_growth_axis = _load_prior_growth_axis(today)
+        except Exception:  # noqa: BLE001
+            logger.exception("Prior growth axis walkback failed (non-fatal)")
+            _prior_growth_axis = None
+        growth_axis["direction_change_diagnostics"] = _growth_rolloff_diagnostics(
+            growth_axis_raw.get("gdpnow_trajectory"),
+            (_prior_growth_axis or {}).get("gdpnow_trajectory"),
+            _growth_confirm["raw_direction"],
+            _prior_growth_raw,
+        )
+
     fomc_stance = _load_fomc_stance()
     # Policy axis (#16): resolves manual SEP layer vs market-implied DGS2 momentum;
     # the gate + conviction proxy consume the RESOLVED stance. fomc_stance stays in
-    # the snapshot as the raw manual echo (backward compatible).
-    policy_axis = _build_policy_axis(macro_data, fomc_stance, _load_risk_limits(), today)
+    # the snapshot as the raw manual echo (backward compatible). Session 2026-07-28
+    # Task A: the market-implied half also gets N=2 confirmation (prev_state below).
+    policy_axis = _build_policy_axis(
+        macro_data, fomc_stance, _load_risk_limits(), today, _axis_state.get("policy")
+    )
     regime_gate = _build_regime_gate(growth_axis, inflation_axis, policy_axis)
     logger.info(
-        "Quadrant axes: growth=%s(%s) inflation=%s gate=%s policy=%s(%s)",
+        "Quadrant axes: growth=%s(%s, raw=%s pending=%s) inflation=%s(raw=%s pending=%s) "
+        "gate=%s policy=%s(%s, raw=%s pending=%s)",
         growth_axis.get("direction"), growth_axis.get("confidence"),
-        inflation_axis.get("direction"), regime_gate.get("status"),
+        growth_axis.get("raw_direction"), growth_axis.get("direction_pending"),
+        inflation_axis.get("direction"), inflation_axis.get("raw_direction"),
+        inflation_axis.get("direction_pending"), regime_gate.get("status"),
         policy_axis.get("stance"), policy_axis.get("source"),
+        policy_axis.get("raw_stance"), policy_axis.get("stance_pending"),
     )
+
+    # Persist confirmation state for next run (non-fatal — a write failure never
+    # blocks the snapshot; it just means tomorrow's read falls back to D-A2 too).
+    try:
+        _save_axis_direction_state({
+            "growth": {
+                "raw_direction": _growth_confirm["raw_direction"],
+                "confirmed_direction": _growth_confirm["direction"],
+                "raw_streak": _growth_confirm["raw_streak"],
+                "confirmed_as_of": _growth_confirm["confirmed_as_of"],
+            },
+            "inflation": {
+                "raw_direction": _inflation_confirm["raw_direction"],
+                "confirmed_direction": _inflation_confirm["direction"],
+                "raw_streak": _inflation_confirm["raw_streak"],
+                "confirmed_as_of": _inflation_confirm["confirmed_as_of"],
+            },
+            "policy": {
+                # Persist the market-implied confirmation's OWN state — NEVER the
+                # blended `stance` (which may be a fresh manual value bypassing
+                # confirmation entirely) — so a later stale-manual day resumes
+                # from the real hysteresis position.
+                "raw_direction": policy_axis.get("raw_stance"),
+                "confirmed_direction": policy_axis.get("confirmed_market_implied_stance"),
+                "raw_streak": policy_axis.get("raw_streak"),
+                "confirmed_as_of": policy_axis.get("confirmed_market_implied_as_of") or today,
+            },
+        })
+    except Exception:  # noqa: BLE001
+        logger.exception("Axis direction state save failed (non-fatal)")
 
     # Build order (dependency chain): divergences → transition_watch → reference_weights.
     # divergences (Phase 2) only needs the BINDING active_quadrant, which is exactly
@@ -2320,6 +2410,13 @@ def run() -> None:
         "market_implied_quadrant": market_implied_quadrant,
         "dollar_proxy": dollar_proxy,
         "pnl_decomposition": pnl_decomposition,
+        "day_pl_zero_watch": day_pl_zero_watch,
+        # Session 2026-07-28 (Task E hardening): the FINAL value of `effective_selected`
+        # at snapshot-assembly time — persisted-state-derived, overwritten by the fresh
+        # scorecard on success, so it is populated even on a scorecard-build-failure day.
+        # The analyzer prefers this top-level key over scanning `sleeve_selection.roles[]`
+        # (which is exactly the block that's UNAVAILABLE on such a day).
+        "effective_selected": effective_selected,
         "news": {
             "market": market_news[:50],
             "forex": forex_news[:20],
@@ -2595,6 +2692,97 @@ def _build_execution_review(secrets: dict, today: str) -> dict:
         return {"available": False, "reason": str(e)}
 
 
+# D-D1 default (session 2026-07-28, Task D): a held position's total P/L must have
+# moved by more than this many dollars vs the prior snapshot for a reported $0.00
+# day P/L to be flagged as suspicious (vs. genuinely flat).
+_DAY_PL_ZERO_WATCH_THRESHOLD_USD = 25.0
+
+
+def _load_prior_position_total_pl(today: str) -> dict[str, float] | None:
+    """Prior trading day's per-ticker total P/L (session 2026-07-28, Task D) —
+    the SAME non-fatal 7-day walkback as the Task-B-fixed `_build_series_deltas`
+    (``read_snapshot`` raises on a missing blob; each date is tried individually
+    and skipped on failure). Reads `portfolio.positions[].total_gain` (the
+    canonical mapped field), not the raw Alpaca response — that's stored,
+    unlike the raw `unrealized_intraday_pl`/`lastday_price`/`change_today` this
+    run's OWN raw Alpaca fetch supplies for the flagged row."""
+    d0 = date.fromisoformat(today)
+    for back in range(1, 8):
+        d = (d0 - timedelta(days=back)).isoformat()
+        try:
+            snap = read_snapshot(d)
+        except Exception:  # noqa: BLE001
+            continue
+        if snap:
+            positions = (snap.get("portfolio") or {}).get("positions") or []
+            return {
+                p["ticker"]: float(p.get("total_gain") or 0)
+                for p in positions if p.get("ticker")
+            }
+    return None
+
+
+def _build_day_pl_zero_watch(
+    raw_positions: list[dict],
+    prior_total_pl: dict[str, float] | None,
+    threshold_usd: float = _DAY_PL_ZERO_WATCH_THRESHOLD_USD,
+) -> dict:
+    """Deterministic diagnostic (session 2026-07-28, Task D — KMLM day-P/L
+    zero-watch): flags a held position whose reported day P/L printed exactly
+    $0.00 while its total P/L moved by more than ``threshold_usd`` since the
+    prior snapshot — a symptom, not a diagnosis. Diagnostics ONLY; this module
+    does not (and should not) adjudicate whether Alpaca itself sends the zero
+    (upstream) or our mapping drops it (pipeline) — the flagged row echoes the
+    RAW Alpaca position fields relevant to day-P/L derivation so a human/future
+    session can.
+
+    ``raw_positions`` is the UNMAPPED Alpaca ``/v2/positions`` response (the same
+    ``pos`` list the collector already fetches) — day P/L is mapped from
+    ``unrealized_intraday_pl`` (see `positions[].day_gain` in `run()`); this
+    function reads that field directly, plus ``lastday_price``/``current_price``/
+    ``change_today``, none of which are otherwise persisted anywhere.
+
+    ``prior_total_pl`` (ticker -> total P/L from the prior snapshot, or None when
+    unavailable — non-fatal: nothing is flagged without a prior value to diff
+    against, never a crash) drives the "moved materially" comparison.
+    """
+    if not prior_total_pl:
+        return {"available": False, "reason": "no prior snapshot total P/L available", "flagged": []}
+
+    flagged: list[dict] = []
+    for p in raw_positions or []:
+        sym = p.get("symbol")
+        if not sym:
+            continue
+        try:
+            day_pl = float(p.get("unrealized_intraday_pl") or 0)
+        except (TypeError, ValueError):
+            continue
+        if day_pl != 0.0:
+            continue
+        prior = prior_total_pl.get(sym)
+        if prior is None:
+            continue
+        try:
+            total_pl = float(p.get("unrealized_pl") or 0)
+        except (TypeError, ValueError):
+            continue
+        delta = round(total_pl - prior, 2)
+        if abs(delta) > threshold_usd:
+            flagged.append({
+                "symbol": sym,
+                "day_pl_reported": day_pl,
+                "total_pl": total_pl,
+                "prior_total_pl": prior,
+                "total_pl_delta": delta,
+                "lastday_price": p.get("lastday_price"),
+                "current_price": p.get("current_price"),
+                "unrealized_intraday_pl": p.get("unrealized_intraday_pl"),
+                "change_today": p.get("change_today"),
+            })
+    return {"available": True, "flagged": flagged}
+
+
 # The freshness-set macro series the analyzer actually cites in cadence/new-print
 # adjudication (mirrors `analyzer.handler._MACRO_SERIES_KEPT` minus the pure rate
 # series the analyzer already compares via `policy_axis`/`bond_signals`, and adding
@@ -2694,7 +2882,16 @@ def _build_series_deltas(macro_data: dict, today: str) -> dict:
         prior_date: str | None = None
         for back in range(1, 8):
             d = (d0 - timedelta(days=back)).isoformat()
-            snap = read_snapshot(d)
+            try:
+                snap = read_snapshot(d)
+            except Exception:  # noqa: BLE001
+                # read_snapshot RAISES on a missing blob (unlike read_executions'
+                # best-effort None) — a per-date miss (e.g. a weekend/holiday gap)
+                # must not abort the whole 7-day walkback (2026-07-27 Monday hit
+                # this on back=1 landing on Sunday). Mirrors the identical
+                # try/except/continue already used around read_snapshot in
+                # _load_equity_spy_series (~line 503).
+                continue
             if snap:
                 prior_macro = (snap.get("macro") or {}).get("data") or {}
                 prior_date = d
@@ -3743,6 +3940,156 @@ def _build_flex_quadrant(growth_axis: dict, inflation_axis: dict,
     }
 
 
+_AXIS_STATE_TABLE = "AxisDirectionState"
+
+
+def _load_axis_direction_state() -> dict:
+    """Per-axis confirmation state (`growth`/`inflation`/`policy`) from Table
+    Storage (session 2026-07-28, Task A, decision D-2). Mirrors
+    `_load_sleeve_streak_state` exactly — same table-per-row shape, same
+    non-fatal-on-read-failure caller contract (an empty `{}` is a valid "first
+    run" input to `_confirm_axis_direction`, never a crash)."""
+    state: dict = {}
+    for e in query_entities(_AXIS_STATE_TABLE):
+        rid = e.get("RowKey")
+        if rid:
+            state[rid] = {
+                "raw_direction": (e.get("raw_direction") or None) or None,
+                "confirmed_direction": (e.get("confirmed_direction") or None) or None,
+                "raw_streak": int(e.get("raw_streak") or 0),
+                "confirmed_as_of": (e.get("confirmed_as_of") or None) or None,
+            }
+    return state
+
+
+def _save_axis_direction_state(new_state: dict) -> None:
+    for rid, s in (new_state or {}).items():
+        upsert_entity(_AXIS_STATE_TABLE, {
+            "PartitionKey": "state",
+            "RowKey": rid,
+            "raw_direction": s.get("raw_direction") or "",
+            "confirmed_direction": s.get("confirmed_direction") or "",
+            "raw_streak": int(s.get("raw_streak") or 0),
+            "confirmed_as_of": s.get("confirmed_as_of") or "",
+        })
+
+
+def _confirm_axis_direction(raw_direction: str, prev: dict | None, today: str) -> dict:
+    """N=2 direction-label confirmation (session 2026-07-28, Task A, decision D-2).
+
+    Invariant being restored: nothing that moves real money (regime sizing via
+    `reference_weights`, the deployment gate) acts on a direction label seen
+    exactly once. A label CHANGE — to ANY value, including `flat` — only reaches
+    the CONSUMED ``direction`` field after the raw classification has persisted
+    for >= 2 consecutive runs. Member-selection already has an analogous
+    hysteresis gate (`sleeve_selection`, 2.0pp lead / 10 runs); this is the same
+    doctrine applied to regime sizing, which previously had none — the 2026-07-28
+    growth-axis flip (falling -> rising, purely from the oldest GDPNow vintage
+    aging out of the window while the newest print was actually LOWER) re-anchored
+    the reference from 55.9% Q3 to 72.5% Q1+Q2 overnight on a single print.
+
+    Returns ``{direction (confirmed), raw_direction, direction_pending, raw_streak,
+    confirmed_as_of}``. ``direction`` is a drop-in replacement for the raw value in
+    every existing consumer (`active_quadrant`, `reference_weights`,
+    `regime_gate`, ...) — they read the SAME field name, now cushioned.
+
+    D-A2 (first run / no persisted state): adopt the raw value as confirmed
+    IMMEDIATELY (streak seeded at 2) — no artificial lag on deploy day, and no
+    forced whipsaw back toward a stale prior regime the book was never actually
+    holding (the rejected alternative: seeding a fake "prior raw" from an old
+    snapshot would flip a live book's reference on deploy day for a decision that
+    was never actually made with hysteresis in the first place).
+    """
+    if not prev:
+        return {
+            "direction": raw_direction,
+            "raw_direction": raw_direction,
+            "direction_pending": False,
+            "raw_streak": 2,
+            "confirmed_as_of": today,
+        }
+    prior_raw = prev.get("raw_direction")
+    prior_confirmed = prev.get("confirmed_direction") or prior_raw
+    prior_streak = int(prev.get("raw_streak") or 0)
+    prior_as_of = prev.get("confirmed_as_of") or today
+
+    streak = prior_streak + 1 if raw_direction == prior_raw else 1
+    confirmed = raw_direction if streak >= 2 else prior_confirmed
+    changed = confirmed != prior_confirmed
+    return {
+        "direction": confirmed,
+        "raw_direction": raw_direction,
+        "direction_pending": confirmed != raw_direction,
+        "raw_streak": streak,
+        "confirmed_as_of": today if changed else prior_as_of,
+    }
+
+
+def _load_prior_growth_axis(today: str) -> dict | None:
+    """Prior trading day's `growth_axis` snapshot block (session 2026-07-28, Task A
+    rolloff diagnostic) — the SAME non-fatal 7-day walkback as the Task-B-fixed
+    `_build_series_deltas` (``read_snapshot`` raises on a missing blob, so each
+    date is tried individually and skipped on failure rather than aborting the
+    whole walkback)."""
+    d0 = date.fromisoformat(today)
+    for back in range(1, 8):
+        d = (d0 - timedelta(days=back)).isoformat()
+        try:
+            snap = read_snapshot(d)
+        except Exception:  # noqa: BLE001
+            continue
+        if snap and snap.get("growth_axis"):
+            return snap["growth_axis"]
+    return None
+
+
+def _growth_rolloff_diagnostics(
+    cur_trajectory: list[float] | None,
+    prior_trajectory: list[float] | None,
+    raw_direction: str | None,
+    prior_raw_direction: str | None,
+) -> dict | None:
+    """Deterministic annotation for WHY the growth axis's raw classification
+    flipped this run (session 2026-07-28, Task A). Only meaningful — and only
+    called by the caller — when ``raw_direction != prior_raw_direction``.
+
+    ``head_vintage_dropped``: true when the two trajectories are the same length
+    and every entry but the oldest of ``prior_trajectory`` reappears, in order, as
+    every entry but the newest of ``cur_trajectory`` — i.e. the window slid by
+    exactly one vintage (one dropped off the head, one new one appended), not a
+    genuinely new dataset. ``newest_vintage_delta``: signed change in the newest
+    vintage's own value. ``attribution``: ``"window_rolloff"`` when the window
+    slid AND the newest print's own delta sign does not support the flip
+    direction (2026-07-28: flipped to rising while the newest print itself fell)
+    — a pure windowing artifact, not new information; ``"new_print"`` otherwise;
+    ``"indeterminate"`` when either trajectory is unavailable (no prior snapshot
+    within the walkback window)."""
+    if not cur_trajectory or not prior_trajectory:
+        return {
+            "head_vintage_dropped": False,
+            "newest_vintage_delta": None,
+            "attribution": "indeterminate",
+        }
+    head_vintage_dropped = (
+        len(prior_trajectory) == len(cur_trajectory) >= 2
+        and list(cur_trajectory[:-1]) == list(prior_trajectory[1:])
+    )
+    newest_delta = round(cur_trajectory[-1] - prior_trajectory[-1], 4)
+    if head_vintage_dropped:
+        flip_supported = (
+            (raw_direction == "rising" and newest_delta > 0)
+            or (raw_direction == "falling" and newest_delta < 0)
+        )
+        attribution = "new_print" if flip_supported else "window_rolloff"
+    else:
+        attribution = "new_print"
+    return {
+        "head_vintage_dropped": head_vintage_dropped,
+        "newest_vintage_delta": newest_delta,
+        "attribution": attribution,
+    }
+
+
 def _build_growth_axis(macro_data: dict) -> dict:
     """Deterministic growth-direction read — the quadrant *growth axis*, computed in
     Python so the analyzer ECHOES it (mirrors bond_signals/labor_signals) rather than
@@ -3964,7 +4311,10 @@ def _build_inflation_axis(macro_data: dict) -> dict:
     }
 
 
-def _build_policy_axis(macro_data: dict, manual_stance: dict, cfg: dict, today: str) -> dict:
+def _build_policy_axis(
+    macro_data: dict, manual_stance: dict, cfg: dict, today: str,
+    prev_state: dict | None = None,
+) -> dict:
     """Deterministic policy stance — the classifier's *policy leg*, resolved from two
     layers (FOLLOWUPS #16). Before this, policy came only from the manually-maintained
     fomc-stance.json, which sat `unconfirmed` with a null `as_of` since inception — the
@@ -3972,12 +4322,24 @@ def _build_policy_axis(macro_data: dict, manual_stance: dict, cfg: dict, today: 
     "policy unconfirmed" inflated the conviction proxy daily.
 
     Layer 1 (override): the manual SEP/dot-plot stance GOVERNS while fresh (`as_of`
-    within `manual_fresh_days`) — a real dot-plot beats a market proxy. Layer 2: the
-    market-implied stance from DGS2 20-session momentum (front-end repricing of the
-    policy path; DGS2/DFF already fetched at limit=90) governs when the manual file is
-    stale or null. `unconfirmed` only when BOTH layers are unavailable — rare by
-    construction. Gate semantics unchanged: fail-closed on hawkish, unconfirmed cannot
-    confirm Q1. Thresholds in risk-limits.json -> policy_axis (no magic numbers).
+    within `manual_fresh_days`) — a real dot-plot beats a market proxy, and applies
+    SAME-DAY (a real central-bank decision is an actual print, not a windowed-series
+    artifact — exempt from Task A's confirmation gate below, same doctrine as D-G2's
+    "fresh authoritative input adopted immediately"). Layer 2: the market-implied
+    stance from DGS2 20-session momentum (front-end repricing of the policy path;
+    DGS2/DFF already fetched at limit=90) governs when the manual file is stale or
+    null. `unconfirmed` only when BOTH layers are unavailable — rare by construction.
+    Gate semantics unchanged: fail-closed on hawkish, unconfirmed cannot confirm Q1.
+    Thresholds in risk-limits.json -> policy_axis (no magic numbers).
+
+    Session 2026-07-28 (Task A, decision D-A1): the MARKET-IMPLIED stance gets the
+    same N=2 confirmation as the growth/inflation axes (`_confirm_axis_direction`)
+    — a gate open/close moves real money, and a one-print stance flip off DGS2 noise
+    is the same artifact class the axis confirmation targets. `prev_state` (the
+    persisted `AxisDirectionState` row for `policy`, or None on the first run / a
+    read failure — D-A2 applies identically: adopt immediately, no lag) drives the
+    confirmation; it is a no-op when the manual-fresh layer governs. Adds
+    `raw_stance`/`stance_pending`/`raw_streak` alongside the existing `stance` field.
     Pure — echo-not-re-derive; the fetch stays in orchestration.
     """
     pa_cfg = cfg.get("policy_axis") or _RISK_LIMITS_DEFAULTS["policy_axis"]
@@ -4015,22 +4377,37 @@ def _build_policy_axis(macro_data: dict, manual_stance: dict, cfg: dict, today: 
     if mi_stance and m_stance in ("hawkish", "neutral", "dovish"):
         agreement = mi_stance == m_stance
 
+    # Task A (2026-07-28): confirm the market-implied stance regardless of whether
+    # it ends up governing this run — a fresh manual stance may bypass it TODAY,
+    # but the confirmation streak must keep advancing in the background so a later
+    # stale-manual day picks up wherever the hysteresis organically reached, never
+    # a frozen/stale point.
+    confirm = _confirm_axis_direction(mi_stance or "unconfirmed", prev_state, today)
+
     if fresh:
         stance, source = m_stance, "manual_fresh"
+        stance_pending = False
         note = (
             f"Manual SEP/dot-plot stance '{m_stance}' (as_of {as_of}, fresh) governs; "
             "the market-implied DGS2 read is secondary context."
         )
     elif mi_stance:
-        stance, source = mi_stance, "market_implied"
+        stance, source = confirm["direction"], "market_implied"
+        stance_pending = confirm["direction_pending"]
         note = (
             f"Market-implied stance '{mi_stance}' governs: DGS2 20d delta "
             f"{delta_bp:+.1f}bp (hawkish >= +{hawk_bp:.0f}bp / dovish <= -{dove_bp:.0f}bp); "
             f"manual fomc-stance.json stale or null (as_of {as_of}). A fresh SEP/dot-plot "
             "update still beats this proxy."
         )
+        if stance_pending:
+            note += (
+                f" UNCONFIRMED (raw_streak {confirm['raw_streak']} of 2 required) — "
+                f"stance holds at '{stance}' pending a second confirming run."
+            )
     else:
         stance, source = "unconfirmed", "unconfirmed"
+        stance_pending = False
         note = (
             "Policy UNCONFIRMED: manual stance stale/absent AND <21 DGS2 observations "
             "for the market-implied read."
@@ -4042,6 +4419,16 @@ def _build_policy_axis(macro_data: dict, manual_stance: dict, cfg: dict, today: 
 
     return {
         "stance": stance,
+        "raw_stance": mi_stance or "unconfirmed",
+        "stance_pending": stance_pending,
+        "raw_streak": confirm["raw_streak"],
+        # The market-implied confirmation's OWN state, independent of whether a
+        # fresh manual stance is bypassing it for `stance` today — this (not the
+        # blended `stance`) is what the caller must persist back to
+        # AxisDirectionState, so a later stale-manual day resumes from the real
+        # hysteresis position rather than the manual value.
+        "confirmed_market_implied_stance": confirm["direction"],
+        "confirmed_market_implied_as_of": confirm["confirmed_as_of"],
         "source": source,
         "market_implied": {
             "stance": mi_stance,

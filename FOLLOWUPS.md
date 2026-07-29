@@ -3,8 +3,11 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-07-27 (blanket autonomous sleeve switching, branch `feat/20260727-sleeve-auto-switch`).**
-Scorecard role switches are now fully autonomous — a `switch_signal` on an unpinned role auto-advances the effective incumbent via `SleeveSelectionState`, mirroring the existing `intl_leader` pattern. `sleeve-roles.json`'s `selected` is now the baseline/pin, not the live authority. Suite 805→817 green, ruff clean. **Auto-merge: NO, human review required** — see entry **#47** below for the full design, the "ships hot" consequence (semis SMH→SOXX + healthcare_def XLV→IHE both fire on first post-deploy run), and the FOMC 07-29 deploy-timing flag.
+**▶ START HERE — last session 2026-07-28 (axis confirmation + F1 fix + report hygiene + KMLM diagnostics, branch `fix/20260728-axis-confirm-f1-hygiene`).**
+Five-task PR: A (axis-direction N=2 confirmation + GDPNow rolloff diagnostic + policy-stance confirmation), B (F1 series-deltas weekend-walkback fix — net-new, the previously-named fix branch was never created), C (5 prompt-hygiene edits: gate labeling precision, SGOV sweep budget, Recommended Weight provenance, axis-flip adjudication, dashboard stale count), D (KMLM day-P/L zero-watch diagnostics only), E (analyzer `effective_selected` failure-day hardening from the #47 merge audit). Suite 817→842 green, ruff clean. **Auto-merge: NO, human review required** — see entry **#49** below for the full design, decision gates (D-A1/D-A2/D-D1/D-1a), and the FOMC 07-29 ships-hot timing note (the market-implied policy-stance confirmation needs 2 runs post-FOMC to move the gate unless the manual `fomc_stance` file is refreshed same-day).
+
+**▶ Prior session 2026-07-27 (blanket autonomous sleeve switching, branch `feat/20260727-sleeve-auto-switch`) — MERGED + DEPLOYED, PR #31.**
+Scorecard role switches are now fully autonomous — a `switch_signal` on an unpinned role auto-advances the effective incumbent via `SleeveSelectionState`, mirroring the existing `intl_leader` pattern. `sleeve-roles.json`'s `selected` is now the baseline/pin, not the live authority. Suite 805→817 green, ruff clean. Ships-hot prediction **confirmed live** on the 2026-07-28 run: semis SMH→SOXX and healthcare_def XLV→IHE both auto-fired at streak 12 exactly as designed (reference weights reproduced to the third decimal, XLV sold to zero via the D-G1 floor bypass, SOXX buy correctly rejected by the effective-aware amplifier gate). See entry **#47** below and the **#48** update for the empirical verification.
 
 **▶ Prior session 2026-07-23 (regime responsiveness cycle, branch `feat/20260723-leading-growth-market-implied`).**
 Tasks: A (#17 leading-growth composite + growth-side transition_watch), B (#18 market_implied_quadrant + daily dollar proxy), C (pnl_decomposition inception-shortfall block), D (F6 sweep sizing / cash-floor guard), E (F7 price-sanity quarantine), F (F8 A4 watch_candidates wording). Suite 721→789 green, ruff clean. **Merged to master** (see entry **#46** below — its features are live in the 2026-07-24 report).
@@ -1376,10 +1379,116 @@ found, it needs an explicit interlock (not designed in #47, since the determinis
 reference/D2-zeroing/validator layers were verified pure-function correct — this item
 is about confirming their live interaction, not their unit logic).
 
+**Update 2026-07-28: proposal-level confirmation is DONE.** The 07-28 report confirms
+the design by construction — XLV's reference is 0.0 and it is sold via
+`band_enforcement`, never topped up; the "top-up-the-loser" tension is resolved.
+**Still open:** closure waits on the 2026-07-29 `execution_review` (the FILL-level
+confirmation — did the proposed orders actually execute, not just get proposed
+correctly). Expected from the 07-28 proposal: XLV sell 55 shares, IHE buy 3 shares,
+SGOV buy 6 shares (**not 77** — see the 2026-07-28 session's Task C item 2, the
+carve-out clamp: the 77-share sweep was never fundable from pre-trade literal cash).
+Close this item once 07-29's `execution_review.filled`/`.failed` confirms those three
+fills (or explains a deviation).
+
 ---
 
 ## Done
-### 47. 2026-07-27 session: Blanket autonomous sleeve switching — Done, branch `feat/20260727-sleeve-auto-switch` (auto-merge: NO, human review required)
+### 49. 2026-07-28 session: Axis-direction confirmation (D-2) + F1 series-deltas fix + report hygiene + KMLM diagnostics — Done, branch `fix/20260728-axis-confirm-f1-hygiene` (auto-merge: NO, human review required)
+The 2026-07-28 "ships hot" run (both #47 sleeve switches fired as designed — see the
+**#48** update) exposed a separate class of issue: nothing gated a regime-sizing axis
+label against a single-print flip, the F1 series-deltas weekend-walkback fix was never
+actually built (only ever named), and a report-hygiene batch (gate mislabeling, an
+unfundable SGOV sweep, a freehand Recommended-Weight number, a vintage-window narration
+error, an off-by-one stale count) all landed the same day. Also: a merge-audit seam in
+#47's `effective_selected` fallback, and diagnostics-only tracking of a 3-report KMLM
+day-P/L anomaly.
+
+- **Task A — axis-direction confirmation (decision D-2, N=2).** New `_confirm_axis_direction`
+  (pure) + `AxisDirectionState` table (mirrors `SleeveSelectionState`'s
+  `_load_sleeve_streak_state`/`_save_sleeve_streak_state` pattern exactly): a
+  growth/inflation/policy-stance label change — to ANY value, including `flat` — only
+  reaches the CONSUMED `direction`/`stance` field after the RAW classification persists
+  2 consecutive runs. **Zero consumer code changes** — `active_quadrant`,
+  `reference_weights`, `regime_gate`, `market_vs_macro`, etc. all read the SAME field
+  name, now cushioned; only `collector.run()`'s axis-build call site changed (loads
+  persisted state, merges `{**raw, **confirm_result}`, saves state after). **D-A2
+  (first run / no persisted state): adopt raw immediately** (streak seeded at 2) — no
+  artificial lag on deploy, and no induced whipsaw from a fake seeded "prior raw"
+  (rejected alternative, on record). New `_growth_rolloff_diagnostics` +
+  `_load_prior_growth_axis` (reuses the Task-B-fixed walkback) annotate WHY a growth-
+  axis raw flip fired: `head_vintage_dropped` + `newest_vintage_delta` +
+  `attribution` (`window_rolloff` when the window slid AND the newest print's own
+  delta doesn't support the flip direction — the 07-28 case exactly: flipped to rising
+  while the newest print itself fell; `new_print` otherwise; `indeterminate` with no
+  prior snapshot). **D-A1 (policy stance in scope, default YES):** the market-implied
+  DGS2-threshold stance gets the same N=2 gate via the same `_confirm_axis_direction`
+  helper, tracked independently of whatever governs `stance` on a given day; **a fresh
+  manual `fomc_stance.json` bypasses confirmation and applies SAME-DAY** (an actual
+  central-bank decision is a real print, not a windowed-series artifact — same
+  doctrine as D-G2). New fields: `raw_direction`/`raw_stance`,
+  `direction_pending`/`stance_pending`, `raw_streak`, `confirmed_as_of`.
+  **Ships-hot / FOMC 07-29 flag:** if this merges/deploys before Wednesday's 09:00 ET
+  run, a post-FOMC market-implied stance flip takes 2 runs to move the gate UNLESS the
+  manual `fomc_stance.json` is refreshed same-day (bypass) — flagged for the deploy
+  timing call.
+- **Task B — F1 series-deltas weekend-walkback fix (net-new — the previously-named
+  fix branch was never created).** `_build_series_deltas`'s 7-day walkback called
+  `read_snapshot` bare inside the loop; `read_snapshot` RAISES on a missing blob
+  (unlike `read_executions`'s best-effort `None`), so the outer try/except aborted the
+  WHOLE walkback on the first miss instead of continuing — exactly what happened
+  2026-07-27 (Monday, back=1 hit Sunday, "BlobNotFound"). Fixed with a per-date
+  try/except/continue mirroring the identical pattern already used around
+  `read_snapshot` in `_load_equity_spy_series` (~line 503) — not a new pattern.
+  `read_snapshot`'s raising contract is UNCHANGED (other callers rely on it).
+- **Task C — 5 prompt-hygiene edits (`project-instructions.md`, prompt-only).**
+  (1) **Gate labeling precision (decision D-1a):** added a `Block` column to the
+  role table + explicit doctrine — a closed gate blocks ONLY the effective amplifier
+  set (SPY/QQQ/semis' effective incumbent/the two intl amplifier roles); every
+  `damper`-block role's buy is PERMITTED under a closed gate (07-28 mislabeled
+  PDBC/VDE/VTIP/XLF/XLI/COWZ — all dampers — as ungated amplifiers and filed
+  inapplicable overrides). (2) **SGOV sweep budget:** the carve-out's budget is
+  PRE-TRADE literal cash only, same-day sell proceeds excluded by design — never
+  present a sweep quantity the carve-out cannot fund; state the T+1 remainder (07-28
+  proposed 77 shares against a true 6-share budget, landing 35.63% past the 28.50%
+  window ceiling, with the clamp never mentioned). (3) **Recommended Weight column
+  provenance:** derive from the deterministic post-trade addendum / validated (not
+  proposed) trade quantities — never freehand (07-28 showed a THIRD number, 28.59%,
+  matching neither the proposal nor the clamped outcome). (4) **Axis-flip
+  adjudication:** required sentence shapes for `direction_pending` and for a
+  confirmed flip (echo `direction_change_diagnostics.attribution`; never assert
+  vintage windows are "the same" without comparing — 07-28 claimed identical
+  six-vintage trajectories when the window had slid by one). (5) **Dashboard stale
+  count:** "N stale" = the Freshness table's flagged-row count, per ROW (WTI/Brent
+  count as two) — 07-27 and 07-28 both drifted by exactly one.
+- **Task D — KMLM day-P/L zero-watch (diagnostics only, no fix attempted).** New
+  `_build_day_pl_zero_watch` (+ `_load_prior_position_total_pl` walkback, reusing the
+  Task-B-fixed pattern): flags a held position with a reported $0.00 day P/L AND a
+  total-P/L move past $25 (decision gate D-D1 default) since the prior snapshot,
+  echoing the RAW Alpaca fields relevant to day-P/L derivation (`lastday_price`,
+  `current_price`, `unrealized_intraday_pl`, `change_today`) so a future session can
+  adjudicate upstream-vs-pipeline — deliberately NOT attempted this cycle.
+- **Task E — analyzer `effective_selected` failure-day hardening (from the #47
+  merge audit).** `_snapshot_effective_selected` sourced the map ONLY from
+  `sleeve_selection.roles[]` — exactly the block that's UNAVAILABLE when the
+  scorecard build fails, even though the collector's reference still targets the
+  auto-switched incumbent that day (persisted-state fallback, #47 Change 1b). Fixed:
+  the collector now writes a top-level snapshot key `effective_selected` (the final
+  value at snapshot-assembly time, populated even on a failure day); the analyzer
+  prefers it, falling back to the roles-scan for an old snapshot shape, then `{}`.
+- **Tests:** 25 new (`test_axis_confirmation.py` ×12, `test_day_pl_zero_watch.py` ×7,
+  `test_effective_selected_fallback.py` ×4, `test_series_deltas.py` +2). Every new
+  test confirmed failing on pre-fix source via `git stash` isolation (Task A/D: the
+  whole module fails to IMPORT — `_confirm_axis_direction`/`_build_day_pl_zero_watch`
+  don't exist there; Task B: the walkback aborts instead of continuing past a raise;
+  Task E: `_snapshot_effective_selected` returns `{}` instead of the top-level map).
+  Suite 817→842 green, ruff clean.
+- **Out of scope (per the session prompt):** D-2 alternatives (staged re-anchor,
+  rolloff-as-gate, confidence-scaled N); extending the deployment gate beyond the
+  amplifier set; the KMLM root-cause FIX; barbell/convexity flex gate; deferred
+  findings 4-8; MU price quarantine root cause; VXUS C0 gate resolution; broker
+  bracket orders / wheel component.
+
+### 47. 2026-07-27 session: Blanket autonomous sleeve switching — Done, branch `feat/20260727-sleeve-auto-switch` (merged + deployed, PR #31; ships-hot prediction confirmed live 2026-07-28 — see #48)
 Jorge's decision (2026-07-27): scorecard sleeve switches become **fully autonomous** —
 a `switch_signal` on an unpinned role auto-advances the role's effective incumbent via
 `SleeveSelectionState`, mirroring the pre-existing `intl_leader` auto-rotation pattern

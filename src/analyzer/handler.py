@@ -729,14 +729,25 @@ def _post_validation_cash(trades: list[dict], gaps: list[dict], ctx: dict,
 
 
 def _snapshot_effective_selected(snapshot: dict) -> dict[str, str]:
-    """role_id -> effective incumbent ticker (session 2026-07-27 blanket auto-switch),
-    sourced from the collector's `sleeve_selection` block (each scorecard role's
-    `effective_selected` field — the SleeveSelectionState-derived map, NOT the frozen
-    `sleeve-roles.json` config). `{}` when the block is unavailable (old snapshot, or
-    the scorecard build failed that day) — every consumer then falls back to plain
-    config behavior, exactly as before this feature. The analyzer only ECHOES this;
-    the collector-side persisted-state read (before price/earnings universe assembly)
-    is the real resilience layer."""
+    """role_id -> effective incumbent ticker (session 2026-07-27 blanket auto-switch;
+    hardened session 2026-07-28, Task E).
+
+    Prefers the top-level `effective_selected` snapshot key — the collector's
+    persisted-state-derived map, populated at snapshot-assembly time and therefore
+    non-empty EVEN ON a day the scorecard build itself failed (PR #31 Change 1b's
+    failure-isolation fallback). The `sleeve_selection.roles[]` scan is exactly the
+    block that is UNAVAILABLE on such a day — sourcing from it alone (the pre-Task-E
+    behavior) meant that on a scorecard-failure day, mid-transition, a buy of the
+    effective incumbent (e.g. IHE the day after a switch whose scorecard run failed)
+    would be REJECTED by V1.5 and the deselected old incumbent's floor reinstated,
+    for that one day. Falls back to the `sleeve_selection` roles scan for an
+    OLD snapshot (predating this top-level key), then `{}`. The analyzer only
+    ECHOES this; the collector-side persisted-state read (before price/earnings
+    universe assembly) is the real resilience layer.
+    """
+    top_level = snapshot.get("effective_selected")
+    if isinstance(top_level, dict) and top_level:
+        return {str(rid): str(t).upper() for rid, t in top_level.items() if rid and t}
     out: dict[str, str] = {}
     for r in (snapshot.get("sleeve_selection") or {}).get("roles", []):
         rid = r.get("role_id")
