@@ -1502,9 +1502,12 @@ def run() -> None:
             )
 
             # Task D (2026-07-28): diagnostics-only KMLM day-P/L zero-watch. Non-fatal.
+            # Task C1 (2026-08-01): the walkback now also returns prior share counts
+            # so resize-driven P/L moves aren't misflagged as anomalies (Task C2).
             try:
-                _prior_total_pl = _load_prior_position_total_pl(today)
-                day_pl_zero_watch = _build_day_pl_zero_watch(pos, _prior_total_pl)
+                _prior_pl_qty = _load_prior_position_total_pl(today)
+                _prior_total_pl, _prior_qty = _prior_pl_qty if _prior_pl_qty else (None, None)
+                day_pl_zero_watch = _build_day_pl_zero_watch(pos, _prior_total_pl, _prior_qty)
                 if day_pl_zero_watch.get("flagged"):
                     logger.warning(
                         "Day-P/L zero-watch: %d position(s) flagged: %s",
@@ -2698,14 +2701,22 @@ def _build_execution_review(secrets: dict, today: str) -> dict:
 _DAY_PL_ZERO_WATCH_THRESHOLD_USD = 25.0
 
 
-def _load_prior_position_total_pl(today: str) -> dict[str, float] | None:
-    """Prior trading day's per-ticker total P/L (session 2026-07-28, Task D) —
-    the SAME non-fatal 7-day walkback as the Task-B-fixed `_build_series_deltas`
+def _load_prior_position_total_pl(today: str) -> tuple[dict[str, float], dict[str, float]] | None:
+    """Prior trading day's per-ticker total P/L AND share count (session
+    2026-07-28, Task D; qty extended session 2026-08-01, Task C1) — the SAME
+    non-fatal 7-day walkback as the Task-B-fixed `_build_series_deltas`
     (``read_snapshot`` raises on a missing blob; each date is tried individually
-    and skipped on failure). Reads `portfolio.positions[].total_gain` (the
-    canonical mapped field), not the raw Alpaca response — that's stored,
+    and skipped on failure). Reads `portfolio.positions[].total_gain`/`.quantity`
+    (the canonical mapped fields — NOTE `quantity`, not the Alpaca-native `qty`
+    this run's own raw fetch uses), not the raw Alpaca response — that's stored,
     unlike the raw `unrealized_intraday_pl`/`lastday_price`/`change_today` this
-    run's OWN raw Alpaca fetch supplies for the flagged row."""
+    run's OWN raw Alpaca fetch supplies for the flagged row.
+
+    Returns ``(total_pl_by_ticker, quantity_by_ticker)``, or ``None`` when no
+    prior snapshot was found in the window — the qty map lets the zero-watch
+    diagnostic (Task C) tell a real position RESIZE (share count changed —
+    total-P/L movement is expected, not a P/L-mapping anomaly) apart from a
+    genuine same-size anomaly."""
     d0 = date.fromisoformat(today)
     for back in range(1, 8):
         d = (d0 - timedelta(days=back)).isoformat()
@@ -2715,36 +2726,61 @@ def _load_prior_position_total_pl(today: str) -> dict[str, float] | None:
             continue
         if snap:
             positions = (snap.get("portfolio") or {}).get("positions") or []
-            return {
+            pl_by_ticker = {
                 p["ticker"]: float(p.get("total_gain") or 0)
                 for p in positions if p.get("ticker")
             }
+            qty_by_ticker = {
+                p["ticker"]: float(p.get("quantity") or 0)
+                for p in positions if p.get("ticker")
+            }
+            return pl_by_ticker, qty_by_ticker
     return None
 
 
 def _build_day_pl_zero_watch(
     raw_positions: list[dict],
     prior_total_pl: dict[str, float] | None,
+    prior_qty: dict[str, float] | None = None,
     threshold_usd: float = _DAY_PL_ZERO_WATCH_THRESHOLD_USD,
 ) -> dict:
     """Deterministic diagnostic (session 2026-07-28, Task D — KMLM day-P/L
-    zero-watch): flags a held position whose reported day P/L printed exactly
-    $0.00 while its total P/L moved by more than ``threshold_usd`` since the
-    prior snapshot — a symptom, not a diagnosis. Diagnostics ONLY; this module
-    does not (and should not) adjudicate whether Alpaca itself sends the zero
-    (upstream) or our mapping drops it (pipeline) — the flagged row echoes the
-    RAW Alpaca position fields relevant to day-P/L derivation so a human/future
-    session can.
+    zero-watch; resize-awareness added session 2026-08-01, Task C): flags a held
+    position whose reported day P/L printed exactly $0.00 while its total P/L
+    moved by more than ``threshold_usd`` since the prior snapshot — a symptom,
+    not a diagnosis. Diagnostics ONLY; this module does not (and should not)
+    adjudicate whether Alpaca itself sends the zero (upstream) or our mapping
+    drops it (pipeline) — the flagged row echoes the RAW Alpaca position fields
+    relevant to day-P/L derivation so a human/future session can.
 
     ``raw_positions`` is the UNMAPPED Alpaca ``/v2/positions`` response (the same
     ``pos`` list the collector already fetches) — day P/L is mapped from
     ``unrealized_intraday_pl`` (see `positions[].day_gain` in `run()`); this
     function reads that field directly, plus ``lastday_price``/``current_price``/
-    ``change_today``, none of which are otherwise persisted anywhere.
+    ``change_today``, none of which are otherwise persisted anywhere. Share
+    count is read from the SAME raw response's ``qty`` field (Alpaca-native —
+    NOTE this is `qty`, not the canonical `portfolio.positions[].quantity` field
+    `prior_qty` is built from; see the `held_qty` incident this file already
+    documents elsewhere).
 
     ``prior_total_pl`` (ticker -> total P/L from the prior snapshot, or None when
     unavailable — non-fatal: nothing is flagged without a prior value to diff
     against, never a crash) drives the "moved materially" comparison.
+
+    ``prior_qty`` (ticker -> share count from the prior snapshot, optional —
+    Task C1) lets this diagnostic tell a genuine RESIZE (the share count itself
+    changed since the prior snapshot — realizing a sale's gain, or a buy's new
+    lot basis, both of which move total P/L on their own and are NOT a P/L-
+    mapping anomaly) apart from a same-size position whose total P/L moved with
+    no trade to explain it. A resized position is suppressed from
+    ``total_pl_delta``-only flagging UNLESS the price-identity signal also fires
+    (``lastday_price == current_price`` — a literally frozen quote, the
+    independent, genuine anomaly signal that must be kept regardless of any
+    resize); when kept, the row is annotated ``position_resized: true`` so the
+    report attributes the delta correctly instead of calling it an unexplained
+    anomaly. Omitting ``prior_qty`` (the default) preserves the original
+    unconditional delta-only behavior — no share-count data means no resize
+    determination is possible.
     """
     if not prior_total_pl:
         return {"available": False, "reason": "no prior snapshot total P/L available", "flagged": []}
@@ -2768,18 +2804,44 @@ def _build_day_pl_zero_watch(
         except (TypeError, ValueError):
             continue
         delta = round(total_pl - prior, 2)
-        if abs(delta) > threshold_usd:
-            flagged.append({
-                "symbol": sym,
-                "day_pl_reported": day_pl,
-                "total_pl": total_pl,
-                "prior_total_pl": prior,
-                "total_pl_delta": delta,
-                "lastday_price": p.get("lastday_price"),
-                "current_price": p.get("current_price"),
-                "unrealized_intraday_pl": p.get("unrealized_intraday_pl"),
-                "change_today": p.get("change_today"),
-            })
+        if abs(delta) <= threshold_usd:
+            continue
+
+        try:
+            current_qty = float(p.get("qty")) if p.get("qty") is not None else None
+        except (TypeError, ValueError):
+            current_qty = None
+        prior_qty_val = (prior_qty or {}).get(sym)
+        resized = (
+            prior_qty_val is not None and current_qty is not None
+            and current_qty != prior_qty_val
+        )
+        try:
+            price_frozen = float(p.get("lastday_price")) == float(p.get("current_price"))
+        except (TypeError, ValueError):
+            price_frozen = False
+
+        # Task C2: a resize fully (or partly) explains the total-P/L move on its
+        # own — do not flag on total_pl_delta ALONE in that case. The frozen-
+        # quote price-identity signal is a separate, genuine anomaly and must
+        # still surface even on a resized position (annotated, not suppressed).
+        if resized and not price_frozen:
+            continue
+
+        flagged.append({
+            "symbol": sym,
+            "day_pl_reported": day_pl,
+            "total_pl": total_pl,
+            "prior_total_pl": prior,
+            "total_pl_delta": delta,
+            "lastday_price": p.get("lastday_price"),
+            "current_price": p.get("current_price"),
+            "unrealized_intraday_pl": p.get("unrealized_intraday_pl"),
+            "change_today": p.get("change_today"),
+            "prior_qty": prior_qty_val,
+            "current_qty": current_qty,
+            "position_resized": resized,
+        })
     return {"available": True, "flagged": flagged}
 
 

@@ -237,6 +237,17 @@ def validate_trades(
     for t in ordered:
         sym, side, qty = _norm(t)
         reasons: list[str] = []
+        # Task A2 (session 2026-08-01): a trade already stamped "clamped" by an
+        # earlier validation pass (pass-1 survivors re-entering pass 2 via
+        # reconcile's merge) must not have that stamp silently overwritten to
+        # "passed" just because THIS pass finds nothing further to clamp — the
+        # KMLM 182->179 clamp was vanishing exactly this way (pass 2 re-validated
+        # the already-clamped 179, found it clean, and stamped "passed", erasing
+        # all record of the clamp). Preserve the prior clamp + its reasons; this
+        # pass's own reasons (if any) are appended, deduped.
+        prior_validation = t.get("validation") or {}
+        prior_clamped = prior_validation.get("status") == "clamped"
+        prior_reasons = list(prior_validation.get("reasons") or []) if prior_clamped else []
 
         # --- structural -------------------------------------------------------
         if not sym or side not in ("buy", "sell"):
@@ -431,7 +442,7 @@ def validate_trades(
                 )
                 qty = float(new_qty)
 
-        was_clamped = bool(reasons)
+        was_clamped = bool(reasons) or prior_clamped
         if qty < 1:
             _reject(t, reasons + ["clamped to zero — nothing submittable"])
             continue
@@ -453,9 +464,10 @@ def validate_trades(
                 cash_avail = max(0.0, cash_avail - qty * px)
 
         out = {**t, "quantity": int(qty)}
+        merged_reasons = prior_reasons + [r for r in reasons if r not in prior_reasons]
         out["validation"] = {
             "status": "clamped" if was_clamped else "passed",
-            "reasons": reasons,
+            "reasons": merged_reasons,
         }
         passed.append(out)
 

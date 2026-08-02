@@ -16,8 +16,8 @@ from collector.handler import _build_day_pl_zero_watch  # noqa: E402
 
 
 def _pos(symbol, unrealized_intraday_pl, unrealized_pl, lastday_price=100.0,
-         current_price=100.0, change_today=0.0):
-    return {
+         current_price=100.0, change_today=0.0, qty=None):
+    pos = {
         "symbol": symbol,
         "unrealized_intraday_pl": unrealized_intraday_pl,
         "unrealized_pl": unrealized_pl,
@@ -25,6 +25,9 @@ def _pos(symbol, unrealized_intraday_pl, unrealized_pl, lastday_price=100.0,
         "current_price": current_price,
         "change_today": change_today,
     }
+    if qty is not None:
+        pos["qty"] = qty
+    return pos
 
 
 def test_flagged_when_day_zero_and_total_moved_past_threshold():
@@ -89,3 +92,65 @@ def test_multiple_positions_only_qualifying_ones_flagged():
     prior = {"KMLM": -70.00, "USMV": 40.00, "AIA": 10.00}
     result = _build_day_pl_zero_watch(raw, prior)
     assert [r["symbol"] for r in result["flagged"]] == ["KMLM"]
+
+
+# --- Task C (session 2026-08-01): resize awareness -----------------------------
+# A share-count change (sale/buy) moves total P/L on its own (realized gain,
+# new lot basis) and must not be misread as a P/L-mapping anomaly.
+
+def test_resize_with_delta_but_no_price_freeze_is_not_flagged():
+    """The KMLM-shaped 07-31 case: 183 -> 4 shares (a 179-share sale), delta
+    -$93.87 — fully explained by realizing the sale's gain. lastday != current
+    (no frozen-quote signal), so this must NOT be flagged at all."""
+    raw = [_pos("KMLM", 0.0, -203.07, lastday_price=54.32, current_price=54.10,
+                qty=4)]
+    prior_pl = {"KMLM": -109.20}     # delta = -93.87
+    prior_qty = {"KMLM": 183.0}
+    result = _build_day_pl_zero_watch(raw, prior_pl, prior_qty)
+    assert result["flagged"] == []
+
+
+def test_resize_with_frozen_quote_still_flagged_and_annotated():
+    """Same resize, but the independent price-identity signal (lastday ==
+    current — a literally frozen quote) also fires: this is the genuine,
+    separate anomaly and must still surface, annotated `position_resized`."""
+    raw = [_pos("KMLM", 0.0, -203.07, lastday_price=54.10, current_price=54.10,
+                qty=4)]
+    prior_pl = {"KMLM": -109.20}
+    prior_qty = {"KMLM": 183.0}
+    result = _build_day_pl_zero_watch(raw, prior_pl, prior_qty)
+    assert len(result["flagged"]) == 1
+    row = result["flagged"][0]
+    assert row["symbol"] == "KMLM"
+    assert row["position_resized"] is True
+    assert row["prior_qty"] == 183.0
+    assert row["current_qty"] == 4.0
+
+
+def test_unchanged_qty_position_with_large_delta_still_flags_as_before():
+    """A same-size position (qty unchanged) with a large total-P/L delta must
+    keep flagging exactly as before resize-awareness was added, regardless of
+    the lastday/current price relationship."""
+    raw = [_pos("COWZ", 0.0, -50.00, lastday_price=30.0, current_price=29.50,
+                qty=100.0)]
+    prior_pl = {"COWZ": -10.02}       # delta = -39.98
+    prior_qty = {"COWZ": 100.0}       # unchanged
+    result = _build_day_pl_zero_watch(raw, prior_pl, prior_qty)
+    assert len(result["flagged"]) == 1
+    row = result["flagged"][0]
+    assert row["symbol"] == "COWZ"
+    assert row["position_resized"] is False
+    assert row["prior_qty"] == 100.0
+    assert row["current_qty"] == 100.0
+
+
+def test_resize_awareness_is_opt_in_omitting_prior_qty_keeps_old_behavior():
+    """Omitting `prior_qty` entirely (the default) must preserve the original
+    unconditional delta-only behavior — no share-count data means no resize
+    determination is possible, so nothing is suppressed."""
+    raw = [_pos("KMLM", 0.0, -203.07, lastday_price=54.32, current_price=54.10,
+                qty=4)]
+    prior_pl = {"KMLM": -109.20}
+    result = _build_day_pl_zero_watch(raw, prior_pl)   # no prior_qty passed
+    assert len(result["flagged"]) == 1
+    assert result["flagged"][0]["position_resized"] is False

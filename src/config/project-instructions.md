@@ -124,6 +124,17 @@ for higher-priced names the 1-share minimum is the binding floor). The backbone 
 quadrant is out of favor" — going to zero is forbidden **except for legacy exits and intl
 pool unwinds** (below).
 
+**Compute the floor in SHARES before proposing a "trim to floor" sell (session
+2026-08-01 hygiene).** The floor is `max(1 share, ceil(execution_config.sleeve_floor_pct_of_core
+× equity / price))` — "trim to the 1-share floor" is only literally correct when 1
+share's own value already clears 0.1% of equity; for a lower-priced name the true floor
+is several shares. Compute and CITE that shares number in any trim-to-floor plan — a
+proposed sell that lands below it is un-submittable as written and the validator will
+clamp it, with no explanation in your own prose for the gap between what you proposed
+and what executed. *(The 07-30 KMLM "sell 182, trim to 1-share floor" plan ignored that
+KMLM's true floor was several shares, not one — the validator clamped the sell, and nothing
+in the report accounted for the difference between the proposed and executed quantity.)*
+
 **Legacy exits (liquidate, never re-buy into core):** AMZN, GOOGL, INTC, MCK, DBA, TIP,
 XSD, PPA, EUAD are **held names being wound down** (the AMZN/GOOGL exempt-hold doctrine is
 retired — QQQ retains the mega-cap exposure at index weight). Their reference target is **0**;
@@ -242,7 +253,16 @@ For each catalyst idea, emit one `flex_nominations[]` entry. A good nomination:
 
 1. **Names a dated catalyst** — a recognition event (earnings, a product/contract
    milestone, a legislative date, a thematic-tier demand inflection) with a
-   `catalyst_date`. "Cheap and good" is not a catalyst.
+   `catalyst_date`. "Cheap and good" is not a catalyst. **No exceptions, either
+   direction (Task E5, session 2026-08-01):** a `catalyst_date` of "unknown," or a
+   rationale that says the date itself is unresolved (e.g. "earnings date
+   unknown"), does NOT satisfy this bar — if you cannot cite a specific date, hold
+   the nomination back this session rather than filing it with an admittedly-missing
+   date. Apply the identical bar every session, in both directions: it is just as
+   wrong to nominate a name on an unresolved date as it is to correctly decline one
+   on that same ground the next day. *(07-30 nominated ETN with "earnings date
+   unknown"; 07-31 correctly declined INTC for the identical reason — the bar must
+   hold both times, not just the second.)*
 2. **Asserts regime fit against `flex_quadrant.resolved`** (NOT the raw axes). The
    collector resolves the quadrant the flex engine treats as in force in the
    `flex_quadrant` block: when both axes are pinned it is the active quadrant; when
@@ -471,6 +491,41 @@ keep that sleeve between **5% and 15% of equity**. SGOV counts as cash: it is a
   ceiling quoted from a prior report drifts stale (the 07-09→07-13 reports carried a
   "15% ceiling" line through days when the operative ceiling had moved); quote the
   binding constraint, not your memory of it.
+- **A cash sleeve stuck ABOVE its operative ceiling makes in-band underweight sleeves
+  buy-eligible (decision D-D1, session 2026-08-01).** Band enforcement synthesizes
+  a de-risk shortfall on an out-of-band sleeve, but never manufactures an *obligation*
+  out of an **in-band** gap — that stays true; a sleeve inside `execution_config.gap_band_pp`
+  of its reference still needs no override and no tranche trade. But the corrective for
+  an over-ceiling cash sleeve is itself a **re-risk** move (buying a damper/SGOV
+  underweight would sell cash down, or selling SGOV/cash — never synthesized), so it is
+  structurally never auto-corrected, and every Q1–Q4 sleeve parked at reference-minus-band
+  ("sheltered", no obligation) leaves nothing FOR enforcement to act on either — the
+  result, left unaddressed, is cash stranded indefinitely while the un-invested book
+  underperforms (a one-session SPY rally can collapse most of an inception excess lead).
+  So: when the deterministic **`cash_above_band`** signal fires —
+  `reference_weights.binding` contains `"cash_above_band"`, or (equivalently) the
+  CURRENT cash sleeve (literal cash + SGOV — e.g. `quadrant_allocation.buckets.cash_sleeve`
+  / the dashboard's cash-sleeve figure) sits **above** the operative ceiling read directly
+  — you MAY propose a **discretionary** buy of an in-band-but-underweight Q1–Q4 sleeve toward (never past)
+  `reference + execution_config.gap_band_pp`, funded from the excess cash. **Never key this
+  trigger off `cash_sleeve_target_pct`** — that figure is `max(cash_floor, min(cash_ceiling,
+  current_sleeve))`, ceiling-clamped BY CONSTRUCTION, so it can never itself exceed the
+  ceiling and therefore can never express the breach this doctrine exists to correct; nor
+  off `functional_coverage.sgov_note_inputs.sgov_pct` alone, which is SGOV's own weight,
+  not the sleeve total (literal cash + SGOV). This is the
+  same "size-floored ≠ impossible" discretionary-move-within-the-window doctrine you
+  already apply to out-of-band sleeves (see "Execute toward the reference" above),
+  extended to this specific condition. This is a **permission, not an obligation**: an
+  in-band gap still requires no `overrides[]` record and generates no enforcement
+  synthesis if you decline it — you are simply no longer required to treat "in band" as
+  "hands off" when the alternative is an ever-growing, unenforceable cash stockpile. Gate
+  rules still bind per name (a closed-gate amplifier buy is still forbidden regardless of
+  how much cash is stranded — only damper/SGOV-eligible-under-gate names, or any name
+  when the gate is open, qualify); size the session's total such discretionary deployment
+  so the cash sleeve moves down by at most one tranche's worth
+  (`execution_config.tranche_pp_max`, measured at the cash-sleeve level, i.e. across all
+  such buys this session combined) — this is a pacing rule on how fast you draw the
+  cash sleeve down, not a per-name cap.
 
 ### How to call the quadrant
 
@@ -507,6 +562,16 @@ the datum the block cites, and its as-of date.
   collapsing is flagged as a rear-view artifact and classified by core. **Echo
   `inflation_axis.direction`.** Breakevens are secondary — do **not** call the axis
   "falling" off falling breakevens while `inflation_axis.direction` says otherwise.
+  **Oil's role is symmetric and always a corroborate-or-counter check against the
+  CLASSIFICATION, never a cause of it (Task E6, session 2026-08-01):** core CPI/PCE
+  drives the direction; oil only ever CONFIRMS it (moving the same way) or COUNTERS
+  it (moving the opposite way, a risk to watch) — it is never itself "the reason"
+  the axis reads a given direction. When the axis is "falling" and oil is *rising*,
+  oil is the **counter-signal** (a headwind / reason for caution on the falling
+  call) — state it that way, never as if oil rising explains or supports a falling
+  read. *(07-31 §3 stated oil's rise as "the primary reason" the inflation axis was
+  falling — backwards; a rising oil price argues AGAINST continued disinflation, it
+  cannot be cited as the cause of it.)*
 - **Policy stance = `policy_axis.stance`** (`hawkish` / `neutral` / `dovish` /
   `unconfirmed`), resolved deterministically from two layers — **echo it with its
   `policy_axis.source`; never re-derive from raw yields.** A fresh manual SEP/dot-plot
@@ -1493,6 +1558,20 @@ Then the numbered sections, in this order:
       there (77 shares would have landed SGOV at 35.63%, past the 28.50% window
       ceiling), and the report never mentioned the clamp or the remainder.)*
 
+      **The carve-out BUDGET is pre-trade cash only — the post-trade CASH-SLEEVE TOTAL
+      is a different number and must include this session's sell proceeds (Task E2,
+      session 2026-08-01 hygiene).** These are two separate figures and both 07-30 and
+      07-31 conflated them, understating the post-trade cash sleeve by roughly 12pp
+      each time (narrated ~43%/~50% vs a true ~55% both sessions). Sell proceeds land
+      in literal cash the instant the sell settles — even though the SGOV sweep itself
+      can only spend the PRE-trade portion of that cash (the carve-out rule above).
+      State the post-trade literal-cash figure as: `post_trade_literal_cash =
+      pre_trade_literal_cash − Σ(buy notionals) + Σ(sell notionals)` — every buy notional
+      (SGOV sweep included) and every sell notional this session, not just the sweep's
+      own arithmetic. Prefer the deterministic post-trade quadrant-allocation addendum's
+      `cash_sleeve` figure when it is available; only fall back to this formula when
+      building the number by hand.
+
       **Size-floored ≠ impossible (2026-07-21 XLV).** When the *tranche minimum*
       (`required_move_today`) floors to 0 shares / below `min_notional_usd`, that is a
       pacing limit, NOT a wall — a **larger discretionary move** toward reference is
@@ -1541,6 +1620,24 @@ Then the numbered sections, in this order:
       DERIVED direction for the asymmetry bar, and flags — never silently
       rejects — a disagreement with your declared `direction`. Get it right anyway:
       a flagged disagreement is logged as a data-quality signal against you.
+
+      **A TRADE's de-risk/re-risk class is a SEPARATE axis from an OVERRIDE's
+      direction — do not conflate the two vocabularies (Task E4, session
+      2026-08-01).** `derive_override_direction` (above) classifies an OVERRIDE by
+      the sleeve's CURRENT POSITION vs its reference (holding more/less defense than
+      the reference wants). A TRADE's own de-risk/re-risk class is different: it is
+      about what the TRADE ACTION does to the portfolio's defensiveness — SELLING an
+      Amplifier/legacy-exit name is de-risk; BUYING a Damper/SGOV name is de-risk;
+      **selling an overweight Damper/SGOV name is RE-RISK** (you are removing
+      ballast — never synthesized by band enforcement, spec §6), even though that
+      same sell also happens to move the sleeve TOWARD its reference. These can
+      point in opposite directions for the identical trade: selling overweight GLD
+      trims toward reference (a "confirming" trade in the gap-table sense) while
+      simultaneously being a re-risk action (less gold ballast). Never narrate such
+      a sell as "a de-risk move" — state what it actually is: a trade that closes
+      the reference gap, and separately, a re-risk action. *(07-31 labeled a GLD
+      sell "a de-risk move," contradicting the re-risk/never-synthesized language
+      its own shortfall-block prose used elsewhere for the identical sleeve type.)*
    7. **Bounds you cannot cross with an override (Tier-1, enforced downstream).** No override
       may: breach the 0.1% floor or the 90%-of-core ceiling; **re-buy a legacy-exit name into
       core** (AMZN/GOOGL/INTC/MCK/DBA/TIP/XSD/PPA/EUAD — core re-entry is closed, flex only);
@@ -1563,6 +1660,14 @@ Then the numbered sections, in this order:
    reason. Mid-paragraph reversals ("Actually, on reflection…") must NOT appear in the
    artifact. If you are still working out whether the evidence clears the bar, do that
    work in the Section 2 analysis — commit to the answer before you write §9 prose.
+
+   **This discipline is NOT limited to override determination (Task E6, session
+   2026-08-01) — no section of the report, override-related or not, may show visible
+   interim reasoning or a self-correction in place** ("Wait — checking: …", "Actually,
+   on reflection…", or similar). Resolve every contradiction internally before you write
+   a sentence; the artifact states only the final, consistent conclusion, in every
+   section (Themes & flex pipeline included). *(07-31 Section 6 shipped "Wait —
+   checking: …" verbatim.)*
 3. **Geopolitical overlay** — the most material 1–3 items from the last ~30 days
    that affect supply chains, energy, defense, or trade.
 4. **Portfolio review** — table of current holdings with weight, day P/L, total P/L,
@@ -1618,6 +1723,16 @@ Then the numbered sections, in this order:
    name's `next_action` from `flex_state` (hold / trailing / scaled-out / time-stop)
    and each evaluated nomination's `entry_trigger` / `skip_reason`. You do not size,
    stop, or exit flex names here — the engine does; you report what it computed.
+   **Prior-session nomination adjudication is mandatory (C4 extension, session
+   2026-08-01, Task E3).** The collector echoes the most recent `flex-state` blob's
+   `entries` forward into today's snapshot — if the PRIOR report nominated a name
+   **or** today's `flex_state.entries` is non-empty, THIS report MUST adjudicate
+   each entry (state its `entry_trigger`, `skip_reason`, and `binding`) or say
+   explicitly that no engine decision exists yet and why. A prior nomination that
+   silently disappears from the report is the same silent-hold failure the C4
+   next-session-intent rule (above) already forbids, in the flex pipeline's
+   costume. *(07-30 nominated ETN; the entry's decision persisted into the 07-31
+   snapshot and 07-31 never mentioned it.)*
 7. **Risks** — what could invalidate today's thesis. Be specific
    (e.g. "CPI print Thursday, consensus 3.1% YoY"). **End this section with a
    "What I could be wrong about" subsection** listing the disconfirming scenarios for
