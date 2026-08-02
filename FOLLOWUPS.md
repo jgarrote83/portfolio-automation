@@ -3,7 +3,10 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-07-28 (axis confirmation + F1 fix + report hygiene + KMLM diagnostics, branch `fix/20260728-axis-confirm-f1-hygiene`).**
+**▶ START HERE — last session 2026-08-01 (07-30/07-31 report audit: pass-1 clamp visibility, SGOV carve-out reconciliation, zero-watch resize awareness, cash-ceiling deployment doctrine, report hygiene, branch `fix/20260801-clamp-visibility-cash-deadlock`).**
+Five-task PR: A (pass-1 Tier-1 clamps now survive pass 2 instead of silently reverting to "passed" — the KMLM 182→179 clamp vanished from the combined summary and the report addendum never fired), B (decision D-B1: `reconcile()` no longer flags the sanctioned literal-cash→SGOV carve-out sweep as the model having "traded AWAY" from reference), C (`_build_day_pl_zero_watch` gains share-count awareness so a resize — a sale/buy — no longer misflags as a P/L anomaly, while the genuine frozen-quote signal is kept), D (decision D-D1, prompt-only: a cash sleeve stuck above its operative ceiling makes in-band underweight sleeves discretionarily buy-eligible, breaking the ~30pp stranded-cash deadlock), E (7-item prompt-hygiene batch: floor-shares arithmetic, post-trade cash formula, prior-session flex-nomination adjudication, trade-direction vocabulary, symmetric catalyst-date discipline, no visible deliberation chatter, symmetric oil-overlay wording). Suite 842→859 green, ruff clean, every new test confirmed failing on pre-fix source via `git stash` isolation. **Auto-merge: NO, human review required** — see entry **#50** below for the full design and both decision gates (D-B1, D-D1).
+
+**▶ Prior session 2026-07-28 (axis confirmation + F1 fix + report hygiene + KMLM diagnostics, branch `fix/20260728-axis-confirm-f1-hygiene`).**
 Five-task PR: A (axis-direction N=2 confirmation + GDPNow rolloff diagnostic + policy-stance confirmation), B (F1 series-deltas weekend-walkback fix — net-new, the previously-named fix branch was never created), C (5 prompt-hygiene edits: gate labeling precision, SGOV sweep budget, Recommended Weight provenance, axis-flip adjudication, dashboard stale count), D (KMLM day-P/L zero-watch diagnostics only), E (analyzer `effective_selected` failure-day hardening from the #47 merge audit). Suite 817→842 green, ruff clean. **Auto-merge: NO, human review required** — see entry **#49** below for the full design, decision gates (D-A1/D-A2/D-D1/D-1a), and the FOMC 07-29 ships-hot timing note (the market-implied policy-stance confirmation needs 2 runs post-FOMC to move the gate unless the manual `fomc_stance` file is refreshed same-day).
 
 **▶ Prior session 2026-07-27 (blanket autonomous sleeve switching, branch `feat/20260727-sleeve-auto-switch`) — MERGED + DEPLOYED, PR #31.**
@@ -308,6 +311,31 @@ wiped them.
 ---
 
 ## Open
+
+### 51. Tape-vs-axes divergence grading ledger — promote-or-demote `market_implied_quadrant` (MEDIUM — data-gated, ~2 months)
+From the 2026-08-01 report audit (entry **#50**). On every session where
+`market_implied_quadrant.confidence == "high"` and the implied quadrant differs
+from the macro call (active or borderline bucket), append a deterministic row
+to a new `divergence-history` blob: date, implied quadrant, macro call, what
+the book did (amplifier net deployment pp that session), and stamp it for
+Phase C grading at 30/60/90d (which quadrant's benchmark basket actually won
+the window). Decision rule after ~2 months of rows: if high-confidence tape
+divergence beats the realized axes at turns, give it a BOUNDED mechanical seat
+(e.g. sustained N-session divergence caps per-session amplifier deployment, or
+shifts the reference a staged fraction, mirroring `transition_watch`); if not,
+demote it to context-only prose. Kills the current limbo where the signal is
+computed daily and muzzled daily (describe-only, no allocation authority).
+
+### 52. Style-rotation composite — value/growth leadership from already-fetched prices (MEDIUM — cheap, zero new API calls)
+From the 2026-08-01 report audit (entry **#50**). Deterministic collector
+block: relative 20d/60d momentum of the book's own value/cyclical proxies
+(COWZ, XLF, XLI, VDE) vs growth proxies (QQQ, SOXX, SPY), plus the existing
+XLY/XLP ratio — emitted as a `style_rotation` block with direction + streak,
+N=2-confirmed like the axes (mirrors `_confirm_axis_direction`). Purpose: give
+`transition_watch` a leadership-change input that fires earlier than realized
+macro. Grade it through the same divergence ledger (**#51**) before it earns
+any allocation authority — do not wire it into `reference_weights` in the same
+change that introduces it.
 
 ### 1. Verify the first fully-unattended weekday run (HIGH — time-sensitive)
 The chain (collector → EventGrid → analyzer → `daily-trades` → `auto_executor`
@@ -1393,6 +1421,118 @@ fills (or explains a deviation).
 ---
 
 ## Done
+### 50. 2026-08-01 session: Pass-1 clamp visibility + SGOV carve-out reconciliation + zero-watch resize awareness + cash-ceiling deployment doctrine + report hygiene — Done, branch `fix/20260801-clamp-visibility-cash-deadlock` (auto-merge: NO, human review required)
+Audit of the 07-30 and 07-31 daily reports against master (842 green baseline).
+Five defects were empirically reproduced against the installed modules
+(inline-Python probes, not grep): a pass-1 validator clamp that vanished from
+all visible records, a deterministic-layer contradiction on the SGOV sweep, a
+zero-watch false positive on resized positions, a structural cash-sleeve
+deployment deadlock, and a batch of prompt-hygiene issues.
+
+- **Task A — pass-1 clamp visibility (the headline fix).** 07-30 proposed
+  `sell 182 KMLM` ("trim to 1-share floor"); pass-1 `validate_trades` clamped it
+  to a floor-protected landing (179 in the live incident) because a 1-share
+  landing breached the V3 window floor. Pass-2 then re-validated the ALREADY-
+  clamped quantity, found it clean, and stamped it `"passed"` — silently
+  overwriting the pass-1 `"clamped"` status and its reason, so
+  `combined_summary["clamped"]` (sourced only from pass 2's own summary) read 0
+  and the ⚠️ Trade-validation addendum never fired. Report said 182, Alpaca got
+  179, and nothing on the record explained the gap. **Fixed:**
+  `shared/trade_validation.py::validate_trades` now PRESERVES a trade's prior
+  `"clamped"` stamp (merging reasons, deduped) instead of overwriting it when a
+  later pass finds nothing further to clamp; `analyzer/handler.py`'s
+  `combined_summary["clamped"]` needed no code change — it now counts both
+  passes' clamps as a direct consequence of the preserved stamp.
+- **Task B — reconcile ↔ SGOV carve-out reconciliation (decision D-B1, Option
+  1 chosen).** 07-31's deterministic shortfall block flagged SGOV: "model moved
+  −7.01pp — model traded AWAY from reference" — but that −7.01pp move WAS the
+  sanctioned cash→SGOV carve-out sweep (69 shares) `validate_trades` explicitly
+  exempts as a cash-sleeve composition swap. `reconcile()`'s `move_pp` had no
+  carve-out awareness, so every future sweep while SGOV sits above
+  reference+band would fire this false flag — the steady state. **Fixed:**
+  `shared/reference_execution.py::reconcile` now excludes the qualifying
+  carve-out notional (`min(buy_notional, max(0, pre_trade_cash −
+  literal_cash_buffer_usd))`, mirroring the validator's exemption exactly) from
+  SGOV's `move_pp` contribution — a sweep now scores ~0pp, not the full buy
+  notional; a buy beyond the carve-out budget still scores negative on the
+  excess. Option 2 (measuring SGOV at cash-sleeve level) was considered and
+  rejected as more invasive — it would change gap semantics the prompt/gap-
+  table already documents per-name.
+- **Task C — zero-watch resize awareness.** `_build_day_pl_zero_watch` diffed
+  `unrealized_pl` across snapshots with no share-count normalization — KMLM's
+  flagged `-$93.87` delta (07-31) was fully explained by realizing the gain on
+  a 179-share sale; COWZ's `-$39.98` was partly explained by an 18-share buy
+  changing the lot basis. Both reports called them "suspicious but cannot be
+  adjudicated" — the diagnostic denied itself the one field (share count) that
+  adjudicates it. **Fixed:** `_load_prior_position_total_pl` now also returns a
+  prior-quantity map (same walkback, extended, not duplicated); a RESIZED
+  position (qty changed) is suppressed from delta-only flagging UNLESS the
+  independent price-identity signal (`lastday_price == current_price`, a
+  literally frozen quote — the genuine, separate anomaly from earlier KMLM
+  sessions) also fires, in which case it still flags, annotated
+  `position_resized: true`. Omitting the new `prior_qty` parameter (opt-in)
+  preserves the original unconditional behavior exactly.
+- **Task D — cash-ceiling deployment doctrine (decision D-D1: prompt-level,
+  Option (c) chosen).** Cash sleeve: 37.19% (07-29) → 48.42% (07-30) → 54.87%
+  (07-31) → 55.02% post-trade, vs the 25% shock-3 operative ceiling. Mechanism:
+  D1 obligations exist only beyond `gap_band_pp`; every Q1/Q2 sleeve sits
+  parked at reference−band ("sheltered", no obligation); the only out-of-band
+  rows are SGOV/literal-cash, whose corrective (sell a damper) is re-risk and
+  NEVER synthesized — an equilibrium with ~30pp permanently stranded in cash.
+  Cost is live: the 07-30→07-31 SPY rally (+1.63%) collapsed inception excess
+  from +1.972pp to +0.328pp in ONE session. **Fixed (prompt-only, no
+  enforcement-layer change):** `project-instructions.md` now permits — never
+  obligates — a discretionary buy of an in-band-but-underweight Q1–Q4 sleeve
+  toward (never past) `reference + gap_band_pp` when the cash sleeve sits above
+  its operative ceiling, funded from the excess cash, gate rules still binding
+  per name, paced to one tranche's worth at the cash-sleeve level per session.
+  Option (a) (enforcement-level D3 extension) and (b) (shrink `gap_band_pp`)
+  were considered and deferred — (a) touches the locked D3 asymmetry decision
+  record and would need its own entry; (b) is less surgical, raising churn
+  everywhere. Ship (c) now; revisit after ~5 sessions if insufficient.
+- **Task E — 7-item prompt-hygiene batch (`project-instructions.md` only).**
+  (1) Floor-shares arithmetic: `max(1, ceil(sleeve_floor_pct_of_core × equity /
+  price))` must be computed and cited in any trim-to-floor plan (07-30's
+  182-share KMLM sell ignored that KMLM's true floor was several shares, not
+  one). (2) Post-trade literal-cash formula must include same-day sell
+  proceeds (`pre_trade − buy notionals + sell notionals`) — both 07-30 and
+  07-31 understated the post-trade cash sleeve by ~12pp by forgetting sell
+  proceeds land in cash even though the SGOV sweep itself can't spend them.
+  (3) Prior-session flex-nomination adjudication (C4 extension): if the prior
+  report nominated a name or `flex_state.entries` is non-empty, the report
+  MUST adjudicate it or say explicitly why not (07-30 nominated ETN; 07-31
+  never mentioned the persisted decision). (4) Trade-direction vocabulary: an
+  override's direction (sleeve-deviation-based) and a trade's de-risk/re-risk
+  class (action-based) are different axes — selling an overweight damper
+  executes toward reference but is a RE-RISK move, never synthesized; 07-31
+  mislabeled such a sell "a de-risk move." (5) Catalyst-date discipline is
+  symmetric: no exceptions for an unresolved date, either direction (07-30
+  nominated ETN with "earnings date unknown" while 07-31 correctly rejected
+  INTC on identical grounds). (6) No visible deliberation chatter, generalized
+  report-wide (07-31 §6 shipped "Wait — checking: …" verbatim; the existing
+  rule only covered override determination). (7) Inflation-overlay sentence
+  template fixed: oil rising is the COUNTER-signal to a falling raw direction,
+  never "the primary reason" for it (07-31 §3 had it backwards).
+- **New FOLLOWUPS backlog entries** (research only, NOT implemented this PR):
+  **#51** tape-vs-axes divergence grading ledger, **#52** style-rotation
+  composite.
+- **Out of scope (per the session prompt):** flex borderline-tiebreak
+  persistence (stateless by design, decision D1 2026-07-21); monthly CPI/PCE
+  staleness convention (release-date-aware freshness); MU FMP price
+  quarantine root cause; enforcement-level cash deployment (Option (a) of
+  D-D1, unless a future session selects it).
+- **Tests:** 17 new (`test_pass1_clamp_visibility.py` ×2,
+  `test_sgov_carveout_reconcile.py` ×3, `test_day_pl_zero_watch.py` +4,
+  `test_prompt_hygiene_sentinels.py` ×8). Every new/modified test confirmed
+  FAILING on pre-fix source via `git stash` isolation of the 5 changed source
+  files (test files kept in place so the new assertions ran against old code):
+  16 of the 17 new/extended assertions failed pre-fix (`TypeError` on the
+  not-yet-extended zero-watch call signature, `KeyError`/`AssertionError` on
+  missing fields, `AssertionError` on absent prompt sentinels); the 1 pass-through
+  sanity test (a fresh trade with no prior stamp still stamps `"passed"`) is
+  intentionally unaffected by the fix and passed both before and after by
+  design. Suite 842→859 green, ruff clean.
+
 ### 49. 2026-07-28 session: Axis-direction confirmation (D-2) + F1 series-deltas fix + report hygiene + KMLM diagnostics — Done, branch `fix/20260728-axis-confirm-f1-hygiene` (auto-merge: NO, human review required)
 The 2026-07-28 "ships hot" run (both #47 sleeve switches fired as designed — see the
 **#48** update) exposed a separate class of issue: nothing gated a regime-sizing axis

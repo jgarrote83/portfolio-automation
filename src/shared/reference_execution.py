@@ -43,6 +43,19 @@ floor, ceiling, and exemptions — and never past it.
 
 PURE module — no I/O. The analyzer builds the inputs (gaps from the snapshot, the
 validator's decisions) and applies the outputs (merged trades, OverrideHistory stamps).
+
+D-B1 (session 2026-08-01, decided with the account holder — Option 1 of two):
+`move_pp`'s SGOV entry now excludes the qualifying literal-cash-carve-out portion of
+a SGOV buy (the same sanctioned sweep `shared/trade_validation.py` exempts from the
+per-name window) from counting as the model having "traded AWAY" from reference.
+Before this, every carve-out sweep scored strongly negative on `model_move_pp`
+(observed 07-31: gap +17.74pp, required 2.74pp, model_move_pp -7.01pp for a 69-share
+SGOV sweep that was, by construction, a pure cash-sleeve composition swap) and
+tripped the "model traded AWAY from reference" reason — a false alarm on the STEADY
+STATE the carve-out exists to enable, firing on every future sweep while SGOV sits
+above reference+band. Option 2 (measuring the SGOV row at cash-sleeve level, SGOV +
+literal cash vs a sleeve-level target) was considered and rejected as more invasive —
+it would change the gap semantics the prompt/gap-table already documents per-name.
 """
 from __future__ import annotations
 
@@ -245,6 +258,18 @@ def reconcile(
     # D1 — per-sleeve allowed residual (shared helper — rejected/absent shelters nothing).
     residual = allowed_residuals(override_decisions, max_mag)
 
+    # Task B (D-B1, session 2026-08-01): the sanctioned literal-cash -> SGOV
+    # carve-out sweep (`shared/trade_validation.py`'s SGOV exemption) is a pure
+    # cash-sleeve composition swap, not a deviation from reference — it must not
+    # score as the model having "traded AWAY" on SGOV. Mirror the validator's
+    # qualifying budget EXACTLY: pre-trade literal cash above the buffer, same-day
+    # sell proceeds never counted (else a sell-and-sweep combo could backdoor-grow
+    # the exemption past what pre-trade cash actually supports).
+    literal_cash_buffer_pct = float(ctx.get("literal_cash_target_pct") or 1.5)
+    sgov_carveout_remaining = max(
+        0.0, float(ctx.get("cash_usd") or 0) - literal_cash_buffer_pct / 100.0 * equity,
+    )
+
     # Model's net pp move TOWARD reference per sleeve (moves away count negative),
     # plus sell/buy notionals for the cash-after-sells constraint on synthesized buys.
     move_pp: dict[str, float] = {}
@@ -270,7 +295,12 @@ def reconcile(
             buy_notional += notional
         gap_signed = float(row.get("current_pct") or 0) - float(row.get("reference_pct") or 0)
         toward = "sell" if gap_signed > 0 else "buy"
-        pp = notional / equity * 100.0
+        move_notional = notional
+        if sym == "SGOV" and side == "buy" and sgov_carveout_remaining > 0:
+            qualifying = min(notional, sgov_carveout_remaining)
+            move_notional -= qualifying
+            sgov_carveout_remaining -= qualifying
+        pp = move_notional / equity * 100.0
         move_pp[sym] = move_pp.get(sym, 0.0) + (pp if side == toward else -pp)
 
     cash_avail = max(0.0, float(ctx.get("cash_usd") or 0) + sell_notional - buy_notional)

@@ -321,6 +321,16 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
                 if rid is not None:
                     seen_ids.add(rid)
                 all_rejected.append(r)
+            # Task A1 (session 2026-08-01): `clamped` here counts BOTH passes' clamps,
+            # not just pass 2's own. This works because `merged` carries pass-1
+            # survivors' "clamped" validation stamps forward, and Task A2
+            # (shared/trade_validation.py) now preserves — never overwrites — a
+            # trade's prior "clamped" status when a later pass finds nothing further
+            # to clamp on it; `tv2["summary"]["clamped"]` therefore already reflects
+            # every clamp still standing after both passes. Before A2, a pass-1 clamp
+            # that re-validated cleanly in pass 2 silently reverted to "passed" here,
+            # dropping the clamp from this count and suppressing the addendum below
+            # (the KMLM 182->179 clamp: reported 182, submitted 179, no explanation).
             combined_summary = {
                 "passed": tv2["summary"]["passed"],
                 "clamped": tv2["summary"]["clamped"],
