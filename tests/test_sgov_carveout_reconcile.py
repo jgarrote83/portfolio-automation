@@ -89,6 +89,33 @@ def test_sgov_buy_beyond_carveout_budget_still_scores_negative():
     assert any("traded AWAY" in r for r in sgov["reasons"])
 
 
+def test_underweight_sgov_sweep_is_fully_credited_no_redundant_synthesis():
+    """M1 (review round, session 2026-08-01): the carve-out exclusion is only
+    for a SGOV buy that moves AWAY from reference (SGOV overweight). When SGOV
+    is UNDERWEIGHT (the realistic morning-after-a-big-sell-day state — large
+    literal cash, small SGOV), a cash->SGOV sweep is genuine progress TOWARD
+    reference and must be credited in full, not zeroed out by the carve-out
+    exclusion — the pre-fix bug scored this at 0.0pp and synthesized a
+    redundant band_enforcement SGOV buy on top of the sweep the model already
+    proposed."""
+    gaps = [
+        {"symbol": "SGOV", "current_pct": 10.0, "reference_pct": 23.5,
+         "price": 100.0, "held_qty": 100},
+    ]
+    ctx = {
+        "deployment_gate": "open", "equity_usd": 100_000.0, "cash_usd": 15_000.0,
+        "date": "2026-08-01", "exempt_holds": [], "literal_cash_target_pct": 1.5,
+    }
+    trades = [{"id": "T-1", "symbol": "SGOV", "side": "buy", "quantity": 135}]
+    recon = reconcile(gaps, trades, [], CFG, ctx)
+    sgov = recon["sleeves"]["SGOV"]
+
+    assert sgov["model_move_pp"] == 13.5
+    assert recon["enforced_trades"] == []
+    assert sgov["status"] == "confirming"
+    assert not any("traded AWAY" in r for r in sgov["reasons"])
+
+
 def test_carveout_budget_is_pretrade_cash_only_same_day_sells_excluded():
     """Mirrors the validator's `pre_cash` tracker: a same-day sell of an
     UNRELATED sleeve must not inflate the SGOV exemption budget."""

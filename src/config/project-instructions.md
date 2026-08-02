@@ -502,10 +502,17 @@ keep that sleeve between **5% and 15% of equity**. SGOV counts as cash: it is a
   ("sheltered", no obligation) leaves nothing FOR enforcement to act on either — the
   result, left unaddressed, is cash stranded indefinitely while the un-invested book
   underperforms (a one-session SPY rally can collapse most of an inception excess lead).
-  So: when `cash_sleeve_target_pct`'s actual value (`functional_coverage.sgov_note_inputs`
-  / the Recommended cash figure) sits **above** its operative ceiling, you MAY propose a
-  **discretionary** buy of an in-band-but-underweight Q1–Q4 sleeve toward (never past)
-  `reference + execution_config.gap_band_pp`, funded from the excess cash — this is the
+  So: when the deterministic **`cash_above_band`** signal fires —
+  `reference_weights.binding` contains `"cash_above_band"`, or (equivalently) the
+  CURRENT cash sleeve (literal cash + SGOV — e.g. `quadrant_allocation.buckets.cash_sleeve`
+  / the dashboard's cash-sleeve figure) sits **above** the operative ceiling read directly
+  — you MAY propose a **discretionary** buy of an in-band-but-underweight Q1–Q4 sleeve toward (never past)
+  `reference + execution_config.gap_band_pp`, funded from the excess cash. **Never key this
+  trigger off `cash_sleeve_target_pct`** — that figure is `max(cash_floor, min(cash_ceiling,
+  current_sleeve))`, ceiling-clamped BY CONSTRUCTION, so it can never itself exceed the
+  ceiling and therefore can never express the breach this doctrine exists to correct; nor
+  off `functional_coverage.sgov_note_inputs.sgov_pct` alone, which is SGOV's own weight,
+  not the sleeve total (literal cash + SGOV). This is the
   same "size-floored ≠ impossible" discretionary-move-within-the-window doctrine you
   already apply to out-of-band sleeves (see "Execute toward the reference" above),
   extended to this specific condition. This is a **permission, not an obligation**: an

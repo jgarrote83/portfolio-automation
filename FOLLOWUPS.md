@@ -4,7 +4,7 @@ Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
 **▶ START HERE — last session 2026-08-01 (07-30/07-31 report audit: pass-1 clamp visibility, SGOV carve-out reconciliation, zero-watch resize awareness, cash-ceiling deployment doctrine, report hygiene, branch `fix/20260801-clamp-visibility-cash-deadlock`).**
-Five-task PR: A (pass-1 Tier-1 clamps now survive pass 2 instead of silently reverting to "passed" — the KMLM 182→179 clamp vanished from the combined summary and the report addendum never fired), B (decision D-B1: `reconcile()` no longer flags the sanctioned literal-cash→SGOV carve-out sweep as the model having "traded AWAY" from reference), C (`_build_day_pl_zero_watch` gains share-count awareness so a resize — a sale/buy — no longer misflags as a P/L anomaly, while the genuine frozen-quote signal is kept), D (decision D-D1, prompt-only: a cash sleeve stuck above its operative ceiling makes in-band underweight sleeves discretionarily buy-eligible, breaking the ~30pp stranded-cash deadlock), E (7-item prompt-hygiene batch: floor-shares arithmetic, post-trade cash formula, prior-session flex-nomination adjudication, trade-direction vocabulary, symmetric catalyst-date discipline, no visible deliberation chatter, symmetric oil-overlay wording). Suite 842→859 green, ruff clean, every new test confirmed failing on pre-fix source via `git stash` isolation. **Auto-merge: NO, human review required** — see entry **#50** below for the full design and both decision gates (D-B1, D-D1).
+Five-task PR: A (pass-1 Tier-1 clamps now survive pass 2 instead of silently reverting to "passed" — the KMLM 182→179 clamp vanished from the combined summary and the report addendum never fired), B (decision D-B1: `reconcile()` no longer flags the sanctioned literal-cash→SGOV carve-out sweep as the model having "traded AWAY" from reference), C (`_build_day_pl_zero_watch` gains share-count awareness so a resize — a sale/buy — no longer misflags as a P/L anomaly, while the genuine frozen-quote signal is kept), D (decision D-D1, prompt-only: a cash sleeve stuck above its operative ceiling makes in-band underweight sleeves discretionarily buy-eligible, breaking the ~30pp stranded-cash deadlock), E (7-item prompt-hygiene batch: floor-shares arithmetic, post-trade cash formula, prior-session flex-nomination adjudication, trade-direction vocabulary, symmetric catalyst-date discipline, no visible deliberation chatter, symmetric oil-overlay wording). **PR #33 review round (same day, same branch):** M1 fixed a Task B regression (the carve-out exclusion applied regardless of gap direction, zeroing out a genuine underweight-SGOV sweep's credit and triggering a redundant synthesized buy) and M2 fixed a Task D trigger that could never fire (`cash_sleeve_target_pct` is ceiling-clamped by construction — reworded to key on `reference_weights.binding`'s `cash_above_band` flag). Suite 842→861 green, ruff clean, every new/modified test confirmed failing on pre-fix source via `git stash` isolation. **Auto-merge: NO, human review required** — see entry **#50** below for the full design, both original decision gates (D-B1, D-D1), and the review-round addendum.
 
 **▶ Prior session 2026-07-28 (axis confirmation + F1 fix + report hygiene + KMLM diagnostics, branch `fix/20260728-axis-confirm-f1-hygiene`).**
 Five-task PR: A (axis-direction N=2 confirmation + GDPNow rolloff diagnostic + policy-stance confirmation), B (F1 series-deltas weekend-walkback fix — net-new, the previously-named fix branch was never created), C (5 prompt-hygiene edits: gate labeling precision, SGOV sweep budget, Recommended Weight provenance, axis-flip adjudication, dashboard stale count), D (KMLM day-P/L zero-watch diagnostics only), E (analyzer `effective_selected` failure-day hardening from the #47 merge audit). Suite 817→842 green, ruff clean. **Auto-merge: NO, human review required** — see entry **#49** below for the full design, decision gates (D-A1/D-A2/D-D1/D-1a), and the FOMC 07-29 ships-hot timing note (the market-implied policy-stance confirmation needs 2 runs post-FOMC to move the gate unless the manual `fomc_stance` file is refreshed same-day).
@@ -1532,6 +1532,35 @@ deployment deadlock, and a batch of prompt-hygiene issues.
   sanity test (a fresh trade with no prior stamp still stamps `"passed"`) is
   intentionally unaffected by the fix and passed both before and after by
   design. Suite 842→859 green, ruff clean.
+- **Review round (2026-08-01, same PR #33, same branch — 2 fixes, no new PR):**
+  Tasks A/C/E approved as shipped. **M1 (Task B regression):** the carve-out
+  exclusion in `reconcile()` applied regardless of gap direction, so a
+  genuine UNDERWEIGHT SGOV sweep (the realistic morning-after-a-big-sell-day
+  state) scored `model_move_pp` 0.0 instead of full credit and triggered a
+  redundant `band_enforcement` SGOV buy on top of the model's own sweep.
+  Fixed: the exclusion now applies ONLY when the SGOV buy is the
+  away-from-reference side (`toward == "sell"`, i.e. SGOV overweight) — the
+  only case the carve-out exemption is meant to cover. New test
+  `test_underweight_sgov_sweep_is_fully_credited_no_redundant_synthesis`
+  confirmed failing pre-fix (0.0 vs expected 13.5) via `git stash`. **M2
+  (Task D trigger wording):** the D-D1 doctrine's trigger condition
+  ("`cash_sleeve_target_pct`'s actual value ... sits above its operative
+  ceiling") could never fire — that field is `max(cash_floor,
+  min(cash_ceiling, cur_sleeve))`, ceiling-clamped by construction, so the
+  permission was dead on arrival; `functional_coverage.sgov_note_inputs.sgov_pct`
+  (the other candidate cited) is SGOV-only, not the sleeve total either.
+  Reworded to key on the deterministic `reference_weights.binding` containing
+  `"cash_above_band"` (fires when `cur_sleeve > cash_ceiling` — verified in
+  `collector._build_reference_weights`), or the current cash-sleeve figure
+  read directly (`quadrant_allocation.buckets.cash_sleeve`) — never on
+  `cash_sleeve_target_pct`. Sentinel test updated with a negative assertion
+  pinning the broken phrase's absence, confirmed failing pre-fix via `git
+  stash`. Suite 859→861 green, ruff clean. **Post-merge watch item:** confirm
+  over ~5 sessions that the cash sleeve actually steps down toward its
+  ceiling once D-D1 is live, rather than the model continuing to narrate
+  "Sheltered" every session without acting on the new permission — if the
+  prompt-only fix proves insufficient, escalate to Option (a)
+  (enforcement-level synthesis, needs its own decision entry).
 
 ### 49. 2026-07-28 session: Axis-direction confirmation (D-2) + F1 series-deltas fix + report hygiene + KMLM diagnostics — Done, branch `fix/20260728-axis-confirm-f1-hygiene` (auto-merge: NO, human review required)
 The 2026-07-28 "ships hot" run (both #47 sleeve switches fired as designed — see the

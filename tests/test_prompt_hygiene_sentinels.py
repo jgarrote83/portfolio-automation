@@ -24,7 +24,14 @@ _CASH_CEILING_DOCTRINE_SENTINELS = (
     "decision D-D1",
     "in-band underweight sleeves",
     "buy-eligible",
+    "cash_above_band",
 )
+# M2 (review round, session 2026-08-01): the ORIGINAL trigger wording conditioned
+# on `cash_sleeve_target_pct`'s "actual value" sitting above the ceiling — but that
+# field is ceiling-clamped BY CONSTRUCTION (`max(cash_floor, min(cash_ceiling,
+# cur_sleeve))`), so the condition could never fire. This distinctive phrase must
+# never reappear.
+_CASH_CEILING_UNSATISFIABLE_TRIGGER_PHRASE = "target_pct`'s actual value"
 
 # Task E1: floor-in-shares arithmetic required before a "trim to floor" plan.
 _FLOOR_ARITHMETIC_SENTINELS = (
@@ -77,6 +84,16 @@ def test_cash_ceiling_deployment_doctrine_present():
     text = _text()
     for s in _CASH_CEILING_DOCTRINE_SENTINELS:
         assert s in text, f"missing cash-ceiling doctrine sentinel: {s!r}"
+
+
+def test_cash_ceiling_trigger_is_not_the_unsatisfiable_target_pct_condition():
+    """M2 (review round, session 2026-08-01): the doctrine must key its trigger
+    on the deterministic `cash_above_band` binding flag (or the current cash
+    sleeve read directly), never on `cash_sleeve_target_pct` exceeding the
+    ceiling — that field is ceiling-clamped by construction and can never
+    express the breach, which would make the D-D1 permission unreachable."""
+    text = _text()
+    assert _CASH_CEILING_UNSATISFIABLE_TRIGGER_PHRASE not in text
 
 
 def test_floor_arithmetic_sentence_present():

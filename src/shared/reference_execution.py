@@ -296,7 +296,17 @@ def reconcile(
         gap_signed = float(row.get("current_pct") or 0) - float(row.get("reference_pct") or 0)
         toward = "sell" if gap_signed > 0 else "buy"
         move_notional = notional
-        if sym == "SGOV" and side == "buy" and sgov_carveout_remaining > 0:
+        # M1 (review round, session 2026-08-01): the carve-out exclusion must be
+        # DIRECTION-AWARE — only a SGOV buy that moves AWAY from reference
+        # (SGOV overweight, toward == "sell") is the sanctioned cash-composition
+        # swap this exemption exists for. A SGOV buy that is already the TOWARD
+        # side (SGOV underweight, toward == "buy") is genuine progress and must
+        # be credited in full — applying the exclusion there zeroed out a real
+        # corrective sweep's move_pp and caused reconcile to synthesize a
+        # redundant band_enforcement buy on top of a trade the model already
+        # placed (reproduced: gap -13.5pp, model sweeps the full 13.5pp,
+        # model_move_pp read 0.0 instead of 13.5, entry status "enforced").
+        if sym == "SGOV" and side == "buy" and toward == "sell" and sgov_carveout_remaining > 0:
             qualifying = min(notional, sgov_carveout_remaining)
             move_notional -= qualifying
             sgov_carveout_remaining -= qualifying
