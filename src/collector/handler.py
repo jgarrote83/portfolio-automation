@@ -88,6 +88,7 @@ _DIVERGENCE_DEFAULTS = {
     "dollar_vs_intl_tilt": {"intl_heavy_pct": 20.0, "intl_light_pct": 8.0},
     "leading_vs_lagging_growth": {"diffusion_threshold": 0.3},
     "market_vs_macro_quadrant": {"basket_momentum_min_pct": 2.0, "vote_majority_threshold": 0.5},
+    "market_implied_quadrant": {"confidence_min_populated": {"low": 2, "medium": 3, "high": 5}},
     "staleness_days": 7,
 }
 
@@ -128,6 +129,9 @@ _RISK_LIMITS_DEFAULTS = {
     },
     "quadrant_performance": {
         "suspect_after_sessions": 10,
+    },
+    "bond_signals": {
+        "hy_oas_trend_bp": 10.0,
     },
 }
 
@@ -1934,9 +1938,12 @@ def run() -> None:
     # new leading_vs_lagging_growth divergence and generalises transition_watch.
     # Fetch historical closes for market-derived ratio signals (XLY, CPER, GLD, XLP)
     # — 4 extra FMP calls; within the 250/day budget (see PR body).
+    # Hoisted above the try (2026-08-06 audit B1/B2) so it's always defined even
+    # if leading_growth's build fails before populating it — market_implied_quadrant
+    # below reuses the SAME cache for its copper/gold and XLY/XLP votes.
+    _lg_close_cache: dict[str, dict[str, float]] = {}
     leading_growth: dict = {"available": False}
     try:
-        _lg_close_cache: dict[str, dict[str, float]] = {}
         for _lg_sym in ("XLY", "CPER", "GLD", "XLP"):
             try:
                 _lg_close_cache[_lg_sym] = _close_by_date(fmp, _lg_sym)
@@ -1955,11 +1962,13 @@ def run() -> None:
     # --- Task B (#18): market_implied_quadrant --------------------------------
     # Built BEFORE divergences — loads the perf series from blob directly so it
     # doesn't depend on the in-memory `series` (which is built post-reference_weights).
-    # Prices injected for the copper/gold and XLY/XLP votes.
+    # Prices injected for the copper/gold and XLY/XLP votes; close_cache reuses the
+    # leading_growth fetch above (2026-08-06 audit B1/B2 — zero extra FMP calls).
     market_implied_quadrant: dict = {"available": False}
     try:
         market_implied_quadrant = _build_market_implied_quadrant(
-            [], macro_data, bond_signals, regional_rotation, today, prices=prices
+            [], macro_data, bond_signals, regional_rotation, today, prices=prices,
+            close_cache=_lg_close_cache,
         )
         logger.info(
             "Market implied quadrant: implied=%s confidence=%s growth=%s inflation=%s",
@@ -3540,6 +3549,21 @@ def _build_bond_signals(macro_data: dict) -> dict:
     hy_pct = _percentile(hy, hy_latest)
     ig_pct = _percentile(ig, ig_latest)
 
+    # trend_4w: coarse tightening/widening/flat label off the 20d (~4w) HY OAS
+    # delta — consumed by _build_leading_growth and _build_market_implied_quadrant.
+    # 2026-08-06 audit B1: this key was referenced by both but never actually set
+    # here (mismatch against the raw delta_20d_bp field), so the HY-OAS vote read
+    # None in both consumers every session.
+    _hy_trend_bp = float((_load_risk_limits().get("bond_signals") or {}).get("hy_oas_trend_bp", 10.0))
+    hy_trend_4w: str | None = None
+    if hy_d20 is not None:
+        if hy_d20 <= -_hy_trend_bp:
+            hy_trend_4w = "tightening"
+        elif hy_d20 >= _hy_trend_bp:
+            hy_trend_4w = "widening"
+        else:
+            hy_trend_4w = "flat"
+
     credit_reasons: list[str] = []
     if hy_d20 is not None and hy_d20 >= 50.0:
         credit_reasons.append(f"HY OAS +{hy_d20}bp over 4w (>=+50bp)")
@@ -3554,6 +3578,7 @@ def _build_bond_signals(macro_data: dict) -> dict:
             "delta_5d_bp": _delta_bp(hy, 5),
             "delta_20d_bp": hy_d20,
             "pct_rank_90d": hy_pct,
+            "trend_4w": hy_trend_4w,
         },
         "ig_oas": {
             "latest": ig_latest,
@@ -5898,6 +5923,40 @@ def _price_return_pct(prices: dict, symbol: str, window_td: int) -> float | None
     return None
 
 
+def _ratio_20d_signal(
+    close_cache: dict[str, dict[str, float]],
+    sym_a: str,
+    sym_b: str,
+    window: int = 20,
+    thr_pct: float = 2.0,
+) -> dict:
+    """20-trading-day relative-momentum trend of ``sym_a``/``sym_b`` from a
+    ``{symbol: {date: close}}`` close cache (e.g. CPER/GLD, XLY/XLP).
+
+    Shared by ``_build_leading_growth`` and ``_build_market_implied_quadrant``
+    so the two copper/gold and cyclicals/defensives reads can never drift apart
+    (2026-08-06 audit B1/B2 — before this, market_implied_quadrant read these
+    ratios off the CORE_ROSTER-only perf-series ``closes`` dict, which never
+    contains CPER or XLY, so both votes were structurally always null).
+
+    Returns ``{"direction": "rising"|"falling"|"flat"|None, "pct_change": float|None,
+    "as_of": str|None}``. None when fewer than ``window + 1`` common dates.
+    """
+    a_map = close_cache.get(sym_a) or {}
+    b_map = close_cache.get(sym_b) or {}
+    common = sorted(set(a_map) & set(b_map), reverse=True)
+    if len(common) <= window:
+        return {"direction": None, "pct_change": None, "as_of": common[0] if common else None}
+    try:
+        r_now = a_map[common[0]] / b_map[common[0]]
+        r_then = a_map[common[window]] / b_map[common[window]]
+        pct = (r_now / r_then - 1.0) * 100.0
+    except (ZeroDivisionError, TypeError):
+        return {"direction": None, "pct_change": None, "as_of": common[0]}
+    direction = "rising" if pct > thr_pct else ("falling" if pct < -thr_pct else "flat")
+    return {"direction": direction, "pct_change": round(pct, 2), "as_of": common[0]}
+
+
 def _build_leading_growth(
     macro_data: dict,
     prices: dict,
@@ -6012,45 +6071,22 @@ def _build_leading_growth(
 
     # --- CPER/GLD ratio (copper/gold growth proxy) -- market-derived --------
     # Uses the closes_cache so we don't re-fetch (same data as sleeve scorecard).
-    cper_map = close_cache.get("CPER") or {}
-    gld_map = close_cache.get("GLD") or {}
-    # Compute ratio at each common date then 20d return on the ratio.
-    common_dates = sorted(set(cper_map) & set(gld_map), reverse=True)
-    cg_dir: str | None = None
-    cg_latest: float | None = None
-    if len(common_dates) > 20:
-        try:
-            r_now = cper_map[common_dates[0]] / gld_map[common_dates[0]]
-            r_then = cper_map[common_dates[20]] / gld_map[common_dates[20]]
-            cg_20d = (r_now / r_then - 1.0) * 100.0
-            cg_latest = round(cg_20d, 2)
-            cg_dir = "rising" if cg_20d > 2.0 else ("falling" if cg_20d < -2.0 else "flat")
-        except (ZeroDivisionError, TypeError):
-            pass
-    signals.append({"name": "CPER_GLD_20d", "direction": cg_dir, "as_of": common_dates[0] if common_dates else None,
-                    "latest": cg_latest})
+    # Shared helper (2026-08-06 audit B1/B2) so this can never drift from the
+    # identical read in _build_market_implied_quadrant.
+    cg = _ratio_20d_signal(close_cache, "CPER", "GLD")
+    cg_dir = cg["direction"]
+    signals.append({"name": "CPER_GLD_20d", "direction": cg_dir, "as_of": cg["as_of"],
+                    "latest": cg["pct_change"]})
     if cg_dir == "rising":
         votes_up += 1
     elif cg_dir == "falling":
         votes_down += 1
 
     # --- XLY/XLP ratio (cyclicals vs defensives, 20d) ----------------------
-    xly_map = close_cache.get("XLY") or {}
-    xlp_map = close_cache.get("XLP") or {}
-    common_xl = sorted(set(xly_map) & set(xlp_map), reverse=True)
-    xl_dir: str | None = None
-    xl_latest: float | None = None
-    if len(common_xl) > 20:
-        try:
-            r_now = xly_map[common_xl[0]] / xlp_map[common_xl[0]]
-            r_then = xly_map[common_xl[20]] / xlp_map[common_xl[20]]
-            xl_20d = (r_now / r_then - 1.0) * 100.0
-            xl_latest = round(xl_20d, 2)
-            xl_dir = "rising" if xl_20d > 2.0 else ("falling" if xl_20d < -2.0 else "flat")
-        except (ZeroDivisionError, TypeError):
-            pass
-    signals.append({"name": "XLY_XLP_20d", "direction": xl_dir, "as_of": common_xl[0] if common_xl else None,
-                    "latest": xl_latest})
+    xl = _ratio_20d_signal(close_cache, "XLY", "XLP")
+    xl_dir = xl["direction"]
+    signals.append({"name": "XLY_XLP_20d", "direction": xl_dir, "as_of": xl["as_of"],
+                    "latest": xl["pct_change"]})
     if xl_dir == "rising":
         votes_up += 1
     elif xl_dir == "falling":
@@ -6224,6 +6260,7 @@ def _build_market_implied_quadrant(
     regional_rotation: dict,
     today: str,
     prices: dict | None = None,
+    close_cache: dict[str, dict[str, float]] | None = None,
 ) -> dict:
     """Market-implied quadrant from cross-asset tape momentum (FOLLOWUPS #18).
 
@@ -6238,6 +6275,10 @@ def _build_market_implied_quadrant(
 
     `prices` (optional): today's EOD prices dict — used to extend the series with
     the current day's closes for signals that aren't in perf_series yet.
+    `close_cache` (optional): the SAME `{symbol: {date: close}}` cache
+    `_build_leading_growth` uses for CPER/GLD/XLY/XLP (2026-08-06 audit B1/B2) —
+    the copper/gold and XLY/XLP votes read this, NOT the perf-series `closes`
+    (which only ever contains CORE_ROSTER tickers and never CPER/XLY).
 
     Output: {implied_quadrant, confidence, vote_count, total_votes, votes, basis}.
     Describe-only — never touches reference_weights or regime_gate.
@@ -6262,6 +6303,11 @@ def _build_market_implied_quadrant(
     votes: list[dict] = []
     growth_up_score = 0.0   # positive = growth-favoring (Q1 or Q2)
     infl_up_score = 0.0     # positive = inflation-favoring (Q2 or Q3)
+    # Per-vote sign contributions (2026-08-06 audit B2) — used to detect when
+    # populated votes DISAGREE on an axis (some +, some -), which caps
+    # confidence at 'medium' regardless of populated-vote count.
+    growth_signs: list[float] = []
+    infl_signs: list[float] = []
 
     for window_days, weight in ((20, 0.4), (60, 0.6)):
         idx = _cutoff_idx(window_days)
@@ -6286,6 +6332,8 @@ def _build_market_implied_quadrant(
             def_avg = sum(def_) / len(def_)
             growth_delta = ro_avg - def_avg   # >0 → growth, <0 → stagflation/deflation
             growth_up_score += weight * growth_delta / 10.0   # normalise (baskets ≈ 100)
+            if growth_delta != 0:
+                growth_signs.append(growth_delta)
         # Inflation axis vote: compare inflationary (Q2+Q3) vs deflationary (Q1+Q4).
         inf_ = [v for v in (q2, q3) if v is not None]
         def_lat = [v for v in (q1, q4) if v is not None]
@@ -6294,6 +6342,8 @@ def _build_market_implied_quadrant(
             def_lat_avg = sum(def_lat) / len(def_lat)
             infl_delta = inf_avg - def_lat_avg
             infl_up_score += weight * infl_delta / 10.0
+            if infl_delta != 0:
+                infl_signs.append(infl_delta)
         votes.append({
             "source": f"basket_momentum_{window_days}d",
             "vote": {
@@ -6305,54 +6355,35 @@ def _build_market_implied_quadrant(
         })
 
     # --- Per-signal cross-asset votes (simple up/down flags) ----------------
-    # Copper/gold proxy (from perf-series closes — GLD is in CORE_ROSTER).
-    last_closes = (perf_series[-1] if perf_series else {}).get("closes") or {}
-    prev_closes = {}
-    for pt in reversed(perf_series):
-        if pt["date"] < (perf_series[-1]["date"] if perf_series else ""):
-            prev_closes = pt.get("closes") or {}
-            break
-
-    cper_now = last_closes.get("CPER")
-    gld_now = last_closes.get("GLD")
-    cper_prev = prev_closes.get("CPER")
-    gld_prev = prev_closes.get("GLD")
-    cg_vote = None
-    if cper_now and gld_now and cper_prev and gld_prev:
-        try:
-            ratio_now = float(cper_now) / float(gld_now)
-            ratio_prev = float(cper_prev) / float(gld_prev)
-            cg_pct = (ratio_now / ratio_prev - 1.0) * 100.0
-            if cg_pct > 2.0:
-                cg_vote = "growth"   # copper>gold → risk-on, growth
-                growth_up_score += 0.10
-            elif cg_pct < -2.0:
-                cg_vote = "stagflation"  # gold>copper → defensive
-                growth_up_score -= 0.10
-        except (ZeroDivisionError, TypeError):
-            pass
-    votes.append({"source": "copper_gold_ratio", "vote": cg_vote})
+    # Copper/gold + XLY/XLP read the SAME close_cache _build_leading_growth uses
+    # (2026-08-06 audit B1/B2) — the perf-series `closes` dict only ever carries
+    # CORE_ROSTER tickers and never contains CPER or XLY, so these two votes were
+    # structurally always null before this fix.
+    _cc = close_cache or {}
+    cg = _ratio_20d_signal(_cc, "CPER", "GLD")
+    cg_vote = "growth" if cg["direction"] == "rising" else (
+        "stagflation" if cg["direction"] == "falling" else None)
+    if cg_vote == "growth":
+        growth_up_score += 0.10
+        growth_signs.append(1.0)
+    elif cg_vote == "stagflation":
+        growth_up_score -= 0.10
+        growth_signs.append(-1.0)
+    votes.append({"source": "copper_gold_ratio", "vote": cg_vote,
+                  "as_of": cg["as_of"], "value": cg["pct_change"]})
 
     # XLY/XLP (cyclicals vs defensives)
-    xly_now = last_closes.get("XLY")
-    xlp_now = last_closes.get("XLP")
-    xly_prev = prev_closes.get("XLY")
-    xlp_prev = prev_closes.get("XLP")
-    xl_vote = None
-    if xly_now and xlp_now and xly_prev and xlp_prev:
-        try:
-            ratio_now = float(xly_now) / float(xlp_now)
-            ratio_prev = float(xly_prev) / float(xlp_prev)
-            xl_pct = (ratio_now / ratio_prev - 1.0) * 100.0
-            if xl_pct > 2.0:
-                xl_vote = "growth"
-                growth_up_score += 0.10
-            elif xl_pct < -2.0:
-                xl_vote = "defensive"
-                growth_up_score -= 0.10
-        except (ZeroDivisionError, TypeError):
-            pass
-    votes.append({"source": "XLY_XLP", "vote": xl_vote})
+    xl = _ratio_20d_signal(_cc, "XLY", "XLP")
+    xl_vote = "growth" if xl["direction"] == "rising" else (
+        "defensive" if xl["direction"] == "falling" else None)
+    if xl_vote == "growth":
+        growth_up_score += 0.10
+        growth_signs.append(1.0)
+    elif xl_vote == "defensive":
+        growth_up_score -= 0.10
+        growth_signs.append(-1.0)
+    votes.append({"source": "XLY_XLP", "vote": xl_vote,
+                  "as_of": xl["as_of"], "value": xl["pct_change"]})
 
     # DXY trend (from regional_rotation; inverted for growth — weaker USD → growth/intl)
     dxy_trend = (regional_rotation or {}).get("dxy_tailwind_for_intl")
@@ -6360,9 +6391,11 @@ def _build_market_implied_quadrant(
     if dxy_trend == "tailwind":     # USD weakening → favors intl/risk
         dxy_vote = "growth"
         growth_up_score += 0.05
+        growth_signs.append(1.0)
     elif dxy_trend == "headwind":   # USD strengthening → defensive/Q4
         dxy_vote = "defensive"
         growth_up_score -= 0.05
+        growth_signs.append(-1.0)
     votes.append({"source": "DXY_trend", "vote": dxy_vote})
 
     # Breakevens direction (from bond_signals)
@@ -6373,9 +6406,11 @@ def _build_market_implied_quadrant(
         if float(be_delta) > 15.0:
             be_vote = "reflation"    # rising breakevens → Q2/Q3
             infl_up_score += 0.10
+            infl_signs.append(1.0)
         elif float(be_delta) < -15.0:
             be_vote = "disinflation"  # falling → Q1/Q4
             infl_up_score -= 0.10
+            infl_signs.append(-1.0)
     votes.append({"source": "breakevens_20d", "vote": be_vote,
                   "value": round(be_delta, 1) if be_delta is not None else None})
 
@@ -6386,9 +6421,11 @@ def _build_market_implied_quadrant(
     if hy_trend_val == "tightening":
         hy_vote = "growth"
         growth_up_score += 0.08
+        growth_signs.append(1.0)
     elif hy_trend_val == "widening":
         hy_vote = "defensive"
         growth_up_score -= 0.08
+        growth_signs.append(-1.0)
     votes.append({"source": "HY_OAS_trend", "vote": hy_vote})
 
     # 2s10s steepening (steepening → growth/reflation expectation)
@@ -6401,9 +6438,11 @@ def _build_market_implied_quadrant(
             if delta_2s10 > 0.05:
                 slope_vote = "growth"    # steepening → growth
                 growth_up_score += 0.08
+                growth_signs.append(1.0)
             elif delta_2s10 < -0.05:
                 slope_vote = "defensive"  # flattening → defensive
                 growth_up_score -= 0.08
+                growth_signs.append(-1.0)
         except (TypeError, ValueError):
             pass
     votes.append({"source": "2s10s_steepening", "vote": slope_vote})
@@ -6432,14 +6471,27 @@ def _build_market_implied_quadrant(
     vote_count = sum(1 for v in votes if v.get("vote") is not None)
     total_votes = len(votes)
 
-    if vote_count == 0:
-        confidence = "none"
-    elif abs(growth_up_score) + abs(infl_up_score) > 0.4:
+    # --- Confidence: gated on POPULATED VOTE COUNT + axis agreement ---------
+    # (2026-08-06 audit B2 — replaces the old score-MAGNITUDE gate, under which
+    # a strongly-divergent basket-momentum pair alone — the only 2 of 8 votes
+    # wired correctly pre-B1-fix — could swing confidence to "high" even with
+    # every one of the 6 per-signal cross-asset votes null.) Thresholds are on
+    # vote_count (0-8: both basket windows + the 6 per-signal votes), so 2
+    # populated basket votes alone land exactly at "low", never above it.
+    _miq_cfg = (_load_divergence_config().get("market_implied_quadrant") or {})
+    _thr = _miq_cfg.get("confidence_min_populated") or {"low": 2, "medium": 3, "high": 5}
+    growth_disagree = any(s > 0 for s in growth_signs) and any(s < 0 for s in growth_signs)
+    infl_disagree = any(s > 0 for s in infl_signs) and any(s < 0 for s in infl_signs)
+    disagreement = growth_disagree or infl_disagree
+
+    if vote_count >= float(_thr.get("high", 5)) and not disagreement:
         confidence = "high"
-    elif abs(growth_up_score) + abs(infl_up_score) > 0.15:
+    elif vote_count >= float(_thr.get("medium", 3)):
         confidence = "medium"
-    else:
+    elif vote_count >= float(_thr.get("low", 2)):
         confidence = "low"
+    else:
+        confidence = "none"
 
     return {
         "available": True,
@@ -6447,6 +6499,7 @@ def _build_market_implied_quadrant(
         "implied_growth": implied_growth,
         "implied_inflation": implied_infl,
         "confidence": confidence,
+        "confidence_axis_disagreement": disagreement,
         "growth_score": round(growth_up_score, 3),
         "inflation_score": round(infl_up_score, 3),
         "vote_count": vote_count,

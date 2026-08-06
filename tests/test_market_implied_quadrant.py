@@ -125,6 +125,109 @@ def test_short_series_fewer_basket_votes():
 
 
 # ---------------------------------------------------------------------------
+# 2026-08-06 audit B1/B2: close_cache wiring + count-based confidence gating
+# ---------------------------------------------------------------------------
+
+# _rising_series(25) runs 2026-06-01..2026-06-25; anchoring "today" at the
+# series' own last date (rather than the module TODAY, which is 4 weeks later
+# and pre-existing tests never rely on) lets BOTH the 20d and 60d basket
+# windows actually resolve from the same fixture.
+_SERIES_TODAY = "2026-06-25"
+
+
+def _cc(cper=None, gld=None, xly=None, xlp=None) -> dict:
+    """Build a {symbol: {date: close}} cache, mirroring test_leading_growth.py's
+    fixture — the SAME shape _build_leading_growth's close_cache param expects."""
+    cache: dict = {}
+    for sym, pairs in (("CPER", cper), ("GLD", gld), ("XLY", xly), ("XLP", xlp)):
+        if pairs:
+            cache[sym] = {d: v for d, v in pairs}
+    return cache
+
+
+def _rising_closes(start: float = 100.0, n: int = 25) -> list[tuple[str, float]]:
+    return [(f"2026-07-{(1 + i):02d}", round(start * (1.01 ** i), 4)) for i in range(n)]
+
+
+def _flat_closes(start: float = 100.0, n: int = 25) -> list[tuple[str, float]]:
+    return [(f"2026-07-{(1 + i):02d}", start) for i in range(n)]
+
+
+def _bond_hy(trend: str | None) -> dict:
+    return {"credit": {"hy_oas": {"trend_4w": trend}}, "breakevens": {"be_5y": {"delta_20d_bp": None}}}
+
+
+def test_close_cache_wires_copper_gold_and_xly_xlp_votes():
+    """CPER/XLY are never in perf_series `closes` (CORE_ROSTER-only, see
+    `_roster_closes`) — the copper/gold and XLY/XLP votes must come from the
+    `close_cache` param (the same cache `_build_leading_growth` uses), not
+    perf_series. Before the B1 fix this signature had no close_cache param at
+    all, so these two votes were structurally always null."""
+    series = _flat_series(25)
+    cache = _cc(
+        cper=_rising_closes(100.0), gld=_flat_closes(50.0),
+        xly=_rising_closes(80.0), xlp=_flat_closes(40.0),
+    )
+    result = _build_market_implied_quadrant(series, {}, {}, {}, TODAY, close_cache=cache)
+    cg = next(v for v in result["votes"] if v["source"] == "copper_gold_ratio")
+    xl = next(v for v in result["votes"] if v["source"] == "XLY_XLP")
+    assert cg["vote"] == "growth"
+    assert xl["vote"] == "growth"
+
+
+def test_hy_oas_vote_populated_when_bond_signals_has_trend_4w():
+    """Once _build_bond_signals actually sets trend_4w (B1 fix), the HY_OAS_trend
+    vote must read it (this side was already wired correctly here — the bug was
+    entirely in _build_bond_signals never setting the key)."""
+    series = _flat_series(25)
+    result = _build_market_implied_quadrant(series, {}, _bond_hy("tightening"), {}, TODAY)
+    hy = next(v for v in result["votes"] if v["source"] == "HY_OAS_trend")
+    assert hy["vote"] == "growth"
+
+
+def test_confidence_low_not_high_on_two_basket_votes_alone():
+    """Replays the pre-fix production shape observed 08-03/04/05: only the 2
+    basket-momentum votes populated (all 6 per-signal cross-asset votes null),
+    with a STRONG basket divergence. The old confidence gate keyed on score
+    MAGNITUDE, so this alone could reach 'high'; confidence must now be 'low'
+    (2026-08-06 audit B2 — gated on populated-vote COUNT, not magnitude)."""
+    series = _rising_series(25, q2_boost=20.0)
+    result = _build_market_implied_quadrant(series, {}, {}, {}, _SERIES_TODAY)
+    populated = [v for v in result["votes"] if v.get("vote") is not None]
+    assert len(populated) == 2, f"expected exactly 2 populated votes, got {populated}"
+    assert result["confidence"] == "low"
+
+
+def test_confidence_high_with_five_agreeing_votes():
+    """5 populated votes (2 basket + copper_gold + XLY_XLP + DXY), all agreeing
+    growth-positive → confidence 'high'."""
+    series = _rising_series(25, q2_boost=20.0)
+    cache = _cc(cper=_rising_closes(100.0), gld=_flat_closes(50.0),
+                xly=_rising_closes(80.0), xlp=_flat_closes(40.0))
+    rr = {"dxy_tailwind_for_intl": "tailwind"}   # USD weakening -> growth-positive
+    result = _build_market_implied_quadrant(series, {}, {}, rr, _SERIES_TODAY, close_cache=cache)
+    populated = [v for v in result["votes"] if v.get("vote") is not None]
+    assert len(populated) >= 5, f"expected >=5 populated votes, got {populated}"
+    assert result["confidence"] == "high"
+    assert result["confidence_axis_disagreement"] is False
+
+
+def test_confidence_capped_at_medium_on_axis_disagreement():
+    """Same 5-populated-vote count as the 'high' case above, but DXY now
+    disagrees (defensive) with the growth-positive basket/copper-gold/XLY-XLP
+    votes → confidence must cap at 'medium', never 'high'."""
+    series = _rising_series(25, q2_boost=20.0)
+    cache = _cc(cper=_rising_closes(100.0), gld=_flat_closes(50.0),
+                xly=_rising_closes(80.0), xlp=_flat_closes(40.0))
+    rr = {"dxy_tailwind_for_intl": "headwind"}   # USD strengthening -> growth-negative: disagrees
+    result = _build_market_implied_quadrant(series, {}, {}, rr, _SERIES_TODAY, close_cache=cache)
+    populated = [v for v in result["votes"] if v.get("vote") is not None]
+    assert len(populated) >= 5, f"expected >=5 populated votes, got {populated}"
+    assert result["confidence_axis_disagreement"] is True
+    assert result["confidence"] == "medium"
+
+
+# ---------------------------------------------------------------------------
 # _div_market_vs_macro_quadrant
 # ---------------------------------------------------------------------------
 

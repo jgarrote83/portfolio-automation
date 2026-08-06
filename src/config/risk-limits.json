@@ -83,6 +83,11 @@
     "suspect_after_sessions": 10
   },
 
+  "bond_signals": {
+    "hy_oas_trend_bp": 10.0
+  },
+  "_bond_signals_note": "2026-08-06 audit B1 — `credit.hy_oas.trend_4w` (tightening/widening/flat) was referenced by both `_build_leading_growth` and `_build_market_implied_quadrant` but never actually SET by `_build_bond_signals` (a key-name mismatch — the dict only ever carried `delta_20d_bp` etc.), so the HY-OAS vote silently read None in both consumers every session. `trend_4w` is now derived from `delta_20d_bp` vs +/-hy_oas_trend_bp (tightening below -bp, widening above +bp, else flat).",
+
   "literal_cash_floor_pct": 0.75,
   "_literal_cash_floor_note": "Task D (F6, 2026-07-23): after any SGOV sweep, the analyzer's post-model guard trims the sweep notional so that literal cash does not fall below this fraction of equity. Prevents the 07-22 ratchet (sweep sized without netting same-day buy notionals, leaving cash at 0.79% vs the 1.50% target). D-G1 default 0.75%.",
 
