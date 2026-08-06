@@ -1593,6 +1593,18 @@ Then the numbered sections, in this order:
       tranche minimum's un-submittability as total impossibility. The 07-21 report called
       XLV a "binding constraint, not a choice" while a ~16–19-share partial close passed
       every validator gate; that is a silent hold wearing a size-floor costume.
+
+      **Sub-min-notional damper SELLS are ALWAYS trim-to-floor, never a hold
+      (2026-08-06 audit M2).** `reconcile`'s per-sleeve entry now carries
+      `sub_min_notional_action: "trim_to_floor"` whenever a damper's required
+      re-risk sell is below `min_notional_usd` in dollar terms AND no override
+      shelters it — this is a FIXED deterministic rule, not a per-session
+      judgment call. When you see it, sell the FULL overweight down to the
+      sleeve floor (not just the tiny required pp) rather than holding. *(08-04
+      held TLT at a sub-min-notional gap; 08-05 sold the identical setup to the
+      2-share floor — same inputs, opposite actions, no override either day.
+      The rule now removes that discretion entirely: absent a live override,
+      trim to floor every time.)*
    5. **A silent hold is now impossible — shortfalls are enforced deterministically.**
       After validation, the analyzer reconciles your trades against every out-of-band
       sleeve. If they fall short of `required_move_today` and the corrective move is
@@ -1734,6 +1746,23 @@ Then the numbered sections, in this order:
    intent that silently evaporates is the silent-hold failure in a different costume.
    *(2026-07-20 said the MCK proceeds "should be swept into SGOV in a subsequent
    session"; 07-21 never mentioned it — literal cash sat at 4.97% vs the 1.5% target.)*
+   **Prior-override falsifier adjudication is mandatory (2026-08-06 audit M1).**
+   `prior_overrides_pending[]` lists every still-live filed override (accepted or
+   downsized, not yet graded by Phase 5) with its falsifier verbatim, a
+   deterministic `falsifier_met` (true/false when the falsifier parsed against
+   `current_axis_state`, `null` when it didn't — you adjudicate an unparseable
+   falsifier yourself from the same `current_axis_state` numbers), and
+   `filed_date`/`sleeve`/`direction`. For EACH entry you MUST state one of:
+   **held** (falsifier not met — cite the datum), **released** (falsifier met —
+   cite the datum, and if you are now trading the sleeve in the opposite
+   direction, say so explicitly), or **expired** (falsifier_date has passed with
+   no resolution). You may NOT silently drop a pending entry from the narrative,
+   and you may NOT reverse a prior override's direction without first stating
+   whether its falsifier fired. *(08-04 filed a de-risk TLT hold with a dated
+   falsifier — inflation falling 5+ runs AND growth rising 3+ vintages; 08-05
+   sold TLT to the floor with inflation's raw_streak at 4, not 5+, and never
+   adjudicated its own prior falsifier at all — same sleeve, opposite action,
+   consecutive days, no engagement with the record it had just filed.)*
 6. **Themes & flex pipeline** — the theme ledger (each active theme: status,
    tier where opportunity remains, signals being watched); the **flex nominations**
    you are emitting this run in `flex_nominations[]` (candidate, dated catalyst,

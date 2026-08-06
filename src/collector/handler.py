@@ -49,6 +49,7 @@ from shared.quadrants import (
 )
 from flex.regime import resolve_quadrant
 from shared.reference_execution import effective_execution_config
+from shared.overrides import evaluate_falsifier
 
 logger = logging.getLogger(__name__)
 
@@ -1437,6 +1438,74 @@ def _build_override_record() -> dict:
     return _aggregate_override_record(query_entities("OverrideHistory"))
 
 
+# Filed overrides older than this are never surfaced as "pending" — an
+# un-graded row this old more likely reflects a Phase-5 stamping gap than a
+# live adjudication the analyst still owes (2026-08-06 audit M1).
+_PRIOR_OVERRIDE_LOOKBACK_DAYS = 60
+
+
+def _build_prior_overrides_pending(
+    today: str, growth_axis: dict, inflation_axis: dict, policy_axis: dict,
+) -> list[dict]:
+    """Still-live filed overrides the analyzer must explicitly adjudicate this
+    session (2026-08-06 audit M1) — closes the seam where 08-04 filed a de-risk
+    TLT hold with a dated falsifier, and 08-05 sold TLT to the floor without
+    ever engaging with whether that falsifier had actually fired.
+
+    A prior override is "pending" while: it was ACCEPTED or DOWNSIZED (a
+    rejected record authorizes nothing, so there is nothing to adjudicate),
+    Phase 5's stamper has not yet graded it (``outcome_status`` still empty —
+    once graded it is a closed matter, not a live one), and it was filed within
+    ``_PRIOR_OVERRIDE_LOOKBACK_DAYS``. Each entry echoes the falsifier verbatim,
+    a best-effort deterministic ``falsifier_met`` (``shared/overrides.py::
+    evaluate_falsifier`` — None when the free-text falsifier doesn't parse,
+    never a fabricated verdict), and the current axis raw_direction/raw_streak
+    the evaluation used, so the analyzer/human can adjudicate an unparseable
+    falsifier from the same numbers this function looked at.
+
+    Non-fatal by construction (caller wraps in try/except); a table-query
+    failure surfaces as an empty list, never blocks the snapshot.
+    """
+    rows = query_entities("OverrideHistory", "layer eq 'override'")
+    cutoff = (date.fromisoformat(today) - timedelta(days=_PRIOR_OVERRIDE_LOOKBACK_DAYS)).isoformat()
+
+    out: list[dict] = []
+    for r in rows:
+        if r.get("outcome") not in ("accepted", "downsized"):
+            continue
+        if r.get("outcome_status"):
+            continue   # already graded by Phase 5 — resolved, not pending
+        filed = str(r.get("recommended_at") or "")[:10]
+        if not filed or filed < cutoff or filed >= today:
+            continue
+        falsifier = r.get("falsifier") or ""
+        met = evaluate_falsifier(falsifier, growth_axis, inflation_axis, policy_axis)
+        out.append({
+            "sleeve": r.get("sleeve"),
+            "direction": r.get("direction"),
+            "filed_date": filed,
+            "falsifier": falsifier,
+            "falsifier_date": r.get("falsifier_date"),
+            "falsifier_met": met,
+            "current_axis_state": {
+                "growth": {
+                    "raw_direction": (growth_axis or {}).get("raw_direction"),
+                    "raw_streak": (growth_axis or {}).get("raw_streak"),
+                },
+                "inflation": {
+                    "raw_direction": (inflation_axis or {}).get("raw_direction"),
+                    "raw_streak": (inflation_axis or {}).get("raw_streak"),
+                },
+                "policy": {
+                    "raw_direction": (policy_axis or {}).get("raw_stance"),
+                    "raw_streak": (policy_axis or {}).get("raw_streak"),
+                },
+            },
+        })
+    out.sort(key=lambda x: x["filed_date"], reverse=True)
+    return out
+
+
 def run() -> None:
     today = date.today().isoformat()
     logger.info("=== Collector starting for %s ===", today)
@@ -2352,6 +2421,21 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Override record build failed (non-fatal)")
 
+    # --- 2026-08-06 audit M1: prior_overrides_pending (falsifier adjudication) ---
+    prior_overrides_pending: list[dict] = []
+    try:
+        prior_overrides_pending = _build_prior_overrides_pending(
+            today, growth_axis, inflation_axis, policy_axis,
+        )
+        if prior_overrides_pending:
+            logger.info(
+                "Prior overrides pending: %d (%s)",
+                len(prior_overrides_pending),
+                [(p["sleeve"], p["falsifier_met"]) for p in prior_overrides_pending],
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Prior overrides pending build failed (non-fatal)")
+
     # --- Session 2026-07-15, Task A1: execution_review (fill/failure visibility) --
     # Non-fatal. Alpaca-only, FMP budget untouched. See _build_execution_review's
     # docstring — this is the fix for the MU incident's invisibility, not the MU
@@ -2465,6 +2549,7 @@ def run() -> None:
         "quadrant_performance": quadrant_performance,
         "track_record": track_record,
         "override_record": override_record,
+        "prior_overrides_pending": prior_overrides_pending,
         "execution_review": execution_review,
         "execution_config": execution_config,
         "series_deltas": series_deltas,

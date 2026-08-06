@@ -401,6 +401,32 @@ def reconcile(
             _flag(entry, "exempt hold — never force-sold (Tier-1)")
             continue
         if not is_de_risk_move(side, sym):
+            # M2 (2026-08-06 audit) — a sub-min-notional required move on an
+            # out-of-band DAMPER sell (re-risk: trimming an overweight damper
+            # toward its floor) must not be a per-session coin flip. Before
+            # this, the identical 0.05pp/$50-ish required move produced "hold"
+            # one day and "sell to the 2-share floor" the next on TLT — the
+            # same inputs, opposite actions, no override sheltering either
+            # time. Fixed choice (matches the existing "size-floored != total
+            # impossibility" doctrine, spec §6 discretionary-move language):
+            # ALWAYS trim to the sleeve floor, never hold, when the dollar
+            # value of required_move_today alone would be rejected by Tier-1's
+            # min-notional floor. A live override sheltering this sleeve
+            # (allowed > 0) licenses a hold instead — that IS the override
+            # doing its job, not per-session discretion.
+            required_today_usd = required_today / 100.0 * equity
+            if sym in _DEFENSIVE and side == "sell" and allowed <= _EPS_PP and (
+                0 < required_today_usd < min_notional
+            ):
+                entry["sub_min_notional_action"] = "trim_to_floor"
+                entry["reasons"].append(
+                    f"required move (${required_today_usd:.0f}) is below the "
+                    f"${min_notional:.0f} min-notional floor and no override shelters "
+                    f"{sym} — per the fixed M2 rule this is ALWAYS trim-to-floor, "
+                    "never a hold: sell the full overweight down to the sleeve floor "
+                    "(not just the required pp) rather than treating the size floor "
+                    "as impossibility"
+                )
             pro_rata_share = (
                 (required_today / total_required_re_risk) * re_risk_envelope_pp
                 if total_required_re_risk > _EPS_PP else required_today

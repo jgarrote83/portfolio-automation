@@ -244,6 +244,43 @@ def test_gate_closed_defensive_buy_still_synthesized():
     assert e["enforced_trade"]["side"] == "buy"
 
 
+# --- M2 (2026-08-06 audit): sub-min-notional damper sell is ALWAYS trim-to-floor -
+
+def test_sub_min_notional_damper_sell_tagged_trim_to_floor_no_override():
+    """TLT sits 5.06pp overweight (just past the 5pp band), no override — the
+    required move is a mere 0.06pp ($60, below the $115 min-notional floor).
+    This must be deterministically tagged trim_to_floor, not left to per-
+    session discretion (the 08-04 hold vs 08-05 floor-sell inconsistency on
+    an identical setup, fails today: no such field exists at all)."""
+    gaps = [_gap("TLT", 25.06, 20.0)]
+    r = reconcile(gaps, [], [], CFG, _ctx())
+    e = r["sleeves"]["TLT"]
+    assert e["sub_min_notional_action"] == "trim_to_floor"
+    assert any("trim-to-floor" in s or "trim to floor" in s for s in e["reasons"])
+
+
+def test_sub_min_notional_damper_sell_not_tagged_when_override_shelters_it():
+    """A live override sheltering MORE than the band (allowed=8pp > band=5pp)
+    licenses the resulting sub-min-notional residual as a hold — that is the
+    override doing its job, not the discretionary inconsistency M2 closes."""
+    gaps = [_gap("TLT", 28.06, 20.0)]              # gap 8.06pp
+    decs = [_dec("TLT", magnitude=8.0, direction="re_risk")]
+    r = reconcile(gaps, [], decs, CFG, _ctx())
+    e = r["sleeves"]["TLT"]
+    assert e["allowed_residual_pp"] == 8.0
+    assert "sub_min_notional_action" not in e
+
+
+def test_sub_min_notional_rule_is_deterministic_across_sessions():
+    """The core M2 guarantee: the IDENTICAL sub-min-notional setup must yield
+    the IDENTICAL tag every time it's evaluated — no per-session discretion."""
+    gaps = [_gap("TLT", 25.06, 20.0)]
+    r1 = reconcile(gaps, [], [], CFG, _ctx(date="2026-08-04"))
+    r2 = reconcile(gaps, [], [], CFG, _ctx(date="2026-08-05"))
+    assert r1["sleeves"]["TLT"]["sub_min_notional_action"] == "trim_to_floor"
+    assert r2["sleeves"]["TLT"]["sub_min_notional_action"] == "trim_to_floor"
+
+
 def test_enforce_false_only_flags():
     cfg = {**CFG, "reference_execution": {**CFG["reference_execution"], "enforce": False}}
     r = reconcile([_gap("SPY", 17.0, 2.0)], [], [], cfg, _ctx())
