@@ -2841,6 +2841,20 @@ def _build_day_pl_zero_watch(
     anomaly. Omitting ``prior_qty`` (the default) preserves the original
     unconditional delta-only behavior — no share-count data means no resize
     determination is possible.
+
+    Two INDEPENDENT trigger paths (2026-08-06 audit B7 — before this, the price-
+    identity signal only ever fired as a resize-suppression OVERRIDE, still
+    gated behind the outer ``abs(delta) > threshold_usd`` check; a stuck feed on
+    a SMALL-delta position — 08-05's VDE, a ~4.1% position with $0.00 day P/L
+    the same session COWZ was flagged — slipped through entirely):
+      1. ``delta_trigger`` — the original mechanism: day_pl==0 and
+         ``abs(total_pl_delta) > threshold_usd``.
+      2. ``identity_trigger`` — day_pl==0 AND ``lastday_price == current_price``
+         AND qty>0, completely INDEPENDENT of total_pl_delta's magnitude (or
+         even its availability).
+    A position qualifies via EITHER path. Resize-suppression applies ONLY to a
+    delta-only qualifier (``delta_trigger and not identity_trigger``) — the
+    identity path, being independent of delta, is never suppressed by a resize.
     """
     if not prior_total_pl:
         return {"available": False, "reason": "no prior snapshot total P/L available", "flagged": []}
@@ -2856,36 +2870,39 @@ def _build_day_pl_zero_watch(
             continue
         if day_pl != 0.0:
             continue
-        prior = prior_total_pl.get(sym)
-        if prior is None:
-            continue
+
         try:
             total_pl = float(p.get("unrealized_pl") or 0)
         except (TypeError, ValueError):
             continue
-        delta = round(total_pl - prior, 2)
-        if abs(delta) <= threshold_usd:
-            continue
+        prior = prior_total_pl.get(sym)
+        delta = round(total_pl - prior, 2) if prior is not None else None
+        delta_trigger = delta is not None and abs(delta) > threshold_usd
 
         try:
             current_qty = float(p.get("qty")) if p.get("qty") is not None else None
         except (TypeError, ValueError):
             current_qty = None
+        try:
+            price_frozen = float(p.get("lastday_price")) == float(p.get("current_price"))
+        except (TypeError, ValueError):
+            price_frozen = False
+        identity_trigger = price_frozen and current_qty is not None and current_qty > 0
+
+        if not (delta_trigger or identity_trigger):
+            continue
+
         prior_qty_val = (prior_qty or {}).get(sym)
         resized = (
             prior_qty_val is not None and current_qty is not None
             and current_qty != prior_qty_val
         )
-        try:
-            price_frozen = float(p.get("lastday_price")) == float(p.get("current_price"))
-        except (TypeError, ValueError):
-            price_frozen = False
 
-        # Task C2: a resize fully (or partly) explains the total-P/L move on its
-        # own — do not flag on total_pl_delta ALONE in that case. The frozen-
-        # quote price-identity signal is a separate, genuine anomaly and must
+        # Task C2 (unchanged): a resize fully (or partly) explains the total-P/L
+        # move on its own — do not flag on total_pl_delta ALONE in that case.
+        # The frozen-quote identity signal is independent of delta and must
         # still surface even on a resized position (annotated, not suppressed).
-        if resized and not price_frozen:
+        if delta_trigger and not identity_trigger and resized:
             continue
 
         flagged.append({
@@ -2901,8 +2918,23 @@ def _build_day_pl_zero_watch(
             "prior_qty": prior_qty_val,
             "current_qty": current_qty,
             "position_resized": resized,
+            "identity_trigger": identity_trigger,
         })
-    return {"available": True, "flagged": flagged}
+
+    out: dict = {"available": True, "flagged": flagged}
+    if len(flagged) > 1:
+        # 2026-08-06 audit B7: multiple tickers sharing the identical frozen-
+        # quote symptom in one session most likely reflects a shared upstream
+        # feed issue, not N independent per-ticker anomalies — collapse to one
+        # snapshot-wide note (full per-ticker detail stays in `flagged` below).
+        symbols = [f["symbol"] for f in flagged]
+        out["multi_symbol_note"] = (
+            f"{len(flagged)} positions ({', '.join(symbols)}) show a frozen day-P/L "
+            "price mark this session (unrealized_intraday_pl == $0.00, "
+            "lastday_price == current_price) — likely a shared upstream feed issue, "
+            "not independent per-ticker anomalies. See flagged[] for per-ticker detail."
+        )
+    return out
 
 
 # The freshness-set macro series the analyzer actually cites in cadence/new-print

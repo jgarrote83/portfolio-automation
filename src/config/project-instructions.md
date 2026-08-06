@@ -82,13 +82,22 @@ $0.00 while its total P/L moved by more than the configured threshold since the
 prior snapshot — a symptom, not a diagnosis (KMLM printed this three reports
 running, 07-24/07-27/07-28, while USMV/AIA showed the same pattern briefly and
 healed). **This is diagnostics only — you cannot adjudicate upstream-Alpaca-bug
-vs. our-pipeline-mapping-bug from the report alone, so don't try.** If
-`day_pl_zero_watch.flagged` is non-empty, surface each row verbatim (symbol,
-`day_pl_reported`, `total_pl_delta`, and the raw Alpaca fields it echoes —
-`lastday_price`, `current_price`, `unrealized_intraday_pl`, `change_today`) under
-the Data Integrity Warning heading, and note the streak if a symbol has appeared
-before (check `recent_reports`). Do not speculate about root cause beyond what the
-raw fields show; the next session (with more data) adjudicates it.
+vs. our-pipeline-mapping-bug from the report alone, so don't try.** The trigger
+is now TWO independent paths (2026-08-06 audit B7): the original large-delta
+check, and a frozen-quote identity check (`lastday_price == current_price` with
+`day_pl == $0.00` and shares held) that fires regardless of how small
+`total_pl_delta` is — a stuck feed on a small position is still a stuck feed.
+If `day_pl_zero_watch.multi_symbol_note` is set, surface THAT single note (not
+N per-ticker paragraphs) — multiple tickers sharing the identical frozen-quote
+symptom in one session is itself the signal (most likely a shared upstream feed
+issue), and enumerating each separately overstates it as independent anomalies.
+Otherwise, if `day_pl_zero_watch.flagged` is non-empty, surface each row
+verbatim (symbol, `day_pl_reported`, `total_pl_delta`, and the raw Alpaca
+fields it echoes — `lastday_price`, `current_price`, `unrealized_intraday_pl`,
+`change_today`) under the Data Integrity Warning heading, and note the streak
+if a symbol has appeared before (check `recent_reports`). Do not speculate
+about root cause beyond what the raw fields show; the next session (with more
+data) adjudicates it.
 
 ---
 
