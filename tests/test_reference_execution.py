@@ -188,6 +188,53 @@ def test_exempt_hold_never_force_sold():
     assert r["enforced_trades"] == []
 
 
+# --- B6 (2026-08-06 audit): deployable envelope for re-risk shortfalls --------
+
+def _three_underweight_amplifiers():
+    """SPY/QQQ/SOXX each 15pp underweight (current 5% vs reference 20%, price
+    $100) — a multi-sleeve de-cash program. Each sleeve's OWN required_today is
+    tranche-capped at 10pp, so summed naively that's 30pp demanded in one
+    session; the aggregate re-risk envelope caps the SESSION at 10pp instead,
+    giving each sleeve a 3.33pp pro-rata share."""
+    return [
+        _gap("SPY", 5.0, 20.0, price=100.0),
+        _gap("QQQ", 5.0, 20.0, price=100.0),
+        _gap("SOXX", 5.0, 20.0, price=100.0),
+    ]
+
+
+def test_deployed_pro_rata_share_is_rationed_not_flagged():
+    """The model deploys its full aggregate tranche pro-rata across SPY/QQQ/
+    SOXX (3.4pp each, just over each sleeve's 3.33pp pro-rata share of the
+    10pp aggregate envelope) -> zero non_compliant_flagged (fails today: all
+    three flag, since each sleeve's OWN 10pp tranche is treated as fully owed
+    regardless of the other two)."""
+    gaps = _three_underweight_amplifiers()
+    trades = [_trade("SPY", "buy", 34), _trade("QQQ", "buy", 34), _trade("SOXX", "buy", 34)]
+    r = reconcile(gaps, trades, [], CFG, _ctx(deployment_gate="open", cash_usd=20_000.0))
+    statuses = {sym: e["status"] for sym, e in r["sleeves"].items()}
+    assert statuses == {
+        "SPY": "rationed_by_envelope", "QQQ": "rationed_by_envelope", "SOXX": "rationed_by_envelope",
+    }, statuses
+    assert r["summary"]["non_compliant_flagged"] == 0
+    assert r["summary"]["rationed_by_envelope"] == 3
+    assert r["enforced_trades"] == []   # re-risk is still never synthesized
+
+
+def test_genuine_silent_hold_still_flagged_no_pacing_regression():
+    """Same three sleeves, but the model deploys NOTHING while cash is
+    available — a genuine silent hold must still flag (no regression of the
+    2026-06-30 pathology guard the envelope logic must not weaken)."""
+    gaps = _three_underweight_amplifiers()
+    r = reconcile(gaps, [], [], CFG, _ctx(deployment_gate="open", cash_usd=20_000.0))
+    statuses = {sym: e["status"] for sym, e in r["sleeves"].items()}
+    assert statuses == {
+        "SPY": "non_compliant_flagged", "QQQ": "non_compliant_flagged", "SOXX": "non_compliant_flagged",
+    }, statuses
+    assert r["summary"]["rationed_by_envelope"] == 0
+    assert r["summary"]["non_compliant_flagged"] == 3
+
+
 def test_gate_closed_defensive_buy_still_synthesized():
     """The gate forbids risk-on buys, not ballast — a GLD top-up passes while closed."""
     gaps = [_gap("GLD", 2.0, 20.0)]    # gap -18 -> required today 10pp

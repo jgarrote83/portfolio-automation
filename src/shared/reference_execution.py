@@ -193,6 +193,11 @@ def _flag(entry: dict, reason: str) -> None:
     entry["reasons"].append(reason)
 
 
+def _ration(entry: dict, reason: str) -> None:
+    entry["status"] = "rationed_by_envelope"
+    entry["reasons"].append(reason)
+
+
 def reconcile(
     gaps: list[dict],
     trades: list[dict],
@@ -213,9 +218,13 @@ def reconcile(
 
     Returns ``{"sleeves": {sym: {status, gap_pp, allowed_residual_pp,
     required_move_total_pp, required_move_today_pp, model_move_pp, reasons,
-    enforced_trade?}}, "enforced_trades": [...], "summary": {...},
-    "enforcement_notional_usd": float}`` where status is one of
-    ``confirming | override_covered | enforced | non_compliant_flagged``.
+    enforced_trade?, pro_rata_share_pp?}}, "enforced_trades": [...],
+    "summary": {...}, "enforcement_notional_usd": float}`` where status is one
+    of ``confirming | override_covered | enforced | rationed_by_envelope |
+    non_compliant_flagged``. ``rationed_by_envelope`` (2026-08-06 audit B6) is a
+    re-risk shortfall that already covers its pro-rata share of the session's
+    aggregate re-risk envelope — paced by cash/pacing, not a discretionary hold;
+    only a shortfall BELOW that share is ``non_compliant_flagged``.
     Sleeves within ``gap_band_pp`` of reference are not reported.
     """
     ov_cfg = (cfg or {}).get("override_protocol") or {}
@@ -235,7 +244,7 @@ def reconcile(
     sleeves: dict[str, dict] = {}
     enforced: list[dict] = []
     summary = {"confirming": 0, "override_covered": 0, "enforced": 0,
-               "non_compliant_flagged": 0}
+               "non_compliant_flagged": 0, "rationed_by_envelope": 0}
     if equity <= 0 or not gaps:
         return {"sleeves": sleeves, "enforced_trades": enforced, "summary": summary,
                 "enforcement_notional_usd": 0.0}
@@ -326,6 +335,34 @@ def reconcile(
             out_of_band.append((sym, gap_signed, row.get("price")))
     out_of_band.sort(key=lambda r: (r[1] < 0, -abs(r[1])))
 
+    # B6 (2026-08-06 audit) — deployable envelope for RE-RISK shortfalls only.
+    # required_move_today is computed PER SLEEVE up to tranche each, so during a
+    # multi-sleeve de-cash program the sum across sleeves (e.g. 3 underweight
+    # amplifiers each "requiring" ~10pp) routinely exceeds what the model can
+    # sanely deploy in one session — while re-risk is never synthesized (D3
+    # asymmetry), it was unconditionally flagged "file an override or trade next
+    # session" even when the model deployed its full aggregate tranche pro-rata
+    # across those sleeves. The aggregate re-risk envelope is capped at the SAME
+    # tranche_pp_max as a PORTFOLIO-level pace limit (not the sum of each
+    # sleeve's own allowance); a sleeve that moved at least its pro-rata share of
+    # that envelope is `rationed_by_envelope` (deployed as fast as pacing sanely
+    # allows), not `non_compliant_flagged` (a genuine discretionary hold) — the
+    # detector must still catch true silent-holds (net_move ~0 with cash/tranche
+    # available), which it does: their pro-rata share is > 0.
+    re_risk_required: dict[str, float] = {}
+    for sym, gap_signed, _px in out_of_band:
+        allowed_r = residual.get(sym, 0.0)
+        required_total_r = max(0.0, abs(gap_signed) - max(allowed_r, band))
+        if required_total_r <= _EPS_PP:
+            continue
+        side_r = "sell" if gap_signed > 0 else "buy"
+        if side_r == "sell" and sym in exempt:
+            continue
+        if not is_de_risk_move(side_r, sym):
+            re_risk_required[sym] = min(required_total_r, tranche)
+    total_required_re_risk = sum(re_risk_required.values())
+    re_risk_envelope_pp = min(total_required_re_risk, tranche) if total_required_re_risk > 0 else 0.0
+
     seq = 0
     total_enf_notional = 0.0
     for sym, gap_signed, px in out_of_band:
@@ -364,10 +401,27 @@ def reconcile(
             _flag(entry, "exempt hold — never force-sold (Tier-1)")
             continue
         if not is_de_risk_move(side, sym):
-            _flag(entry, (
-                f"{shortfall_pp:.1f}pp re-risk shortfall — never synthesized (spec §6 "
-                "asymmetry); requires an honest override or next-session action"
-            ))
+            pro_rata_share = (
+                (required_today / total_required_re_risk) * re_risk_envelope_pp
+                if total_required_re_risk > _EPS_PP else required_today
+            )
+            entry["pro_rata_share_pp"] = round(pro_rata_share, 2)
+            if net_move + _EPS_PP >= pro_rata_share:
+                _ration(entry, (
+                    f"{shortfall_pp:.1f}pp shortfall vs the full {required_today:.1f}pp "
+                    f"required move, but {max(net_move, 0.0):.1f}pp moved is at/above this "
+                    f"sleeve's pro-rata share ({pro_rata_share:.1f}pp) of the session's "
+                    f"{re_risk_envelope_pp:.1f}pp aggregate re-risk envelope — rationed by "
+                    "pacing/cash, not a discretionary hold; never synthesized (spec §6 asymmetry)"
+                ))
+            else:
+                _flag(entry, (
+                    f"{shortfall_pp:.1f}pp re-risk shortfall — {max(net_move, 0.0):.1f}pp moved "
+                    f"is BELOW this sleeve's pro-rata share ({pro_rata_share:.1f}pp) of the "
+                    f"session's {re_risk_envelope_pp:.1f}pp aggregate re-risk envelope; never "
+                    "synthesized (spec §6 asymmetry) — requires an honest override or "
+                    "next-session action"
+                ))
             continue
         if gate == "closed" and side == "buy" and sym not in _DEFENSIVE:
             _flag(entry, "deployment gate closed — only defensive buys may be synthesized")

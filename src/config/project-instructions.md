@@ -1590,7 +1590,14 @@ Then the numbered sections, in this order:
       **de-risk** (selling overweight amplifier beta, buying underweight ballast/SGOV),
       the shortfall is **synthesized post-hoc as a `source: "band_enforcement"` market
       trade appended to your own list**. A **re-risk** shortfall is never synthesized
-      (the §6 asymmetry) but is flagged `non_compliant_flagged` in the persisted record.
+      (the §6 asymmetry). It is flagged `non_compliant_flagged` in the persisted
+      record ONLY when it falls short of its **pro-rata share of the session's
+      aggregate re-risk envelope** (2026-08-06 audit B6) — the same tranche cap
+      applied at the PORTFOLIO level across every re-risk sleeve at once, since
+      the model cannot sanely deploy a full 10pp tranche into each of several
+      underweight amplifiers in one session. A sleeve that moved at least its
+      pro-rata share is `rationed_by_envelope` — genuinely paced by cash/pacing,
+      not a discretionary hold — and needs no override, no addendum callout.
       So file honest overrides, not silent holds: "appropriately positioned",
       "discipline", the 0.1% floor, or the multi-quadrant labeling ("the Q2 commodities
       are really doing Q3 work") are **NOT** valid overrides — they are exactly the
@@ -1881,7 +1888,7 @@ from a news/filing feed.
 Rules for the JSON block:
 
 - If you have **no trades** to recommend, return the scalar fields + `"trades": []`
-  (`{"quadrant_current": ..., "quadrant_projected_6m": ..., "risk_score": ..., "international_tilt": ..., "rotation_score_reading": ..., "shock_level_reading": ..., "regime_override": ..., "bond_scorecard_reading": ..., "bond_signal_action": ..., "labor_scorecard_reading": ..., "labor_signal_action": ..., "growth_axis_reading": ..., "inflation_axis_reading": ..., "deployment_gate": ..., "trades": []}`). **But a no-trades run is only legitimate when every sleeve is within `execution_config.gap_band_pp` of its reference.** If any sleeve is out of band and you are still recommending no trade for it, that is a **hold override** — you MUST include the matching per-sleeve `overrides[]` record(s) (OVERRIDE_SCHEMA_V1_1), each sheltering at most `execution_config.max_magnitude_pp`. Any unsheltered **de-risk** remainder will be deterministically synthesized as `source: "band_enforcement"` trades appended to your list; an unsheltered re-risk remainder is flagged `non_compliant_flagged`.
+  (`{"quadrant_current": ..., "quadrant_projected_6m": ..., "risk_score": ..., "international_tilt": ..., "rotation_score_reading": ..., "shock_level_reading": ..., "regime_override": ..., "bond_scorecard_reading": ..., "bond_signal_action": ..., "labor_scorecard_reading": ..., "labor_signal_action": ..., "growth_axis_reading": ..., "inflation_axis_reading": ..., "deployment_gate": ..., "trades": []}`). **But a no-trades run is only legitimate when every sleeve is within `execution_config.gap_band_pp` of its reference.** If any sleeve is out of band and you are still recommending no trade for it, that is a **hold override** — you MUST include the matching per-sleeve `overrides[]` record(s) (OVERRIDE_SCHEMA_V1_1), each sheltering at most `execution_config.max_magnitude_pp`. Any unsheltered **de-risk** remainder will be deterministically synthesized as `source: "band_enforcement"` trades appended to your list; an unsheltered re-risk remainder is flagged `non_compliant_flagged` UNLESS it already covers its pro-rata share of the session's aggregate re-risk envelope, in which case it reads `rationed_by_envelope` (paced by cash/pacing, not a hold — see the reference-execution addendum above).
 - `overrides` echoes every deviation from `reference_weights` (including holds beyond band). Omit or `[]` only when Recommended == Reference for every sleeve.
 - `international_tilt` must reflect the *direction of your next move*: `overweight` if you are tilting toward international this report, `underweight` if tilting away, `neutral` otherwise. Must be consistent with the Rotation Score reading in the snapshot.
 - `rotation_score_reading` is the composite score you read from `regional_rotation.rotation_score.composite` (echo it for traceability).
