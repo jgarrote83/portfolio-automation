@@ -190,6 +190,17 @@ _MA_LONG_DAYS = 200
 _MA_SHORT_DAYS = 50
 # Pure-international subset used for MA-cross signals against SPY.
 _INTL_RATIO_TICKERS = ["IDMO", "AIA", "IEMG", "EWJ"]
+# FRED deep-history fetch depth for the rotation/bond-signals pre-computes —
+# tied to _ROTATION_WINDOW_DAYS (the widest consumer) + a calendar-gap buffer
+# (weekends/holidays/occasional missing prints) rather than a bare literal
+# (2026-08-06 audit B4).
+_MACRO_DEEP_FETCH_DAYS = _ROTATION_WINDOW_DAYS + 30
+# Days DTWEXBGS's latest observation may lag `today` before the FX-pairs
+# dollar_proxy fallback kicks in. Boundary fixed 2026-08-06 (audit B4): was
+# `> 5`, which left the fallback dark at exactly 5 days stale; also now fires
+# when the DXY cadence can't be evaluated at all (no observation whatsoever,
+# not just a stale one).
+_DXY_STALE_FALLBACK_DAYS = 5
 
 # Market shock detection: short-horizon move windows and keyword sets.
 # The analyzer uses the resulting shock_level to optionally override the 60d
@@ -1688,9 +1699,9 @@ def run() -> None:
     macro_data = fred.get_all_series(list(macro_meta.keys()))
     # Series that need deeper history for the rotation + bond-signals pre-compute
     # (get_all_series only fetches the latest 5 observations per series).
-    macro_data["DTWEXBGS"] = fred.get_series_latest("DTWEXBGS", limit=90)
-    macro_data["DGS2"]     = fred.get_series_latest("DGS2",     limit=90)
-    macro_data["DFF"]      = fred.get_series_latest("DFF",      limit=90)
+    macro_data["DTWEXBGS"] = fred.get_series_latest("DTWEXBGS", limit=_MACRO_DEEP_FETCH_DAYS)
+    macro_data["DGS2"]     = fred.get_series_latest("DGS2",     limit=_MACRO_DEEP_FETCH_DAYS)
+    macro_data["DFF"]      = fred.get_series_latest("DFF",      limit=_MACRO_DEEP_FETCH_DAYS)
     # Bond-signals pre-compute needs ~90d for percentiles + 4w deltas.
     for _bond_sid in (
         "DGS10", "DGS30", "DGS3MO", "T10Y2Y", "T10Y3M",
@@ -2016,15 +2027,19 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Market implied quadrant build failed (non-fatal)")
 
-    # --- Task B (#18) sub-item: daily dollar proxy (when DTWEXBGS stale >5d) --
+    # --- Task B (#18) sub-item: daily dollar proxy (DTWEXBGS stale/unavailable) --
+    # 2026-08-06 audit B4: fires at >=_DXY_STALE_FALLBACK_DAYS (was `> 5`, dark
+    # at exactly 5d stale) OR when dxy_stale is None — DTWEXBGS returning ZERO
+    # usable observations (dxy_latest_date never set) previously left the DXY
+    # signal blind on BOTH the primary and fallback paths simultaneously.
     dxy_date = (regional_rotation or {}).get("dxy_latest_date")
     dxy_stale = _days_stale(dxy_date, today)
     dollar_proxy: dict = {"available": False}
     try:
-        if dxy_stale is not None and dxy_stale > 5:
+        if _should_use_dollar_proxy(dxy_stale):
             dollar_proxy = _daily_dollar_proxy(macro_data, today)
             logger.info(
-                "Dollar proxy (DTWEXBGS %dd stale): available=%s direction=%s",
+                "Dollar proxy (DTWEXBGS stale=%s): available=%s direction=%s",
                 dxy_stale, dollar_proxy.get("available"), dollar_proxy.get("proxy_direction"),
             )
     except Exception:  # noqa: BLE001
@@ -5898,6 +5913,17 @@ def _days_stale(as_of: str | None, today: str) -> int | None:
         return (date.fromisoformat(today) - date.fromisoformat(as_of[:10])).days
     except (TypeError, ValueError):
         return None
+
+
+def _should_use_dollar_proxy(dxy_stale: int | None) -> bool:
+    """Whether the FX-pairs dollar_proxy fallback should fire (2026-08-06 audit
+    B4). True when DTWEXBGS is >= `_DXY_STALE_FALLBACK_DAYS` calendar days stale
+    OR when its cadence can't be evaluated at all (`dxy_stale is None` — zero
+    usable observations reached `regional_rotation`, so `dxy_latest_date` was
+    never set). Before this fix the trigger was a bare `dxy_stale > 5` — dark at
+    EXACTLY 5 days stale, and dark whenever DTWEXBGS returned no usable
+    observations at all, leaving the DXY signal blind on both paths at once."""
+    return dxy_stale is None or dxy_stale >= _DXY_STALE_FALLBACK_DAYS
 
 
 # ---------------------------------------------------------------------------
