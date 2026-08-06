@@ -825,12 +825,13 @@ can override the slow framework when an event truly hits the tape.
 
 **Fields you will receive in `market_shock`:**
 
-- `shock_level` 0–3 with `shock_label` (`none` / `watch` / `elevated` / `acute`).
-- `triggers` — plain-English list of what fired (e.g. "SPY 1d z-score -3.8", "News keyword hits 27").
+- `shock_level` 0–3 with `shock_label` (`none` / `watch` / `elevated` / `acute`) — `max(price_level, news_level)`.
+- `price_level` / `news_level` — the two channels scored independently (2026-08-06 audit B3). `price_level` is hard tape signals only (SPY/VIX/DXY z-scores + credit-stress escalation) — news volume never feeds it. `news_level` is a Z-SCORE of `news_hits_total` vs its trailing baseline (`news_hits_zscore`), not a raw count.
+- `triggers` — plain-English list of what fired (e.g. "SPY 1d z-score -3.8", "News hits z-score 4.1 (>=3.5, acute)").
 - `spy.return_1d_pct`, `spy.return_5d_pct`, `spy.return_1d_zscore` (vs 60d realized vol).
 - `dxy.return_1d_pct`, `dxy.return_5d_pct`.
 - `vix.latest`, `vix.return_1d_pct`.
-- `news_hits_total`, `news_hits_by_category` (`geopolitical` / `policy_shock` / `market_stress`).
+- `news_hits_total`, `news_hits_by_category` (`geopolitical` / `policy_shock` / `market_stress`), `news_hits_zscore`, `news_persistent_theme_streak`.
 - `news_examples` — up to 8 headlines that matched, with source and category.
 
 **What each level unlocks (the only place the 60d rules bend):**
@@ -844,6 +845,7 @@ can override the slow framework when an event truly hits the tape.
 
 - Never override on `shock_level` alone with no supporting news category hits. If `news_hits_total` is 0 and the only trigger is a price-only z-score, treat it as level max 1 in your narrative.
 - Single-name idiosyncratic news (one ticker's earnings miss) does NOT justify a portfolio-wide override. Cite at least two news examples from different sources before lifting tilt limits.
+- **Symmetric benign-tape guard (2026-08-06 audit B3):** the news channel alone can never carry `shock_level` to 3 while the tape is calm. Whenever `price_level <= 1` (no elevated/acute price signal — check SPY/VIX/DXY yourself before trusting a high `shock_level`), the news channel is capped at 2, or at 1 once `news_persistent_theme_streak` has run for 10+ sessions (a long-running theme like a standing Hormuz/Iran headline cluster, not a fresh event). A `shock_level` of 3 you did not expect from the price fields is a signal to re-check `price_level` vs `news_level` before acting on it — level 3 requires genuine price-channel corroboration, not news volume alone.
 - Echo the `shock_level`, the specific triggers, and the news examples you relied on in your rationale so the human reviewer can audit the override.
 - If you invoke an override, set `regime_override` in the trades JSON (see Output format). If you do NOT override, set it to `"none"`.
 

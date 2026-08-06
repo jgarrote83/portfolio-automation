@@ -15,6 +15,7 @@ from shared.storage import (
     read_snapshot,
     read_trades,
     upsert_entity,
+    write_json_blob,
     write_perf_quadrant_config,
     write_perf_series,
     write_snapshot,
@@ -132,6 +133,17 @@ _RISK_LIMITS_DEFAULTS = {
     },
     "bond_signals": {
         "hy_oas_trend_bp": 10.0,
+    },
+    "market_shock": {
+        "news_baseline_min_sessions": 10,
+        "news_baseline_window_sessions": 20,
+        "news_z_watch": 1.5,
+        "news_z_elevated": 2.5,
+        "news_z_acute": 3.5,
+        "persistent_theme_sessions": 10,
+        "persistent_theme_hits_floor": 15.0,
+        "dxy_news_corroboration_hits": 8,
+        "no_baseline_watch_floor_hits": 5,
     },
 }
 
@@ -1813,6 +1825,10 @@ def run() -> None:
         labor_signals.get("payrolls", {}).get("delta_3m_avg_k"),
     )
 
+    # News-hits trailing baseline (2026-08-06 audit B3) — persisted so the
+    # z-score has a real history to compare against across runs.
+    _news_hist_raw = read_json_blob("market-shock", "news-hits-history.json")
+    _news_hist: list[dict] = _news_hist_raw if isinstance(_news_hist_raw, list) else []
     market_shock = _build_market_shock(
         fmp=fmp,
         macro_data=macro_data,
@@ -1821,13 +1837,33 @@ def run() -> None:
         stock_news=stock_news,
         company_news=company_news,
         bond_signals=bond_signals,
+        news_hits_history=_news_hist,
     )
     logger.info(
-        "Market shock: level=%s, spy_1d_z=%s, news_hits=%s",
-        market_shock.get("shock_level"),
+        "Market shock: level=%s (price=%s news=%s), spy_1d_z=%s, news_hits=%s news_z=%s",
+        market_shock.get("shock_level"), market_shock.get("price_level"),
+        market_shock.get("news_level"),
         market_shock.get("spy", {}).get("return_1d_zscore"),
-        market_shock.get("news_hits_total"),
+        market_shock.get("news_hits_total"), market_shock.get("news_hits_zscore"),
     )
+    try:
+        _dominant_cat = (
+            max(market_shock["news_hits_by_category"], key=lambda c: market_shock["news_hits_by_category"][c])
+            if market_shock.get("news_hits_total", 0) > 0 else None
+        )
+        _news_hist_window = int(
+            (_load_risk_limits().get("market_shock") or {}).get("news_baseline_window_sessions", 20))
+        _news_hist_updated = [h for h in _news_hist if h.get("date") != today]
+        _news_hist_updated.append({
+            "date": today,
+            "total_hits": market_shock.get("news_hits_total", 0),
+            "hits_by_category": market_shock.get("news_hits_by_category", {}),
+            "dominant_category": _dominant_cat,
+        })
+        _news_hist_updated = _news_hist_updated[-_news_hist_window:]
+        write_json_blob("market-shock", "news-hits-history.json", _news_hist_updated)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not persist news-hits history (non-fatal)")
 
     # --- Quadrant axes (deterministic; analyzer ECHOES these, see prompt) ----
     # Growth + inflation direction are the two axes that decide the quadrant. They
@@ -7228,6 +7264,7 @@ def _build_market_shock(
     stock_news: list,
     company_news: dict,
     bond_signals: dict | None = None,
+    news_hits_history: list[dict] | None = None,
 ) -> dict:
     """Detect short-horizon market shocks so the analyzer can override the 60d
     rotation windows and lift tilt limits when a structural event hits.
@@ -7243,6 +7280,21 @@ def _build_market_shock(
                         tilts and immediate de-risking
 
     The analyzer prompt defines exactly what each level unlocks.
+
+    PRICE and NEWS are scored as two INDEPENDENT channels and combined via
+    ``max(price_level, news_level)`` (2026-08-06 audit B3). The news channel
+    used to trigger off absolute daily keyword-hit counts with no baseline, so
+    a persistent multi-week theme (e.g. Iran/Hormuz, 130-147 hits/day) alone
+    pinned shock_level at 3 even on a benign tape (SPY up, VIX down) — that
+    alone lifts the cash-sleeve ceiling to shock3_ceiling (25%) every session.
+    News now scores a Z-SCORE of ``news_hits_total`` against a trailing
+    baseline (``news_hits_history``, caller-supplied — persisted to blob so
+    it survives across runs; see ``run()``), and — the SYMMETRIC guard —
+    whenever the price channel is benign (``price_level <= 1``), news-alone is
+    capped at 2, or at 1 once the SAME dominant news category has persisted
+    >= ``persistent_theme_sessions`` consecutive sessions. Level 3 requires
+    genuine price-channel corroboration. Thresholds in
+    ``risk-limits.json -> market_shock``.
     """
     out: dict = {
         "shock_level": 0,
@@ -7397,12 +7449,7 @@ def _build_market_shock(
     out["news_hits_total"] = total_hits
     out["news_hits_by_category"] = hits_by_cat
     out["news_examples"] = examples
-    if total_hits >= 20:
-        triggers.append(f"News keyword hits {total_hits} (>=20, elevated)")
-    elif total_hits >= 10:
-        triggers.append(f"News keyword hits {total_hits} (>=10, watch+)")
-    elif total_hits >= 5:
-        triggers.append(f"News keyword hits {total_hits} (>=5, watch)")
+    dominant_cat_today = max(hits_by_cat, key=lambda c: hits_by_cat[c]) if total_hits > 0 else None
 
     # --- 4b. Credit-stress signal from bond_signals ------------------------
     credit_stress = False
@@ -7413,35 +7460,100 @@ def _build_market_shock(
             for reason in cs.get("reasons", []):
                 triggers.append(f"Credit stress: {reason}")
 
-    # --- 5. Composite shock level -----------------------------------------
-    level = 0
-    # Acute: extreme tape OR (elevated tape + heavy news cluster)
-    if (spy_1d_z is not None and abs(spy_1d_z) >= 3.5) or total_hits >= 25:
-        level = 3
+    # --- 5. PRICE channel level (hard tape signals only — never news-gated) --
+    _mscfg = (_load_risk_limits().get("market_shock") or {})
+    dxy_corrob_hits = float(_mscfg.get("dxy_news_corroboration_hits", 8))
+
+    price_level = 0
+    if spy_1d_z is not None and abs(spy_1d_z) >= 3.5:
+        price_level = 3
     elif (
         (spy_1d_z is not None and abs(spy_1d_z) >= 2.5)
         or (vix_latest is not None and vix_latest >= 35.0)
         or (vix_1d_pct is not None and vix_1d_pct >= 30.0)
-        or total_hits >= 15
-        or (dxy_5d_pct is not None and abs(dxy_5d_pct) >= 3.0 and total_hits >= 8)
+        or (dxy_5d_pct is not None and abs(dxy_5d_pct) >= 3.0 and total_hits >= dxy_corrob_hits)
     ):
-        level = 2
+        price_level = 2
     elif (
         (spy_1d_z is not None and abs(spy_1d_z) >= 1.5)
-        or total_hits >= 5
         or (vix_1d_pct is not None and vix_1d_pct >= 15.0)
         or credit_stress
     ):
-        level = 1
-
-    # Credit stress paired with any equity-side signal escalates to L2.
-    if credit_stress and level == 1 and (
+        price_level = 1
+    # Credit stress paired with a genuine price-side signal escalates to L2.
+    if credit_stress and price_level == 1 and (
         (spy_1d_z is not None and abs(spy_1d_z) >= 1.5)
-        or total_hits >= 5
         or (vix_1d_pct is not None and vix_1d_pct >= 15.0)
     ):
-        level = 2
+        price_level = 2
 
+    # --- 6. NEWS channel level: Z-SCORE vs trailing baseline, not raw count --
+    # (2026-08-06 audit B3 — see docstring). news_hits_history is caller-supplied,
+    # oldest-first, each {date, total_hits, hits_by_category, dominant_category}.
+    min_baseline = int(_mscfg.get("news_baseline_min_sessions", 10))
+    watch_z = float(_mscfg.get("news_z_watch", 1.5))
+    elevated_z = float(_mscfg.get("news_z_elevated", 2.5))
+    acute_z = float(_mscfg.get("news_z_acute", 3.5))
+    persistent_sessions = int(_mscfg.get("persistent_theme_sessions", 10))
+    persistent_floor = float(_mscfg.get("persistent_theme_hits_floor", 15.0))
+    no_baseline_floor = float(_mscfg.get("no_baseline_watch_floor_hits", 5))
+
+    hist = news_hits_history or []
+    hist_counts = [float(h["total_hits"]) for h in hist if isinstance(h.get("total_hits"), (int, float))]
+    news_z: float | None = None
+    if len(hist_counts) >= min_baseline:
+        mean_h = sum(hist_counts) / len(hist_counts)
+        var_h = sum((x - mean_h) ** 2 for x in hist_counts) / len(hist_counts)
+        sd_h = var_h ** 0.5
+        news_z = round((total_hits - mean_h) / sd_h, 2) if sd_h > 0 else (
+            0.0 if total_hits == mean_h else acute_z + 1.0)
+
+    if news_z is None:
+        news_level = 1 if total_hits >= no_baseline_floor else 0
+        if news_level:
+            triggers.append(f"News keyword hits {total_hits} (no baseline yet, watch floor)")
+    elif news_z >= acute_z:
+        news_level = 3
+        triggers.append(f"News hits z-score {news_z} (>={acute_z}, acute)")
+    elif news_z >= elevated_z:
+        news_level = 2
+        triggers.append(f"News hits z-score {news_z} (>={elevated_z}, elevated)")
+    elif news_z >= watch_z:
+        news_level = 1
+        triggers.append(f"News hits z-score {news_z} (>={watch_z}, watch)")
+    else:
+        news_level = 0
+
+    # Persistent-theme streak: same dominant category above the floor, today
+    # counting back through history, unbroken.
+    persistent_streak = 0
+    if dominant_cat_today and hits_by_cat.get(dominant_cat_today, 0) >= persistent_floor:
+        persistent_streak = 1
+        for h in reversed(hist):
+            h_dom = h.get("dominant_category")
+            h_hits = (h.get("hits_by_category") or {}).get(h_dom, 0) if h_dom else 0
+            if h_dom == dominant_cat_today and h_hits >= persistent_floor:
+                persistent_streak += 1
+            else:
+                break
+    out["news_persistent_theme_streak"] = persistent_streak
+    out["news_hits_zscore"] = news_z
+
+    # Symmetric benign-tape guard: a benign price channel (no elevated/acute
+    # price signal) caps news-alone at 2, or at 1 once the theme has persisted.
+    price_benign = price_level <= 1
+    if price_benign:
+        cap = 1 if persistent_streak >= persistent_sessions else 2
+        if news_level > cap:
+            triggers.append(
+                f"News-alone level capped {news_level}->{cap} (benign tape"
+                + (f", persistent theme {persistent_streak} sessions" if cap == 1 else "") + ")"
+            )
+            news_level = cap
+
+    level = max(price_level, news_level)
+    out["price_level"] = price_level
+    out["news_level"] = news_level
     out["shock_level"] = level
     out["shock_label"] = {0: "none", 1: "watch", 2: "elevated", 3: "acute"}[level]
     out["triggers"] = triggers
