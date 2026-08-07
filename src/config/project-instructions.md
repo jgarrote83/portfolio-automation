@@ -571,6 +571,13 @@ the datum the block cites, and its as-of date.
   collapsing is flagged as a rear-view artifact and classified by core. **Echo
   `inflation_axis.direction`.** Breakevens are secondary — do **not** call the axis
   "falling" off falling breakevens while `inflation_axis.direction` says otherwise.
+  **Breakeven bridge, non-binding (2026-08-06 audit O1):** monthly core CPI/PCE are
+  60-65d stale for most of the window between prints; `inflation_axis.bridge_direction`
+  (`rising`/`falling`/`flat`, off the already-fresh 5y5y/5y breakevens,
+  `bridge_basis` names which) is a SECONDARY read for that gap. Cite it as
+  "breakevens currently point `{bridge_direction}` between prints" when useful —
+  but it NEVER overrides `direction`, which realized core always governs; never
+  write as if the bridge itself changed the axis call.
   **Oil's role is symmetric and always a corroborate-or-counter check against the
   CLASSIFICATION, never a cause of it (Task E6, session 2026-08-01):** core CPI/PCE
   drives the direction; oil only ever CONFIRMS it (moving the same way) or COUNTERS

@@ -4498,6 +4498,10 @@ def _build_inflation_axis(macro_data: dict) -> dict:
         v = _macro_vals(macro_data, sid)   # newest-first
         return round((v[0] / v[20] - 1) * 100, 1) if len(v) > 20 else None
 
+    def _bp_delta_20d(sid: str) -> float | None:
+        v = _macro_vals(macro_data, sid)   # newest-first, in percentage points
+        return round((v[0] - v[20]) * 100.0, 1) if len(v) > 20 else None
+
     head_yoy = _yoy("CPIAUCSL")
     head_yoy_prev = _yoy("CPIAUCSL", base=1)
     core_cpi_yoy = _yoy("CPILFESL")
@@ -4549,6 +4553,39 @@ def _build_inflation_axis(macro_data: dict) -> dict:
             f"Classified by realized core."
         )
 
+    # --- O1 (2026-08-06 audit): secondary, NON-BINDING breakeven bridge -------
+    # Core CPI/PCE are monthly (60-65d stale for most of the window between
+    # prints) — this promotes the already-fresh breakeven series (T5YIFR/
+    # T5YIE) to an explicit bridge read so the analyzer has SOMETHING current
+    # between prints. Reuses the SAME bp threshold the leading_vs_lagging_
+    # inflation divergence already uses (no new magic number). realized core
+    # still governs `direction` above — this block never touches it.
+    be_5y_delta = _bp_delta_20d("T5YIE")
+    be_10y_delta = _bp_delta_20d("T10YIE")
+    be_5y5y_delta = _bp_delta_20d("T5YIFR")
+    _be_thr = float(
+        (_load_divergence_config().get("leading_vs_lagging_inflation") or {})
+        .get("breakeven_delta_20d_bp", 15.0)
+    )
+    # Prefer the 5y5y forward breakeven (least contaminated by near-term noise,
+    # the same series the leading_vs_lagging_inflation divergence keys on);
+    # fall back to the 5y spot breakeven when 5y5y lacks history.
+    if be_5y5y_delta is not None:
+        bridge_basis, bridge_delta = "breakeven_5y5y", be_5y5y_delta
+    elif be_5y_delta is not None:
+        bridge_basis, bridge_delta = "breakeven_5y", be_5y_delta
+    else:
+        bridge_basis, bridge_delta = None, None
+
+    if bridge_delta is None:
+        bridge_direction = None
+    elif bridge_delta > _be_thr:
+        bridge_direction = "rising"
+    elif bridge_delta < -_be_thr:
+        bridge_direction = "falling"
+    else:
+        bridge_direction = "flat"
+
     return {
         "direction": direction,
         "reason": reason,
@@ -4561,8 +4598,21 @@ def _build_inflation_axis(macro_data: dict) -> dict:
         "oil_wti_20d_pct": oil_wti_20d,
         "oil_brent_20d_pct": oil_brent_20d,
         "breakeven_5y5y": be_5y5y[0] if be_5y5y else None,
+        "bridge_direction": bridge_direction,
+        "bridge_basis": bridge_basis,
+        "bridge_delta_20d_bp": bridge_delta,
+        "bridge_delta_20d_bp_threshold": _be_thr,
+        "breakeven_5y_delta_20d_bp": be_5y_delta,
+        "breakeven_10y_delta_20d_bp": be_10y_delta,
+        "breakeven_5y5y_delta_20d_bp": be_5y5y_delta,
         "realized_governs": True,
         "note": note,
+        "bridge_note": (
+            "bridge_direction is a SECONDARY, NON-BINDING read off the already-fresh "
+            "breakeven series, meant to bridge the 60-65d gap between monthly core "
+            "CPI/PCE prints — it never overrides `direction`, which realized core "
+            "always governs."
+        ),
     }
 
 

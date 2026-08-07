@@ -214,6 +214,58 @@ def test_inflation_rising_when_headline_hot_and_oil_rising():
     assert "energy" in i["reason"]
 
 
+# --- O1 (2026-08-06 audit): non-binding breakeven bridge ----------------------
+
+def _be_rows(latest_pct, delta_20d_bp, n=25):
+    """Newest-first breakeven rows (in percentage points): [0]=latest,
+    [20]=latest - delta_20d_bp/100 (so the 20d bp delta comes out exactly)."""
+    day20 = latest_pct - delta_20d_bp / 100.0
+    vals = [day20] * n
+    vals[0] = latest_pct
+    return _obs(vals)
+
+
+def test_bridge_direction_falling_while_core_stale_direction_unaffected():
+    """Stale/insufficient core (no CPILFESL/PCEPILFE at all) keeps `direction`
+    indeterminate — the bridge must NEVER override it, even though breakevens
+    themselves are unambiguously falling."""
+    md = {"T5YIFR": _be_rows(2.00, -25.0)}   # -25bp over 20d -> falling
+    i = _build_inflation_axis(md)
+    assert i["direction"] == "indeterminate"
+    assert i["bridge_direction"] == "falling"
+    assert i["bridge_basis"] == "breakeven_5y5y"
+    assert "non-binding" in i["bridge_note"].lower() or "NON-BINDING" in i["bridge_note"]
+
+
+def test_bridge_direction_populated_and_labeled_even_when_core_governs():
+    """Core still governs `direction`; the bridge is populated alongside it,
+    clearly labeled, and does not change the core-driven call."""
+    md = {"PCEPILFE": _monthly_index(3.41, 2.10), "T5YIFR": _be_rows(2.30, 20.0)}
+    i = _build_inflation_axis(md)
+    assert i["direction"] == "falling"   # core-driven, unaffected by rising breakevens
+    assert i["bridge_direction"] == "rising"
+    assert i["bridge_delta_20d_bp"] == 20.0
+
+
+def test_bridge_direction_flat_inside_threshold():
+    md = {"T5YIFR": _be_rows(2.10, 5.0)}   # 5bp < the 15bp default threshold
+    i = _build_inflation_axis(md)
+    assert i["bridge_direction"] == "flat"
+
+
+def test_bridge_direction_none_when_no_breakeven_history():
+    i = _build_inflation_axis({})
+    assert i["bridge_direction"] is None
+    assert i["bridge_basis"] is None
+
+
+def test_bridge_falls_back_to_5y_when_5y5y_unavailable():
+    md = {"T5YIE": _be_rows(2.40, -18.0)}
+    i = _build_inflation_axis(md)
+    assert i["bridge_basis"] == "breakeven_5y"
+    assert i["bridge_direction"] == "falling"
+
+
 # --- policy axis (FOLLOWUPS #16) ----------------------------------------------
 
 _TODAY = "2026-07-03"
