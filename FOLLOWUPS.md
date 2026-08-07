@@ -3,7 +3,10 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-08-01 (07-30/07-31 report audit: pass-1 clamp visibility, SGOV carve-out reconciliation, zero-watch resize awareness, cash-ceiling deployment doctrine, report hygiene, branch `fix/20260801-clamp-visibility-cash-deadlock`).**
+**▶ START HERE — last session 2026-08-06 (08-03/04/05 report audit: market_implied_quadrant votes/confidence, market_shock z-score, DXY fallback, deployable-envelope shortfalls, day-P/L identity trigger, override falsifier adjudication, inflation/oil/labor signal freshness, hybrid band, MU ingestion guard, branch `fix/20260806-signal-integrity-audit`).**
+13-task PR (B1+B2, B3, B4, B6, B7, M1+M2, O1, O2, O3, O4, R1) fixing dead/miscalibrated deterministic signals the LLM was reasoning against every session — a strongly-wired 2-vote basket pair swinging `market_implied_quadrant` confidence to `high` while 6 other votes were structurally null (B1+B2); a persistent news theme alone pinning `market_shock` at level 3 for weeks on a benign tape, lifting the cash ceiling to 25% (B3); the DXY dollar-proxy fallback dark at exactly 5d stale AND whenever DTWEXBGS returns zero observations at all (B4); every sleeve in a multi-sleeve de-cash program flagged `non_compliant_flagged` even when the model deployed its full aggregate tranche pro-rata (B6); a frozen-quote day-P/L symptom slipping through on small positions because the old trigger required a large delta too (B7); a filed override's falsifier never adjudicated on a later run, and an identical sub-min-notional setup flip-flopping between hold and floor-sell with no override either day (M1+M2); a 60-65d inflation-data blind spot with no bridge (O1); an 8-9d-stale FRED oil series on the exact channel that flips the inflation axis (O2); an ADP miss caught only via a forex-news parse (O3); a small strategic target (VXUS) permanently inside the fixed absolute band, never funded (O4); and MU printing ~10x its real price every session, merely re-quarantined never corrected, plus a closed position's historical P&L narrated as an ongoing drag (R1). Two items deferred by explicit decision: B5 (growth-axis recency slope) and R2 (Risk Score sensitivity, investigation stub only) — see entries **#54**/**#55**; R1's strategy half (what to actually do about the MU position) is Jorge's call, tracked separately as entry **#56**. Suite 901→922 green, ruff clean, every new/modified test confirmed failing on pre-fix source via `git stash` isolation. **Auto-merge: NO, human review required** — see entry **#53** below for the full per-task design.
+
+**▶ Prior session 2026-08-01 (07-30/07-31 report audit: pass-1 clamp visibility, SGOV carve-out reconciliation, zero-watch resize awareness, cash-ceiling deployment doctrine, report hygiene, branch `fix/20260801-clamp-visibility-cash-deadlock`).**
 Five-task PR: A (pass-1 Tier-1 clamps now survive pass 2 instead of silently reverting to "passed" — the KMLM 182→179 clamp vanished from the combined summary and the report addendum never fired), B (decision D-B1: `reconcile()` no longer flags the sanctioned literal-cash→SGOV carve-out sweep as the model having "traded AWAY" from reference), C (`_build_day_pl_zero_watch` gains share-count awareness so a resize — a sale/buy — no longer misflags as a P/L anomaly, while the genuine frozen-quote signal is kept), D (decision D-D1, prompt-only: a cash sleeve stuck above its operative ceiling makes in-band underweight sleeves discretionarily buy-eligible, breaking the ~30pp stranded-cash deadlock), E (7-item prompt-hygiene batch: floor-shares arithmetic, post-trade cash formula, prior-session flex-nomination adjudication, trade-direction vocabulary, symmetric catalyst-date discipline, no visible deliberation chatter, symmetric oil-overlay wording). **PR #33 review round (same day, same branch):** M1 fixed a Task B regression (the carve-out exclusion applied regardless of gap direction, zeroing out a genuine underweight-SGOV sweep's credit and triggering a redundant synthesized buy) and M2 fixed a Task D trigger that could never fire (`cash_sleeve_target_pct` is ceiling-clamped by construction — reworded to key on `reference_weights.binding`'s `cash_above_band` flag). Suite 842→861 green, ruff clean, every new/modified test confirmed failing on pre-fix source via `git stash` isolation. **Auto-merge: NO, human review required** — see entry **#50** below for the full design, both original decision gates (D-B1, D-D1), and the review-round addendum.
 
 **▶ Prior session 2026-07-28 (axis confirmation + F1 fix + report hygiene + KMLM diagnostics, branch `fix/20260728-axis-confirm-f1-hygiene`).**
@@ -311,6 +314,55 @@ wiped them.
 ---
 
 ## Open
+
+### 54. Growth-axis head-to-tail slope mislabels a rolled-over trajectory as "rising" (B5, deferred by decision 2026-08-06)
+From the 2026-08-06 signal-integrity audit (entry **#53**) — deliberately NOT
+fixed this cycle (Jorge's decision: leave `_build_growth_axis`'s direction
+logic untouched). The current head-to-tail slope method (first vs last
+vintage in the rolling window) reads a trajectory that has already ROLLED
+OVER and is now decelerating as still "rising," because the endpoints alone
+don't see the intervening peak. **Live evidence:** 08-03/04 Q2 tail
+`1.36→…→1.74→1.68→1.58→1.54` (peaked at 1.74, now falling for 3 straight
+vintages) read "rising"; 08-05 Q3 tail `4.95→6.18→5.86` (peaked at 6.18, now
+falling) also read "rising." **Fix candidate (not implemented):** a
+recency-aware slope — compare the terminal 2-3 vintages' own trend (not just
+first-vs-last) and require AGREEMENT with the head-to-tail sign before
+confirming "rising"; when they disagree (head-to-tail says rising but the
+terminal segment is falling), classify as `flat`/`indeterminate` with an
+explicit rollover flag, mirroring how `direction_change_diagnostics`
+already flags a `window_rolloff` attribution for the D-2 axis-confirmation
+gate. Revisit once a session is scoped to touch axis classification
+directly — do not fold into an unrelated cycle given the D-2 confirmation
+hysteresis's sensitivity to this exact field.
+
+### 55. Risk Score sensitivity investigation (R2, 2026-08-06 audit)
+The 08-03/04/05 reports held Risk Score at a flat 4/10 across materially
+different underlying conditions: growth confidence moved medium→high,
+the `leading_vs_lagging_growth`/`market_vs_macro_quadrant` divergence read
+high→medium, and 08-05 carried a fresh ADP forward-softening signal (see
+**O3**, entry #53) — none of which moved the Risk Score at all. **Not a
+fix yet — an investigation stub.** Check whether the Risk Score computation
+(wherever it lives — appears to be model-computed, not
+`collector._conviction_proxy`, since the conviction proxy is a SEPARATE
+deterministic figure) incorporates axis confidence, divergence strength, or
+forward labor risk at all, or whether it's effectively anchored on lagging
+inputs that rarely move session-to-session. If it's model-computed
+(prompt-driven, not deterministic), the investigation is really "does the
+prompt give the model enough moving parts to justify a Risk Score change,
+and does it ever actually change one in practice" — pull a longer history
+of `risk_score_reading` across recent reports before concluding anything.
+
+### 56. MU orphan position — strategy decision (R1 strategy half, 2026-08-06 audit)
+The 2026-08-06 signal-integrity audit's R1 finding split into two halves: the
+CODE half (the 10× ingestion-correction guard + `pnl_decomposition`
+realized/unrealized labeling) shipped in entry **#53**. This is the
+remaining STRATEGY half, Jorge's call, not something to implement
+speculatively: what to actually DO about MU as a name — whether the
+off-roster position (or its wind-down remnant) should be closed out
+entirely, left as-is under flex-engine management, or something else. The
+code fix makes MU's data trustworthy (a corrected price feed, a clearly
+labeled realized-vs-unrealized P&L) so this decision can be made on real
+numbers next time it's revisited — it does not make the decision itself.
 
 ### 51. Tape-vs-axes divergence grading ledger — promote-or-demote `market_implied_quadrant` (MEDIUM — data-gated, ~2 months)
 From the 2026-08-01 report audit (entry **#50**). On every session where
@@ -1421,6 +1473,150 @@ fills (or explains a deviation).
 ---
 
 ## Done
+### 53. 2026-08-06 session: Signal-integrity audit — market_implied_quadrant votes/confidence, market_shock z-score, DXY fallback, deployable-envelope shortfalls, day-P/L identity trigger, override falsifier adjudication, inflation/oil/labor signal freshness, hybrid band, MU ingestion guard — Done, branch `fix/20260806-signal-integrity-audit` (auto-merge: NO, human review required)
+Audit of the 08-03/08-04/08-05 daily reports against master (922 green
+baseline after this PR, up from 901 pre-PR — collector/handler.py wc -l
+crossed 7,600). 13 code tasks (B1+B2, B3, B4, B6, B7, M1+M2, O1, O2, O3, O4,
+R1) — every one shipped with a test that FAILED against pre-fix master
+(confirmed via `git stash` isolation of the changed source files, test files
+kept in place) and passes after. Two items deferred by explicit decision
+(B5, R2 — see entries **#54**/**#55**); R1's strategy half (the MU position
+itself) is Jorge's call, not code — see entry **#56**.
+
+- **B1+B2 — `market_implied_quadrant`'s 6 dead votes + count-based
+  confidence.** `_build_bond_signals` never actually SET `credit.hy_oas.
+  trend_4w` (both `_build_leading_growth` and `_build_market_implied_
+  quadrant` read it, key-name mismatch) — HY-OAS voted null in both every
+  session. `_build_market_implied_quadrant` also never received a
+  `close_cache` for copper_gold_ratio/XLY_XLP (read perf-series `closes`,
+  which is CORE_ROSTER-only and never has CPER/XLY) — structurally always
+  null. Fixed both at the source: `bond_signals.hy_oas_trend_bp` config
+  threshold; new shared `_ratio_20d_signal` helper feeds both
+  `_build_leading_growth` and `_build_market_implied_quadrant` identically
+  (reuses the leading-growth close-cache fetch, zero extra FMP calls).
+  Confidence now gates on POPULATED VOTE COUNT (0-8) + axis-sign agreement
+  (`divergence-config.json → market_implied_quadrant.confidence_min_
+  populated`) instead of score MAGNITUDE — under the old gate, 2 correctly-
+  wired votes (the basket-momentum pair) alone could swing confidence to
+  `high` (observed 08-03/04/05; cited as override-eligible evidence on
+  08-04).
+- **B3 — `market_shock` news channel: z-score, not absolute count.**
+  `total_hits >= 25/15` alone drove `shock_level` to 3/2 with no price
+  corroboration — a persistent news theme (Iran/Hormuz, 130-147 hits/day)
+  pinned `shock_level` at 3 for weeks with the price channel benign (SPY up,
+  VIX down), lifting the cash-sleeve ceiling to `shock3_ceiling` (25%) every
+  session. Fixed: PRICE and NEWS scored as independent channels
+  (`price_level`, `news_level`, combined via `max()`); news scores a
+  z-score of `news_hits_total` vs a trailing baseline persisted to
+  `market-shock/news-hits-history.json`. Symmetric benign-tape guard: when
+  `price_level <= 1`, news-alone caps at 2, or at 1 once the same dominant
+  category has persisted >=10 sessions. Per Jorge's decision, `tranche_pp_max`
+  is untouched — only the ceiling itself now falls on a benign tape.
+- **B4 — DXY dollar-proxy fallback boundary.** New pure helper
+  `_should_use_dollar_proxy` fixes `dxy_stale > 5` (dark at exactly 5d stale,
+  AND dark whenever DTWEXBGS returns zero usable observations at all, since
+  `dxy_stale` is then `None`) to `dxy_stale is None or dxy_stale >= 5`. The
+  DTWEXBGS/DGS2/DFF fetch depth was audited and found already sufficient
+  (90 obs >= the ~65 needed) — renamed to a coupled constant, not changed.
+- **B6 — `reconcile`'s re-risk shortfall flags gated on a deployable
+  envelope.** Per-sleeve `required_move_today` summed across a multi-sleeve
+  de-cash program routinely exceeded what the model could sanely deploy in
+  one session, so every sleeve flagged `non_compliant_flagged` even when the
+  model deployed its full aggregate tranche pro-rata. Fixed with an
+  aggregate re-risk envelope capped at the SAME `tranche_pp_max` but at the
+  PORTFOLIO level, allocated pro-rata; a sleeve moving >= its share is now
+  `rationed_by_envelope` (new status, excluded from the "file an override"
+  addendum); a genuine silent hold (net_move ~0) still flags — the
+  2026-06-30 pathology guard is unweakened (verified by test).
+- **B7 — `day_pl_zero_watch` identity trigger, independent of delta size.**
+  08-05 flagged COWZ (large total-P/L delta) but not VDE (identical frozen-
+  quote symptom, small delta) because the old trigger required BOTH
+  `day_pl==0` AND a delta past threshold. New `identity_trigger`
+  (`day_pl==0 AND lastday_price==current_price AND qty>0`) fires
+  independent of delta magnitude/availability; >1 qualifying position in a
+  run collapses to one `multi_symbol_note` instead of N per-ticker items.
+- **M1 — `prior_overrides_pending`: falsifier-state surfacing.**
+  OverrideHistory already persisted `falsifier`/`falsifier_date` verbatim
+  (audited, no fix needed) — nothing ever read them back on a later run.
+  New `collector._build_prior_overrides_pending` + pure
+  `shared/overrides.py::evaluate_falsifier` (regex parse of the `<axis>
+  <direction> <N>+ <unit>` phrasing this system's falsifiers use, e.g.
+  "inflation falling 5+ runs AND growth rising 3+ vintages," evaluated
+  against the D-2 axis-confirmation `raw_direction`/`raw_streak` state;
+  returns `None` — never fabricates — when unparseable) surface each
+  still-live filed override's falsifier + a deterministic `falsifier_met`.
+  Motivating incident: 08-04 filed a de-risk TLT hold with this exact
+  falsifier; 08-05 sold TLT to the floor without ever adjudicating it (the
+  falsifier hadn't fired — inflation's `raw_streak` was 4, not 5+).
+- **M2 — deterministic sub-min-notional damper-sell rule.** The identical
+  sub-`min_notional` required move on TLT produced "hold" on 08-04 and
+  "sell to the floor" on 08-05 with no override sheltering either day.
+  `reconcile()` now tags `sub_min_notional_action: "trim_to_floor"`
+  whenever a damper's required re-risk sell is sub-min-notional in dollar
+  terms AND unsheltered — a fixed rule (chose always-trim-to-floor, per the
+  existing "size-floored != impossible" doctrine), never per-session
+  discretion.
+- **O1 — non-binding breakeven bridge.** `_build_inflation_axis` emits
+  `bridge_direction`/`bridge_basis`/`bridge_delta_20d_bp` off the already-
+  fresh T5YIFR/T5YIE (reusing `divergence-config.json`'s existing bp
+  threshold) — a secondary read for the 60-65d gap between monthly core
+  CPI/PCE prints. Purely additive; `direction` stays governed exclusively
+  by realized core.
+- **O2 — fresher USO oil-proxy trend.** FRED's DCOILWTICO/DCOILBRENTEU run
+  8-9d stale every session on the exact channel that can flip the axis to
+  "rising." `_build_inflation_axis` now accepts an optional USO close-cache
+  and sources the 20-session oil trend from it when available, falling
+  back to FRED otherwise. New fields `oil_trend_source`/`oil_proxy_20d_pct`/
+  `oil_proxy_as_of`; the overlay rule (price trend, never news-shock level)
+  is unchanged.
+- **O3 — deterministic ADP leading-labor sub-signal.** New
+  `collector._build_labor_leading` (FRED `NPPTTL`) surfaces ADP private
+  payrolls as `labor_signals.leading` (`delta_1m_k`, `delta_3m_avg_k`,
+  `forward_softening_flag`) — available before BLS PAYEMS, never
+  overwrites the binding `payrolls`/`scorecard` fields (verified byte-
+  identical with/without ADP data). Motivating incident: 08-05's ADP miss
+  (+44K vs +70K consensus) was caught only via a forex-news-feed parse.
+  Scope note: the "else FMP economic-calendar" fallback (for when FRED
+  itself lacks NPPTTL) is NOT implemented — FRED-only with a clean
+  `available:false` degradation was judged sufficient this cycle.
+- **O4 — hybrid band for small-reference strategic sleeves.** `reconcile()`
+  gates out-of-band status on `min(gap_band_pp, relative_band_frac *
+  reference_pct)` whenever `reference_pct > 0` (new config
+  `override_protocol.relative_band_frac`, default 0.5). Before this,
+  `intl_broad`/VXUS (reference ~2.0%) sat at 0.14% every session inside the
+  fixed 5pp band built for the much-larger core amplifiers — invisible,
+  unenforceable, never funded. LEGACY_EXITS (zero reference) and big
+  amplifiers are unaffected by construction. Audited the "`intl_broad`
+  gated to 0 while gate CLOSED" doctrine for conflict — none; that fires
+  only on a closed gate, the observed VXUS symptom needs an OPEN gate.
+- **R1 (code half) — MU 10x ingestion guard + P&L realized/unrealized
+  labeling.** `_quarantine_flex_price` gains a Gate 0
+  (`_correct_10x_ingestion_error`) before the quarantine backstop: a price
+  that's a clean ~10x (or 1/10th) multiple of its OWN 52-week-range
+  midpoint, whose corrected value lands back inside a sane band, is
+  corrected AT THE SOURCE (`prices[sym]["c"]` mutated in place) instead of
+  re-quarantined every session forever (observed: MU printing ~10x its real
+  price every session, never corrected). `_build_pnl_decomposition` now
+  labels every contributor `position_status: "open"|"closed"` +
+  per-bucket `has_open_position` — before this, a fully-closed position's
+  historical realized loss (-$803 off-roster) could be narrated as an
+  ONGOING drag in the same breath as that bucket's weight correctly
+  reading 0.00%. **Strategy half (what to actually DO about MU) is
+  deliberately NOT decided here — see entry #56.**
+- **Deferred by explicit decision (not implemented, see #54/#55):** B5
+  (growth-axis recency slope — Jorge's decision: leave `_build_growth_axis`
+  untouched this cycle) and R2 (Risk Score sensitivity — investigation stub
+  only, no fix attempted).
+- **Tests:** 8 new test files (`test_bond_signals.py`,
+  `test_market_shock.py`, `test_dollar_proxy_fallback.py`,
+  `test_prior_overrides_pending.py`, `test_labor_leading.py`) + extensions
+  to `test_market_implied_quadrant.py`, `test_reference_execution.py`,
+  `test_day_pl_zero_watch.py`, `test_axis_signals.py`, `test_overrides.py`,
+  `test_execution_config.py`, `test_price_quarantine.py`,
+  `test_pnl_decomposition.py`. Every new/modified assertion confirmed
+  FAILING on pre-fix source via `git stash` isolation of the changed source
+  files (test files kept in place). Suite 870→922 green, ruff clean.
+
 ### 50. 2026-08-01 session: Pass-1 clamp visibility + SGOV carve-out reconciliation + zero-watch resize awareness + cash-ceiling deployment doctrine + report hygiene — Done, branch `fix/20260801-clamp-visibility-cash-deadlock` (auto-merge: NO, human review required)
 Audit of the 07-30 and 07-31 daily reports against master (842 green baseline).
 Five defects were empirically reproduced against the installed modules
