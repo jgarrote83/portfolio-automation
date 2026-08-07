@@ -863,9 +863,9 @@ can override the slow framework when an event truly hits the tape.
 
 **Discipline guards (do not violate these even at level 3):**
 
-- Never override on `shock_level` alone with no supporting news category hits. If `news_hits_total` is 0 and the only trigger is a price-only z-score, treat it as level max 1 in your narrative.
+- Never override on `shock_level` alone with no supporting news category hits. If `news_hits_total` is 0 and the only trigger is a price-only z-score, treat it as level max 1 in your narrative. **This one is NARRATIVE-only** — no code enforces it, so the `shock_level` you receive may legitimately read higher than the level you narrate; say so explicitly when you apply it.
 - Single-name idiosyncratic news (one ticker's earnings miss) does NOT justify a portfolio-wide override. Cite at least two news examples from different sources before lifting tilt limits.
-- **Symmetric benign-tape guard (2026-08-06 audit B3):** the news channel alone can never carry `shock_level` to 3 while the tape is calm. Whenever `price_level <= 1` (no elevated/acute price signal — check SPY/VIX/DXY yourself before trusting a high `shock_level`), the news channel is capped at 2, or at 1 once `news_persistent_theme_streak` has run for 10+ sessions (a long-running theme like a standing Hormuz/Iran headline cluster, not a fresh event). A `shock_level` of 3 you did not expect from the price fields is a signal to re-check `price_level` vs `news_level` before acting on it — level 3 requires genuine price-channel corroboration, not news volume alone.
+- **Symmetric benign-tape guard (2026-08-06 audit B3):** the news channel alone can never carry `shock_level` to 3 while the tape is calm. Whenever `price_level <= 1` (no elevated/acute price signal — check SPY/VIX/DXY yourself before trusting a high `shock_level`), the news channel is capped at 2, or at 1 once `news_persistent_theme_streak` has run for 10+ sessions (a long-running theme like a standing Hormuz/Iran headline cluster, not a fresh event). A `shock_level` of 3 you did not expect from the price fields is a signal to re-check `price_level` vs `news_level` before acting on it — level 3 requires genuine price-channel corroboration, not news volume alone. **This one is DETERMINISTIC — `_build_market_shock` already applied the cap before you saw it**, so the `shock_level` in your snapshot ALREADY reflects it; describe it, never re-apply it on top (double-capping a benign tape to 0 is as wrong as ignoring the guard).
 - Echo the `shock_level`, the specific triggers, and the news examples you relied on in your rationale so the human reviewer can audit the override.
 - If you invoke an override, set `regime_override` in the trades JSON (see Output format). If you do NOT override, set it to `"none"`.
 
@@ -1775,15 +1775,25 @@ Then the numbered sections, in this order:
    `prior_overrides_pending[]` lists every still-live filed override (accepted or
    downsized, not yet graded by Phase 5) with its falsifier verbatim, a
    deterministic `falsifier_met` (true/false when the falsifier parsed against
-   `current_axis_state`, `null` when it didn't — you adjudicate an unparseable
-   falsifier yourself from the same `current_axis_state` numbers), and
+   `current_axis_state`, `null` when it didn't) and
    `filed_date`/`sleeve`/`direction`. For EACH entry you MUST state one of:
    **held** (falsifier not met — cite the datum), **released** (falsifier met —
    cite the datum, and if you are now trading the sleeve in the opposite
    direction, say so explicitly), or **expired** (falsifier_date has passed with
    no resolution). You may NOT silently drop a pending entry from the narrative,
    and you may NOT reverse a prior override's direction without first stating
-   whether its falsifier fired. *(08-04 filed a de-risk TLT hold with a dated
+   whether its falsifier fired.
+   **`falsifier_met: null` DEFAULTS TO `held` (2026-08-07).** A `null` means the
+   falsifier is free text that did not parse to a deterministic verdict — it is
+   an ABSENCE of evidence that the falsifier fired, never evidence that it did.
+   You may **not** treat `null` as `released`. Quote the falsifier verbatim, give
+   your own read against the same `current_axis_state` numbers, and **default to
+   holding the prior posture** — if you believe the override should end, that is
+   a NEW override you must file this session on its own evidence, not a silent
+   release of the old one. This mirrors the same missing-data doctrine the
+   divergence detectors already use (a stale/absent input is `indeterminate`,
+   never a false `active`) and the de-risk asymmetry (cheap to keep defense on,
+   dear to take it off). *(08-04 filed a de-risk TLT hold with a dated
    falsifier — inflation falling 5+ runs AND growth rising 3+ vintages; 08-05
    sold TLT to the floor with inflation's raw_streak at 4, not 5+, and never
    adjudicated its own prior falsifier at all — same sleeve, opposite action,

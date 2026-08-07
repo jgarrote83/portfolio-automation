@@ -3,7 +3,10 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-08-06 (08-03/04/05 report audit: market_implied_quadrant votes/confidence, market_shock z-score, DXY fallback, deployable-envelope shortfalls, day-P/L identity trigger, override falsifier adjudication, inflation/oil/labor signal freshness, hybrid band, MU ingestion guard, branch `fix/20260806-signal-integrity-audit`).**
+**▶ START HERE — last session 2026-08-07 (M1 prompt hardening, branch `fix/20260807-m1-prompt-completion`).**
+Prompt-only follow-up to #34. **Note for whoever picks this up:** the brief that started that session claimed PR #34 never touched `project-instructions.md` — it did (commit `22c9a16`, 88 insertions), shipping the full M1/M2/B3/O1/O2 prompt halves. Don't re-add them. This PR adds only the residual gap: `falsifier_met: null` now explicitly DEFAULTS TO `held` (an unparseable falsifier can't license a silent override release), the two `market_shock` discipline guards are labeled deterministic-vs-narrative (the symmetric one is already applied by the collector — describe, never re-apply), and 3 sentinel tests pin the M1 adjudication doctrine against silent removal. Suite 922→925 green, ruff clean. **Auto-merge: NO, human review required** — see entry **#57**.
+
+**▶ Prior session 2026-08-06 (08-03/04/05 report audit: market_implied_quadrant votes/confidence, market_shock z-score, DXY fallback, deployable-envelope shortfalls, day-P/L identity trigger, override falsifier adjudication, inflation/oil/labor signal freshness, hybrid band, MU ingestion guard, branch `fix/20260806-signal-integrity-audit`).**
 13-task PR (B1+B2, B3, B4, B6, B7, M1+M2, O1, O2, O3, O4, R1) fixing dead/miscalibrated deterministic signals the LLM was reasoning against every session — a strongly-wired 2-vote basket pair swinging `market_implied_quadrant` confidence to `high` while 6 other votes were structurally null (B1+B2); a persistent news theme alone pinning `market_shock` at level 3 for weeks on a benign tape, lifting the cash ceiling to 25% (B3); the DXY dollar-proxy fallback dark at exactly 5d stale AND whenever DTWEXBGS returns zero observations at all (B4); every sleeve in a multi-sleeve de-cash program flagged `non_compliant_flagged` even when the model deployed its full aggregate tranche pro-rata (B6); a frozen-quote day-P/L symptom slipping through on small positions because the old trigger required a large delta too (B7); a filed override's falsifier never adjudicated on a later run, and an identical sub-min-notional setup flip-flopping between hold and floor-sell with no override either day (M1+M2); a 60-65d inflation-data blind spot with no bridge (O1); an 8-9d-stale FRED oil series on the exact channel that flips the inflation axis (O2); an ADP miss caught only via a forex-news parse (O3); a small strategic target (VXUS) permanently inside the fixed absolute band, never funded (O4); and MU printing ~10x its real price every session, merely re-quarantined never corrected, plus a closed position's historical P&L narrated as an ongoing drag (R1). Two items deferred by explicit decision: B5 (growth-axis recency slope) and R2 (Risk Score sensitivity, investigation stub only) — see entries **#54**/**#55**; R1's strategy half (what to actually do about the MU position) is Jorge's call, tracked separately as entry **#56**. Suite 901→922 green, ruff clean, every new/modified test confirmed failing on pre-fix source via `git stash` isolation. **Auto-merge: NO, human review required** — see entry **#53** below for the full per-task design.
 
 **▶ Prior session 2026-08-01 (07-30/07-31 report audit: pass-1 clamp visibility, SGOV carve-out reconciliation, zero-watch resize awareness, cash-ceiling deployment doctrine, report hygiene, branch `fix/20260801-clamp-visibility-cash-deadlock`).**
@@ -1616,6 +1619,61 @@ itself) is Jorge's call, not code — see entry **#56**.
   `test_pnl_decomposition.py`. Every new/modified assertion confirmed
   FAILING on pre-fix source via `git stash` isolation of the changed source
   files (test files kept in place). Suite 870→922 green, ruff clean.
+
+### 57. 2026-08-07 session: M1 prompt hardening — `falsifier_met: null` defaults to held + shock-guard kind labeling + M1 sentinel coverage — Done, branch `fix/20260807-m1-prompt-completion` (auto-merge: NO, human review required)
+Prompt-only follow-up to **#53**/PR #34. **Correction to the premise this session
+started from:** the session brief asserted PR #34 "did not touch the analyzer
+prompt at all" and that M1/B3/O1/O2 were surfaced in data but undescribed. That is
+**false** — #34 modified `project-instructions.md` in commit `22c9a16` (88
+insertions / 16 deletions) and shipped ALL of it: the M1 `prior_overrides_pending`
+adjudication block (held/released/expired + the TLT incident cite), the M2
+`sub_min_notional_action` echo, the B3 `price_level`/`news_level` + symmetric
+benign-tape guard, and the O1/O2 `bridge_direction`/`oil_trend_source` bullets.
+Verified by `git diff 19cf4aa..aa1b092 -- src/config/project-instructions.md` and
+by `test_prior_override_adjudication_doctrine_present` PASSING against pre-edit
+master. No history was rewritten to match the incorrect premise.
+
+Two further items in that brief were declined as written, both because they would
+have contradicted shipped code:
+- **M2's recommended behavior (`hold-with-record`)** contradicts `reconcile()`,
+  which emits `sub_min_notional_action: "trim_to_floor"`. The brief's own guard
+  ("if the code already encodes it, echo the code rule") governs — and #34
+  already echoes it. Not changed.
+- **Field names in the brief were wrong**: `news_z_score` (actual:
+  `news_hits_zscore`), `uso_proxy`/`fred` (actual: `"USO_proxy"`/
+  `"fred_futures"`). The shipped prompt already carries the correct names;
+  pasting the brief's would have broken the references.
+
+**What this PR actually adds (the genuine residual gap):**
+- **`falsifier_met: null` now DEFAULTS TO `held`.** The shipped M1 text said only
+  "you adjudicate an unparseable falsifier yourself" — open-ended, with no safe
+  default, which left the `null` path as an open invitation to silently release
+  the very override the block exists to protect. Now explicit: `null` is an
+  ABSENCE of evidence the falsifier fired, never evidence that it did; quote it
+  verbatim, give your read, default to holding, and treat ending the override as
+  a NEW override filed this session on its own evidence. Mirrors the existing
+  missing-data doctrine (stale input ⇒ `indeterminate`, never a false `active`)
+  and the de-risk asymmetry.
+- **The two `market_shock` discipline guards are now labeled by KIND.** The
+  symmetric benign-tape guard describes a cap `_build_market_shock` has ALREADY
+  applied before the analyzer sees `shock_level` (describe it, never re-apply —
+  double-capping a benign tape to 0 is as wrong as ignoring it); the older
+  price-only guard is NARRATIVE-only with no code behind it, so the received
+  `shock_level` may legitimately exceed the narrated level. Unlabeled, the two
+  read as one homogeneous list and invite exactly that double-application.
+- **M1 sentinel coverage** (`tests/test_prompt_hygiene_sentinels.py` +3 tests):
+  pins `prior_overrides_pending`/`falsifier_met`/held/released/expired, the
+  null-defaults-to-held clause, and the guard-kind labels. The M1 collector block
+  is INERT without its prompt doctrine, and nothing else in the suite would have
+  noticed a silent prompt edit dropping it.
+- **Empirical note (prompt content has no runtime fail-first test):** 2 of the 3
+  new sentinel tests fail against pre-edit master (genuinely new content);
+  `test_prior_override_adjudication_doctrine_present` PASSES pre-edit **by
+  design** — it is a regression guard on doctrine #34 already shipped, and its
+  passing is the evidence for the premise correction above, not a false-positive
+  test. Suite 922→925 green, ruff clean.
+- **Still open from #53:** #54 (B5 growth-axis slope), #55 (R2 Risk Score
+  sensitivity), #56 (R1 MU strategy decision) — all unchanged by this PR.
 
 ### 50. 2026-08-01 session: Pass-1 clamp visibility + SGOV carve-out reconciliation + zero-watch resize awareness + cash-ceiling deployment doctrine + report hygiene — Done, branch `fix/20260801-clamp-visibility-cash-deadlock` (auto-merge: NO, human review required)
 Audit of the 07-30 and 07-31 daily reports against master (842 green baseline).
