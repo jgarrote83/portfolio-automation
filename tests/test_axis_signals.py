@@ -266,6 +266,49 @@ def test_bridge_falls_back_to_5y_when_5y5y_unavailable():
     assert i["bridge_direction"] == "falling"
 
 
+# --- O2 (2026-08-06 audit): fresher oil-proxy trend source --------------------
+
+def _oil_proxy_cache(latest, pct_20d, n=25):
+    """{date: close} cache (e.g. USO) with an exact 20-trading-day % change."""
+    day20 = latest / (1 + pct_20d / 100.0)
+    cache = {f"2026-06-{(1 + i):02d}": day20 for i in range(n)}
+    cache["2026-07-01"] = latest   # newest date, sorts first
+    return cache
+
+
+def test_fresh_oil_proxy_used_when_available_headline_hot_rising():
+    """A fresh USO-proxy trend (rising) drives the headline_hot+oil_rising
+    energy-push classification even when FRED's own series would show nothing
+    (empty here) — the overlay RULE (price trend, not news) is unchanged."""
+    head = [100.0, 99.5] + [99.0] * 10 + [100.0 / 1.043, 100.0 / 1.041] + [99.0] * 4
+    md = {"CPIAUCSL": _obs(head), "PCEPILFE": _monthly_index(3.41, 3.52)}
+    cache = _oil_proxy_cache(100.0, 20.0)   # +20% over 20d -> rising
+    i = _build_inflation_axis(md, cache)
+    assert i["oil_trend_source"] == "USO_proxy"
+    assert i["oil_proxy_20d_pct"] == 20.0
+    assert i["direction"] == "rising"
+    assert "energy" in i["reason"]
+
+
+def test_falls_back_to_fred_when_proxy_cache_thin():
+    """Fewer than 21 days of proxy history -> fall back to FRED (unchanged
+    behavior), not a crash or a false read."""
+    md = {"PCEPILFE": _monthly_index(3.41, 3.52),
+          "DCOILWTICO": _obs([120.0] + [99.0] * 19 + [100.0] + [99.0] * 5)}
+    thin_cache = {"2026-07-01": 100.0, "2026-06-30": 99.0}   # only 2 days
+    i = _build_inflation_axis(md, thin_cache)
+    assert i["oil_trend_source"] == "fred_futures"
+    assert i["oil_proxy_20d_pct"] is None
+    assert i["oil_wti_20d_pct"] is not None
+
+
+def test_no_proxy_cache_defaults_to_fred():
+    md = {"DCOILWTICO": _obs([78.94] + [99.0] * 19 + [100.20] + [99.0] * 5)}
+    i = _build_inflation_axis(md)
+    assert i["oil_trend_source"] == "fred_futures"
+    assert i["oil_proxy_as_of"] is None
+
+
 # --- policy axis (FOLLOWUPS #16) ----------------------------------------------
 
 _TODAY = "2026-07-03"

@@ -1950,7 +1950,17 @@ def run() -> None:
     # were previously left to the LLM on raw macro.data — the discretion point where
     # it rationalized its prior label. Now pre-computed like bond/labor signals.
     growth_axis_raw = _build_growth_axis(macro_data)
-    inflation_axis_raw = _build_inflation_axis(macro_data)
+    # O2 (2026-08-06 audit): FRED's DCOILWTICO/DCOILBRENTEU run 8-9d stale every
+    # session — on the exact channel that can flip the inflation axis to
+    # "rising". USO (a liquid, daily-traded oil ETF) is fetched as a fresher
+    # trend proxy; _build_inflation_axis falls back to FRED when it's
+    # unavailable/thin. One extra FMP call, well within the 250/day budget.
+    try:
+        _oil_proxy_cache = _close_by_date(fmp, "USO")
+    except Exception:  # noqa: BLE001
+        logger.debug("Inflation axis: USO oil-proxy fetch failed (non-fatal)")
+        _oil_proxy_cache = {}
+    inflation_axis_raw = _build_inflation_axis(macro_data, _oil_proxy_cache)
 
     # Session 2026-07-28 (Task A, decision D-2): N=2 confirmation on the CONSUMED
     # `direction` field — a label change (any value, including flat) only reaches
@@ -4471,7 +4481,23 @@ def _build_growth_axis(macro_data: dict) -> dict:
     }
 
 
-def _build_inflation_axis(macro_data: dict) -> dict:
+def _fresh_oil_20d_pct(close_cache: dict[str, float] | None) -> tuple[float | None, str | None]:
+    """20-trading-day % change from a ``{date: close}`` cache (e.g. USO) — the
+    O2 (2026-08-06 audit) fresher-oil-proxy source for the inflation-axis energy
+    overlay. Returns ``(pct_change, as_of_date)``; ``(None, None)`` when the
+    cache is empty or thinner than 21 trading days."""
+    if not close_cache:
+        return None, None
+    dates = sorted(close_cache, reverse=True)
+    if len(dates) <= 20:
+        return None, None
+    latest, past = close_cache[dates[0]], close_cache[dates[20]]
+    if not past:
+        return None, dates[0]
+    return round((latest / past - 1.0) * 100.0, 1), dates[0]
+
+
+def _build_inflation_axis(macro_data: dict, oil_proxy_close_cache: dict[str, float] | None = None) -> dict:
     """Deterministic inflation-direction read — the quadrant *inflation axis*.
 
     Realized core (PCE-first, then CPI) governs via the 3-month-annualized-vs-YoY
@@ -4481,10 +4507,18 @@ def _build_inflation_axis(macro_data: dict) -> dict:
     oil spike), the headline is about to roll over -> do NOT force 'rising'; classify
     by core and flag the pending disinflation. Breakevens are secondary (expectations).
 
-    NOTE: the energy overlay keys off the *actual oil price trend* (DCOILWTICO /
-    DCOILBRENTEU 20-session change), NOT the news-keyword ``market_shock`` level — the
-    shock detector is a headline-count signal prone to false positives, and binding
-    realized-inflation direction to it would hard-wire stagflation off a news flurry.
+    NOTE: the energy overlay keys off the *actual oil price trend*, NOT the
+    news-keyword ``market_shock`` level — the shock detector is a headline-count
+    signal prone to false positives, and binding realized-inflation direction to
+    it would hard-wire stagflation off a news flurry.
+
+    O2 (2026-08-06 audit): FRED's DCOILWTICO/DCOILBRENTEU run 8-9d stale every
+    session — on the exact channel that can flip this axis to "rising".
+    ``oil_proxy_close_cache`` (optional, a liquid daily-traded proxy like USO,
+    fetched by the caller via ``_close_by_date``) sources the 20-session trend
+    when available (>20 trading days of history); FRED is the fallback when it
+    isn't. The overlay RULE is unchanged either way — it keys on the price
+    trend, never the news-shock level.
     """
     def _yoy(sid: str, base: int = 0) -> float | None:
         v = _macro_vals(macro_data, sid)
@@ -4515,7 +4549,13 @@ def _build_inflation_axis(macro_data: dict) -> dict:
     )
     oil_wti_20d = _oil_20d_pct("DCOILWTICO")
     oil_brent_20d = _oil_20d_pct("DCOILBRENTEU")
-    oil_chgs = [c for c in (oil_wti_20d, oil_brent_20d) if c is not None]
+    oil_proxy_20d, oil_proxy_as_of = _fresh_oil_20d_pct(oil_proxy_close_cache)
+    if oil_proxy_20d is not None:
+        oil_trend_source = "USO_proxy"
+        oil_chgs = [oil_proxy_20d]
+    else:
+        oil_trend_source = "fred_futures"
+        oil_chgs = [c for c in (oil_wti_20d, oil_brent_20d) if c is not None]
     oil_rising = bool(oil_chgs) and max(oil_chgs) >= 10.0      # genuine energy push
     oil_falling = bool(oil_chgs) and min(oil_chgs) <= -10.0    # spike reversing
 
@@ -4597,6 +4637,9 @@ def _build_inflation_axis(macro_data: dict) -> dict:
         "core_pce_ann3": core_pce_ann3,
         "oil_wti_20d_pct": oil_wti_20d,
         "oil_brent_20d_pct": oil_brent_20d,
+        "oil_trend_source": oil_trend_source,
+        "oil_proxy_20d_pct": oil_proxy_20d,
+        "oil_proxy_as_of": oil_proxy_as_of,
         "breakeven_5y5y": be_5y5y[0] if be_5y5y else None,
         "bridge_direction": bridge_direction,
         "bridge_basis": bridge_basis,

@@ -603,7 +603,11 @@ the datum the block cites, and its as-of date.
 - **Geopolitical / energy overlay:** the last ~30 days of major-power trade,
   tariff, sanction, conflict, and supply-chain news. An acute energy /
   Strait-of-Hormuz shock is a stagflation vector — but judge it by the **oil price
-  trend** (`inflation_axis.oil_*_20d_pct`), not the news-keyword `market_shock` level:
+  trend** (2026-08-06 audit O2: `inflation_axis.oil_proxy_20d_pct` when
+  `oil_trend_source == "USO_proxy"` — a fresher, daily-traded proxy than FRED's
+  8-9d-stale DCOILWTICO/DCOILBRENTEU; falls back to `oil_wti_20d_pct`/
+  `oil_brent_20d_pct` when `oil_trend_source == "fred_futures"`), not the
+  news-keyword `market_shock` level:
   a high shock_level on falling oil is a news false-positive, not stagflation. Watch
   for any genuine pass-through in PPI (`PPIACO`).
 
@@ -1268,7 +1272,7 @@ A single JSON snapshot for one trading day containing:
 - `market_shock` — short-horizon shock detector: 1d/5d price moves (SPY/DXY/VIX) with z-scores + news keyword scan, composite `shock_level` 0-3 with `triggers` and `news_examples`
 - `growth_axis` — **pre-computed growth-direction read** (the quadrant growth axis): `direction` (`rising`/`falling`/`flat`/`indeterminate`) from the GDPNow current-quarter vintage trajectory (`gdpnow_trajectory`, oldest→newest), `confidence`, `basis`, `as_of` (the realtime **vintage** date of the newest vintage row used — GDPNow freshness is vintage recency, NOT the observation-quarter start), and `confirming` hard data. **Echo `direction` and `basis` VERBATIM as their literal enum values** (`basis` `within_quarter_vintages`/`prior_quarter_tail`/`cross_quarter_fallback`/`no_gdpnow_data`; confidence is fixed by basis — `prior_quarter_tail`⇒medium, `cross_quarter_fallback`⇒low — never invent "cross-quarter fallback" for a `prior_quarter_tail` read).
 - `flex_quadrant` — **the quadrant the FLEX engine treats as in force** (borderline 5-day benchmark tiebreak, D1): `resolved` (Q1-Q4 or `""`), `basis` (`active`/`borderline_5d_tiebreak`/`favored_single`/`unresolved`), `favored_bucket`, `benchmark_returns_5d` (per member `{etf, r5}`), `window_trading_days`. **Flex nominations must assert fit against `flex_quadrant.resolved`, not the raw axes** — see the Flex section. Core still reasons against the strict `active_quadrant`; this block governs the flex sleeve only.
-- `inflation_axis` — **pre-computed inflation-direction read**: `direction` from realized core (PCE-first) 3m-annualized vs YoY, with headline CPI + an oil-price-trend energy overlay (`oil_wti_20d_pct`/`oil_brent_20d_pct`); breakevens secondary. **Echo `direction`.**
+- `inflation_axis` — **pre-computed inflation-direction read**: `direction` from realized core (PCE-first) 3m-annualized vs YoY, with headline CPI + an oil-price-trend energy overlay (`oil_proxy_20d_pct` when `oil_trend_source == "USO_proxy"`, else `oil_wti_20d_pct`/`oil_brent_20d_pct`); breakevens secondary, with a non-binding `bridge_direction` for the gap between monthly prints. **Echo `direction`.**
 - `fomc_stance` — the RAW manually-maintained stance file (`config/fomc-stance.json`: `stance` + `as_of`), kept for reference. **The stance you must use is the resolved `policy_axis`.**
 - `policy_axis` — **pre-computed RESOLVED policy stance**: `stance` (hawkish/neutral/dovish/unconfirmed) + `source` (`manual_fresh` / `market_implied` / `unconfirmed`), `market_implied` (`stance`, `dgs2_latest`, `dff_latest`, `dgs2_delta_20d_bp`, `spread_bp`), `manual` (echo + `fresh`), `agreement` (null when either layer is unavailable), `note`. A fresh manual SEP/dot-plot governs; else DGS2 20d momentum; `unconfirmed` only when both are unavailable. **Echo `stance` + `source`.**
 - `regime_gate` — **pre-computed deployment gate**: `status` (`open`/`closed`), `reasons`, `policy_note`, derived from the two axes + the resolved `policy_axis` stance (see `derived_from.policy_source`). **Echo `status` into `deployment_gate`.**
