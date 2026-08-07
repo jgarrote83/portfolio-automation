@@ -198,6 +198,43 @@ def test_pnl_decomposition_top15_cap():
     assert len(result["off_roster_flex"]["contributors"]) <= 15
 
 
+# --- R1 (2026-08-06 audit): realized (closed) vs unrealized (open) labeling ---
+
+def test_closed_off_roster_position_labeled_closed_no_open_flag():
+    """MU fully sold (no current position) -- the bucket's entire total_usd is
+    REALIZED/historical. has_open_position must be False and the contributor's
+    position_status must be 'closed', so the report can't narrate a closed
+    position's historical loss as an ongoing structural drag."""
+    fills = [
+        _fill("MU", "buy", 2.0, 100.0, "2026-05-27"),
+        _fill("MU", "sell", 2.0, 90.0, "2026-06-01"),
+    ]
+    alp = _MockAlpaca(fills)
+    result = _build_pnl_decomposition(alp, _paper([]), "2026-05-26")   # no positions -> MU closed
+    bucket = result["off_roster_flex"]
+    assert bucket["realized_usd"] < 0
+    assert bucket["unrealized_usd"] == 0.0
+    assert bucket["has_open_position"] is False
+    mu = next(c for c in bucket["contributors"] if c["symbol"] == "MU")
+    assert mu["position_status"] == "closed"
+
+
+def test_open_off_roster_position_labeled_open_with_open_flag():
+    """MU still held (has a current position, even at $0 unrealized) --
+    has_open_position must be True and position_status 'open'."""
+    fills = [
+        _fill("MU", "buy", 2.0, 100.0, "2026-05-27"),
+        _fill("MU", "sell", 1.0, 90.0, "2026-06-01"),   # partial sell -- still held
+    ]
+    positions = [_pos("MU", unrealized_pl=0.0)]
+    alp = _MockAlpaca(fills)
+    result = _build_pnl_decomposition(alp, _paper(positions), "2026-05-26")
+    bucket = result["off_roster_flex"]
+    assert bucket["has_open_position"] is True
+    mu = next(c for c in bucket["contributors"] if c["symbol"] == "MU")
+    assert mu["position_status"] == "open"
+
+
 def test_pnl_decomposition_pct_of_equity():
     """pct_of_equity is computed as total_usd / equity * 100."""
     fills = [

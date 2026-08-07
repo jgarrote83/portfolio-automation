@@ -605,6 +605,45 @@ def _build_price_universe(
     ))
 
 
+def _correct_10x_ingestion_error(
+    price_now: float, high_52: float, low_52: float,
+) -> tuple[float, bool, str]:
+    """R1 (2026-08-06 audit) — ingestion-level 10x sanity CORRECTION, applied
+    BEFORE the quarantine backstop below. A feed off by a clean factor of ~10x
+    (a decimal-place / cents-vs-dollars mixup) against its OWN 52-week range
+    can be corrected at the source instead of merely re-quarantining the same
+    bad print every session forever (observed: MU printing ~10x its real
+    price every session, never corrected). Only corrects when the RESULT
+    lands back inside a generous band around the 52-week range — never
+    guesses a correction that doesn't itself look sane.
+
+    Returns ``(price, corrected, note)``; ``note`` is ``""`` when uncorrected.
+    Never raises — any bad input just returns the original price uncorrected.
+    """
+    if high_52 <= 0 or low_52 <= 0 or price_now <= 0:
+        return price_now, False, ""
+    mid = (high_52 + low_52) / 2.0
+    if mid <= 0:
+        return price_now, False, ""
+    ratio = price_now / mid
+    sane_lo, sane_hi = low_52 * 0.5, high_52 * 1.5
+    if 7.0 <= ratio <= 13.0:
+        candidate = price_now / 10.0
+        if sane_lo <= candidate <= sane_hi:
+            return candidate, True, (
+                f"price {price_now:.2f} is ~10x the 52-wk range midpoint {mid:.2f} — "
+                f"corrected to {candidate:.2f} at ingestion"
+            )
+    elif 0.07 <= ratio <= 0.13:
+        candidate = price_now * 10.0
+        if sane_lo <= candidate <= sane_hi:
+            return candidate, True, (
+                f"price {price_now:.2f} is ~1/10th the 52-wk range midpoint {mid:.2f} — "
+                f"corrected to {candidate:.2f} at ingestion"
+            )
+    return price_now, False, ""
+
+
 def _quarantine_flex_price(
     profile: dict,
     prices: dict,
@@ -615,10 +654,14 @@ def _quarantine_flex_price(
     """Task E (F7): structural price-sanity guard for flex candidates.
 
     Returns (quarantined: bool, reason: str).
-    Quarantine when:
-      1. Price is outside the symbol's 52-week high/low range by > range_pct, OR
-      2. Price moved > single_day_move_pct vs prior snapshot EOD without a corroborating
-         news hit in company_news for that symbol.
+    First applies the R1 (2026-08-06 audit) 10x ingestion CORRECTION — when it
+    fires, ``prices[sym]["c"]`` and ``profile`` are updated in place (the fix
+    at the SOURCE) and the corrected price feeds the checks below. Quarantine
+    (the backstop, unchanged) fires when:
+      1. Price (post-correction) is outside the symbol's 52-week high/low
+         range by > range_pct, OR
+      2. Price moved > single_day_move_pct vs prior snapshot EOD without a
+         corroborating news hit in company_news for that symbol.
 
     Never raises — returns (False, "") on any input error.
     """
@@ -637,12 +680,23 @@ def _quarantine_flex_price(
     except (TypeError, ValueError):
         return False, ""
 
-    # --- Gate 1: 52-week range check ----------------------------------------
     try:
         high_52 = float(profile.get("yearHigh") or 0)
         low_52 = float(profile.get("yearLow") or 0)
     except (TypeError, ValueError):
         high_52 = low_52 = 0.0
+
+    # --- Gate 0: 10x ingestion correction (source fix, before quarantine) ---
+    corrected_price, was_corrected, correction_note = _correct_10x_ingestion_error(
+        price_now, high_52, low_52)
+    if was_corrected:
+        prices[sym]["c"] = corrected_price
+        profile["price_corrected_10x"] = True
+        profile["price_correction_note"] = correction_note
+        logger.warning("Flex candidate %s: %s", sym, correction_note)
+        price_now = corrected_price
+
+    # --- Gate 1: 52-week range check (backstop) ------------------------------
     if high_52 > 0 and low_52 > 0:
         # Allow a range_pct% overshoot beyond either bound before quarantining.
         if price_now > high_52 * (1 + range_pct / 100.0):
@@ -6954,10 +7008,21 @@ def _build_pnl_decomposition(
         b = _bucket(sym)
         r = realized_by_sym.get(sym, 0.0)
         u = unrealized_by_sym.get(sym, 0.0)
+        # R1 (2026-08-06 audit) — "open" (currently held, even at $0 unrealized)
+        # vs "closed" (realized-only, no live position) per symbol. Without
+        # this, a fully-closed off-roster name's historical realized loss reads
+        # as an ONGOING structural drag from a position that no longer exists
+        # (the -$803 off-roster figure reported alongside 0.00% off-roster
+        # weight — the position was already closed, not currently sized at a
+        # weight that would explain a drag).
+        is_open = sym in unrealized_by_sym
         buckets[b]["realized_usd"] += r
         buckets[b]["unrealized_usd"] += u
-        buckets[b]["symbols"][sym] = {"realized_usd": round(r, 2), "unrealized_usd": round(u, 2),
-                                      "total_usd": round(r + u, 2)}
+        buckets[b]["symbols"][sym] = {
+            "realized_usd": round(r, 2), "unrealized_usd": round(u, 2),
+            "total_usd": round(r + u, 2),
+            "position_status": "open" if is_open else "closed",
+        }
 
     equity = float(paper_account.get("equity") or 0) or 1.0
     result: dict = {"available": True, "inception_date": inception_date,
@@ -6968,11 +7033,13 @@ def _build_pnl_decomposition(
         total = r + u
         # Top 15 contributors by absolute total P&L.
         top15 = sorted(b_data["symbols"].items(), key=lambda kv: abs(kv[1]["total_usd"]), reverse=True)[:15]
+        has_open_position = any(v["position_status"] == "open" for v in b_data["symbols"].values())
         result[b_name] = {
             "realized_usd": round(r, 2),
             "unrealized_usd": round(u, 2),
             "total_usd": round(total, 2),
             "pct_of_equity": round(total / equity * 100.0, 3),
+            "has_open_position": has_open_position,
             "contributors": [{"symbol": sym, **v} for sym, v in top15],
         }
 

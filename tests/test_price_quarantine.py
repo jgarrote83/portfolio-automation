@@ -45,6 +45,46 @@ def _news(sym: str, headlines: list[str]) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Gate 0 (2026-08-06 audit R1): 10x ingestion correction, before quarantine
+# ---------------------------------------------------------------------------
+
+class TestTenXIngestionCorrection:
+
+    def test_10x_high_price_corrected_at_ingestion(self):
+        """MU-shaped case: the feed prints ~10x a real price that itself sits
+        inside a normal 52-week range -- corrected at the SOURCE (prices dict
+        mutated in place), not merely re-quarantined every session."""
+        profile = _profile("MU", high_52=70.0, low_52=50.0)
+        prices = _prices("MU", 650.0)   # 10x a real price of 65.0, itself in-range
+        q, reason = _quarantine_flex_price(profile, prices, {}, {}, _cfg())
+        assert profile.get("price_corrected_10x") is True
+        assert prices["MU"]["c"] == 65.0
+        assert q is False   # corrected price is sane -- no quarantine needed
+
+    def test_10x_low_price_corrected_at_ingestion(self):
+        """A price off by 1/10th (e.g. a cents-vs-dollars mixup) is corrected
+        the other direction."""
+        profile = _profile("XYZ", high_52=70.0, low_52=50.0)
+        prices = _prices("XYZ", 6.5)   # 1/10th of a real 65.0
+        q, reason = _quarantine_flex_price(profile, prices, {}, {}, _cfg())
+        assert profile.get("price_corrected_10x") is True
+        assert prices["XYZ"]["c"] == 65.0
+        assert q is False
+
+    def test_10x_vs_52w_high_itself_not_cleanly_correctable_still_quarantined(self):
+        """The pre-existing MU-vs-52w-high scenario (price 10x the HIGH, not
+        10x a price inside the range) doesn't land in the recognized ~10x-of-
+        midpoint window -- no guessed correction; the quarantine backstop
+        still fires exactly as before (no regression)."""
+        q, reason = _quarantine_flex_price(
+            _profile("MU", high_52=70.0, low_52=30.0),
+            _prices("MU", 700.0),
+            {}, {}, _cfg(),
+        )
+        assert q is True
+
+
+# ---------------------------------------------------------------------------
 # Gate 1: 52-week range checks
 # ---------------------------------------------------------------------------
 
