@@ -172,6 +172,12 @@ def effective_execution_config(cfg: dict) -> dict:
     rex_cfg = {**REFERENCE_EXECUTION_DEFAULTS, **((cfg or {}).get("reference_execution") or {})}
     return {
         "gap_band_pp": float(ov_cfg.get("gap_band_pp", 5.0)),
+        # O4 (2026-08-06 audit): the HYBRID band multiplier — a sleeve's
+        # effective shelter is min(gap_band_pp, relative_band_frac *
+        # reference_pct) whenever reference_pct > 0 (see reconcile /
+        # _effective_band). Surfaced here so the prompt can quote it verbatim
+        # rather than assuming every sleeve is governed by the flat gap_band_pp.
+        "relative_band_frac": float(ov_cfg.get("relative_band_frac", 0.5)),
         "max_magnitude_pp": float(ov_cfg.get("max_magnitude_pp", 15.0)),
         # Structural gate (shared/overrides.py): BOTH directions require >=1 clean
         # evidence item or the record is rejected outright; re-risk additionally
@@ -186,6 +192,23 @@ def effective_execution_config(cfg: dict) -> dict:
         "min_notional_usd": float(rex_cfg["min_notional_usd"]),
         "sleeve_floor_pct_of_core": float((cfg or {}).get("sleeve_floor_pct_of_core", 0.1)),
     }
+
+
+def _effective_band(band: float, relative_band_frac: float, reference_pct: float) -> float:
+    """O4 (2026-08-06 audit) — the HYBRID band: a sleeve's shelter is
+    ``min(gap_band_pp, relative_band_frac * reference_pct)`` whenever
+    ``reference_pct > 0``, so a small strategic target (e.g. intl_broad/VXUS
+    at a 2.0% reference — observed sitting at 0.14% every session, always
+    inside the fixed 5pp band built for the much-larger core amplifiers,
+    never funded) becomes enforceable once it drifts more than
+    ``relative_band_frac`` of its OWN reference away. A zero-or-negative
+    reference (LEGACY_EXITS, a zeroed non-selected pool member) is
+    UNAFFECTED — the relative term never narrows the shelter for a sleeve
+    with no positive target to measure against; it keeps the plain
+    ``gap_band_pp``."""
+    if reference_pct <= 0:
+        return band
+    return min(band, relative_band_frac * reference_pct)
 
 
 def _flag(entry: dict, reason: str) -> None:
@@ -230,6 +253,7 @@ def reconcile(
     ov_cfg = (cfg or {}).get("override_protocol") or {}
     rex_cfg = {**REFERENCE_EXECUTION_DEFAULTS, **((cfg or {}).get("reference_execution") or {})}
     band = float(ov_cfg.get("gap_band_pp", 5.0))
+    relative_band_frac = float(ov_cfg.get("relative_band_frac", 0.5))
     max_mag = float(ov_cfg.get("max_magnitude_pp", 15.0))
     tranche = float(rex_cfg["tranche_pp_max"])
     enforce = bool(rex_cfg["enforce"])
@@ -330,8 +354,10 @@ def reconcile(
     # sells-before-buys by construction.
     out_of_band = []
     for sym, row in rows.items():
-        gap_signed = float(row.get("current_pct") or 0) - float(row.get("reference_pct") or 0)
-        if abs(gap_signed) > band + _EPS_PP:
+        ref_pct = float(row.get("reference_pct") or 0)
+        gap_signed = float(row.get("current_pct") or 0) - ref_pct
+        eff_band = _effective_band(band, relative_band_frac, ref_pct)
+        if abs(gap_signed) > eff_band + _EPS_PP:
             out_of_band.append((sym, gap_signed, row.get("price")))
     out_of_band.sort(key=lambda r: (r[1] < 0, -abs(r[1])))
 
@@ -352,7 +378,8 @@ def reconcile(
     re_risk_required: dict[str, float] = {}
     for sym, gap_signed, _px in out_of_band:
         allowed_r = residual.get(sym, 0.0)
-        required_total_r = max(0.0, abs(gap_signed) - max(allowed_r, band))
+        eff_band_r = _effective_band(band, relative_band_frac, float(rows[sym].get("reference_pct") or 0))
+        required_total_r = max(0.0, abs(gap_signed) - max(allowed_r, eff_band_r))
         if required_total_r <= _EPS_PP:
             continue
         side_r = "sell" if gap_signed > 0 else "buy"
@@ -368,7 +395,8 @@ def reconcile(
     for sym, gap_signed, px in out_of_band:
         abs_gap = abs(gap_signed)
         allowed = residual.get(sym, 0.0)
-        required_total = max(0.0, abs_gap - max(allowed, band))
+        eff_band = _effective_band(band, relative_band_frac, float(rows[sym].get("reference_pct") or 0))
+        required_total = max(0.0, abs_gap - max(allowed, eff_band))
         required_today = min(required_total, tranche)
         net_move = move_pp.get(sym, 0.0)
         entry = {

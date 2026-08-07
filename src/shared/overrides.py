@@ -111,6 +111,7 @@ OVERRIDE_DEFAULTS = {
     "max_magnitude_pp": 15.0,
     "re_risk_min_evidence": 2,
     "gap_band_pp": 5.0,
+    "relative_band_frac": 0.5,
 }
 
 _VALID_DIRECTIONS = ("de_risk", "re_risk")

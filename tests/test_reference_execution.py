@@ -113,7 +113,8 @@ def test_partial_pace_shortfall_topped_up():
 
 
 def test_in_band_sleeve_not_reported():
-    r = reconcile([_gap("XLP", 6.0, 2.0)], [], [], CFG, _ctx())   # gap 4 < band 5
+    # reference 10.0 (not O4's small-reference hybrid-band zone): gap 4 < band 5
+    r = reconcile([_gap("XLP", 14.0, 10.0)], [], [], CFG, _ctx())
     assert r["sleeves"] == {}
     assert r["enforced_trades"] == []
 
@@ -271,6 +272,36 @@ def test_sub_min_notional_damper_sell_not_tagged_when_override_shelters_it():
     assert "sub_min_notional_action" not in e
 
 
+# --- O4 (2026-08-06 audit): hybrid band for small-reference strategic sleeves --
+
+def test_hybrid_band_makes_small_reference_sleeve_visible_out_of_band():
+    """VXUS at 0.14% vs a 2.0% reference (gap -1.86pp) sits inside the FIXED
+    5pp absolute band -- invisible, unenforceable, never funded (the observed
+    every-session symptom). Under the hybrid band (min(5pp, 50% of the 2.0%
+    reference) = 1.0pp) it must be reported as out-of-band (fails today: not
+    even in r["sleeves"])."""
+    gaps = [_gap("VXUS", 0.14, 2.0)]
+    r = reconcile(gaps, [], [], CFG, _ctx())
+    assert "VXUS" in r["sleeves"], r["sleeves"]
+    assert r["sleeves"]["VXUS"]["required_move_total_pp"] > 0
+
+
+def test_amplifier_absolute_band_unchanged_by_hybrid_rule():
+    """A big amplifier (reference 15%) must NOT become MORE lenient under the
+    hybrid rule -- min(5, 50%*15=7.5) = 5, unchanged (no regression)."""
+    gaps = [_gap("SPY", 19.0, 15.0)]   # gap 4pp -- inside the absolute band either way
+    r = reconcile(gaps, [], [], CFG, _ctx())
+    assert "SPY" not in r["sleeves"]
+
+
+def test_legacy_exit_zero_reference_unaffected_by_relative_band():
+    """A zero-reference sleeve (legacy exit) keeps the plain absolute band —
+    the relative term must never narrow its shelter to zero (no regression)."""
+    gaps = [_gap("MCK", 3.0, 0.0)]   # gap 3pp, inside the 5pp absolute band
+    r = reconcile(gaps, [], [], CFG, _ctx())
+    assert "MCK" not in r["sleeves"]
+
+
 def test_sub_min_notional_rule_is_deterministic_across_sessions():
     """The core M2 guarantee: the IDENTICAL sub-min-notional setup must yield
     the IDENTICAL tag every time it's evaluated — no per-session discretion."""
@@ -323,7 +354,8 @@ def test_buy_capped_by_available_cash():
 
 def test_min_notional_skip():
     """A shortfall worth less than min_notional_usd is not tradeable — flagged."""
-    gaps = [_gap("SPY", 8.0, 2.0, price=50.0)]   # gap 6 -> required 1pp = $100 < $115
+    # reference 15.0 (outside O4's small-reference hybrid-band zone): gap 6 -> required 1pp = $100 < $115
+    gaps = [_gap("SPY", 21.0, 15.0, price=50.0)]
     r = reconcile(gaps, [], [], CFG, _ctx(equity_usd=10_000.0))
     assert r["sleeves"]["SPY"]["status"] == "non_compliant_flagged"
     assert r["enforced_trades"] == []
@@ -331,7 +363,7 @@ def test_min_notional_skip():
 
 def test_integer_share_floor_skip():
     """A shortfall smaller than one share of a high-priced name floors to zero."""
-    gaps = [_gap("SPY", 8.0, 2.0, price=5_000.0)]   # required 1pp = $1000 < 1 share
+    gaps = [_gap("SPY", 21.0, 15.0, price=5_000.0)]   # required 1pp = $1000 < 1 share
     r = reconcile(gaps, [], [], CFG, _ctx())
     assert r["sleeves"]["SPY"]["status"] == "non_compliant_flagged"
 
