@@ -135,6 +135,9 @@ _RISK_LIMITS_DEFAULTS = {
     "bond_signals": {
         "hy_oas_trend_bp": 10.0,
     },
+    "labor_leading": {
+        "forward_softening_gap_k": 20.0,
+    },
     "market_shock": {
         "news_baseline_min_sessions": 10,
         "news_baseline_window_sessions": 20,
@@ -1786,6 +1789,10 @@ def run() -> None:
     for _labor_sid in ("PAYEMS", "UNRATE", "CES0500000003", "JTSJOL",
                        "CIVPART", "SAHMREALTIME"):
         macro_data[_labor_sid] = fred.get_series_latest(_labor_sid, limit=24)
+    # O3 (2026-08-06 audit): ADP private payrolls — a LEADING labor signal
+    # (available days before BLS PAYEMS). Never overwrites the PAYEMS
+    # scorecard; see _build_labor_leading.
+    macro_data["NPPTTL"] = fred.get_series_latest("NPPTTL", limit=24)
     # Inflation pre-compute (quadrant inflation axis): monthly series need >=13 obs
     # so the analyzer can compute YoY and the 3-month annualized direction (the
     # realized-CPI/PCE read that governs the regime label over forward breakevens).
@@ -3889,6 +3896,48 @@ def _build_bond_signals(macro_data: dict) -> dict:
     return out
 
 
+def _build_labor_leading(macro_data: dict) -> dict:
+    """O3 (2026-08-06 audit) — deterministic LEADING labor sub-signal: ADP
+    private payrolls (FRED ``NPPTTL``), surfaced explicitly as a forward-risk
+    flag. This is a LEADING indicator (available days before BLS PAYEMS) and
+    NEVER overwrites the binding PAYEMS scorecard in ``_build_labor_signals``
+    — it is additive context only.
+
+    Motivating incident: 2026-08-05's ADP miss (+44K vs +70K consensus) — the
+    session's most important forward labor signal — was caught only because
+    the analyzer happened to parse it out of the forex-news feed; there was no
+    deterministic field for it at all.
+
+    Degrades gracefully (``available: False``) when ``NPPTTL`` has fewer than
+    2 usable observations (series absent, renamed, or not yet fetched) —
+    never a crash, never a fabricated reading.
+    """
+    vals = _macro_vals(macro_data, "NPPTTL")   # newest-first, thousands of persons
+    if len(vals) < 2:
+        return {"available": False, "reason": "NPPTTL (ADP) series absent or insufficient history"}
+
+    delta_1m_k = round(vals[0] - vals[1], 1)
+    delta_3m_avg_k = round((vals[0] - vals[3]) / 3.0, 1) if len(vals) > 3 else None
+
+    gap_k = float((_load_risk_limits().get("labor_leading") or {}).get("forward_softening_gap_k", 20.0))
+    forward_softening_flag = (
+        delta_3m_avg_k is not None and delta_1m_k < delta_3m_avg_k - gap_k
+    )
+
+    return {
+        "available": True,
+        "source": "FRED_NPPTTL",
+        "latest_k": round(vals[0], 0),
+        "delta_1m_k": delta_1m_k,
+        "delta_3m_avg_k": delta_3m_avg_k,
+        "forward_softening_flag": forward_softening_flag,
+        "note": (
+            "ADP private-payrolls LEADING signal (forward risk only) — never overwrites "
+            "the binding BLS-PAYEMS scorecard; feeds the labor read as additive context."
+        ),
+    }
+
+
 def _build_labor_signals(macro_data: dict) -> dict:
     """Pre-compute a four-signal labor-market scorecard for the analyzer.
 
@@ -3922,6 +3971,7 @@ def _build_labor_signals(macro_data: dict) -> dict:
         "unemployment": {},
         "wages":        {},
         "scorecard":    {},
+        "leading":      _build_labor_leading(macro_data),
         "notes": (
             "Labor leads the cycle. ICSA 4w rising >10% vs 26w avg, "
             "SAHMREALTIME >=0.5, or PAYEMS 3m avg <100k are early-warning "

@@ -928,6 +928,7 @@ recession case strengthens regardless of the quadrant call.
 - `unemployment` — UNRATE latest + 6m delta in pp, Sahm Rule value + `sahm_triggered` flag, civilian participation rate + 6m delta.
 - `wages` — avg hourly earnings YoY%, JOLTS openings + 3m delta, current Fed funds (for hawkish-Fed risk assessment).
 - `scorecard` — each of the four signals scored -2..+2, composite -8..+8 with label `labor_strong` / `neutral` / `labor_softening` / `labor_breaking`.
+- `leading` (2026-08-06 audit O3) — ADP private payrolls (FRED NPPTTL), a LEADING signal available before BLS PAYEMS. `available: false` degrades gracefully (series absent — say so, never fabricate a reading). When available: `delta_1m_k` vs `delta_3m_avg_k`, and `forward_softening_flag` (this month's ADP print missing the trailing pace by a wide margin). **This is forward-risk context only — it NEVER overrides or restates the binding `payrolls`/`scorecard` fields above, which stay governed by PAYEMS.** Cite it explicitly when `forward_softening_flag` is true, rather than only catching an ADP miss if it happens to surface in the news feed.
 
 **How to read each signal:**
 

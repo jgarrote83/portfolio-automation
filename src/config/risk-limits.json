@@ -88,6 +88,11 @@
   },
   "_bond_signals_note": "2026-08-06 audit B1 — `credit.hy_oas.trend_4w` (tightening/widening/flat) was referenced by both `_build_leading_growth` and `_build_market_implied_quadrant` but never actually SET by `_build_bond_signals` (a key-name mismatch — the dict only ever carried `delta_20d_bp` etc.), so the HY-OAS vote silently read None in both consumers every session. `trend_4w` is now derived from `delta_20d_bp` vs +/-hy_oas_trend_bp (tightening below -bp, widening above +bp, else flat).",
 
+  "labor_leading": {
+    "forward_softening_gap_k": 20.0
+  },
+  "_labor_leading_note": "2026-08-06 audit O3 — ADP private payrolls (FRED NPPTTL) as a deterministic LEADING labor sub-signal, surfaced explicitly (collector._build_labor_leading) as a forward-risk flag; it never overwrites the binding BLS-PAYEMS scorecard in labor_signals. forward_softening_gap_k is how far below the trailing 3m-average pace (in thousands) the latest ADP print must miss to flag forward_softening_flag. Motivating incident: 08-05's ADP miss (+44K vs +70K consensus) — the session's most important forward labor signal — was caught only because the analyzer happened to parse it out of the forex-news feed.",
+
   "market_shock": {
     "news_baseline_min_sessions": 10,
     "news_baseline_window_sessions": 20,
