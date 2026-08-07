@@ -154,3 +154,60 @@ def test_resize_awareness_is_opt_in_omitting_prior_qty_keeps_old_behavior():
     result = _build_day_pl_zero_watch(raw, prior_pl)   # no prior_qty passed
     assert len(result["flagged"]) == 1
     assert result["flagged"][0]["position_resized"] is False
+
+
+# --- 2026-08-06 audit B7: identity trigger, independent of total_pl_delta -----
+
+def test_small_delta_frozen_price_still_flags_independent_of_delta():
+    """08-05's VDE case: a ~4.1% position, day P/L $0.00, price literally frozen
+    (lastday == current), but total_pl_delta is TINY (well under the $25
+    default threshold) — the old delta-gated trigger let this slip through
+    entirely; the new identity trigger fires on the frozen quote alone."""
+    raw = [_pos("VDE", 0.0, 10.05, lastday_price=118.40, current_price=118.40, qty=25.0)]
+    prior = {"VDE": 10.00}   # delta = 0.05 — nowhere near the $25 threshold
+    result = _build_day_pl_zero_watch(raw, prior)
+    assert len(result["flagged"]) == 1
+    row = result["flagged"][0]
+    assert row["symbol"] == "VDE"
+    assert row["identity_trigger"] is True
+    assert row["total_pl_delta"] == 0.05
+
+
+def test_identity_trigger_fires_even_with_no_prior_value_for_ticker():
+    """The identity trigger doesn't need prior total-P/L data at all — a stuck
+    feed is a stuck feed regardless of whether a delta can even be computed."""
+    raw = [_pos("VDE", 0.0, 10.05, lastday_price=118.40, current_price=118.40, qty=25.0)]
+    result = _build_day_pl_zero_watch(raw, {"OTHER": -10.0})   # no prior for VDE itself
+    assert len(result["flagged"]) == 1
+    assert result["flagged"][0]["symbol"] == "VDE"
+    assert result["flagged"][0]["total_pl_delta"] is None
+
+
+def test_identity_trigger_requires_qty_greater_than_zero():
+    """Frozen price with no share count (or zero) is not itself evidence of a
+    stuck feed on a HELD position — qty>0 is part of the identity trigger."""
+    raw = [_pos("VDE", 0.0, 10.05, lastday_price=118.40, current_price=118.40)]  # no qty
+    result = _build_day_pl_zero_watch(raw, {"VDE": 10.00})   # delta = 0.05, under threshold
+    assert result["flagged"] == []
+
+
+def test_multiple_qualifying_positions_collapse_to_one_note():
+    """COWZ (large delta) and VDE (small delta) both show the identical frozen-
+    quote symptom in the same run — both must surface (not just COWZ), and
+    since >1 qualifies, a single collapsed note replaces N per-ticker items."""
+    raw = [
+        _pos("COWZ", 0.0, -50.00, lastday_price=30.0, current_price=30.0, qty=100.0),
+        _pos("VDE", 0.0, 10.05, lastday_price=118.40, current_price=118.40, qty=25.0),
+    ]
+    prior = {"COWZ": -10.02, "VDE": 10.00}
+    result = _build_day_pl_zero_watch(raw, prior)
+    assert {r["symbol"] for r in result["flagged"]} == {"COWZ", "VDE"}
+    assert "multi_symbol_note" in result
+    assert "COWZ" in result["multi_symbol_note"] and "VDE" in result["multi_symbol_note"]
+
+
+def test_single_qualifying_position_has_no_multi_symbol_note():
+    raw = [_pos("KMLM", 0.0, -109.20, lastday_price=54.32, current_price=54.10)]
+    result = _build_day_pl_zero_watch(raw, {"KMLM": -70.00})
+    assert len(result["flagged"]) == 1
+    assert "multi_symbol_note" not in result

@@ -54,9 +54,10 @@
   "override_protocol": {
     "max_magnitude_pp": 15.0,
     "re_risk_min_evidence": 2,
-    "gap_band_pp": 5.0
+    "gap_band_pp": 5.0,
+    "relative_band_frac": 0.5
   },
-  "_override_protocol_note": "Phase 4 (Tier-2). The analyzer executes toward reference_weights and may deviate only via a structured, falsifiable override record. max_magnitude_pp = the hard Tier-2 band — and per Finding 2 D1 it caps the RESIDUAL an override may SHELTER, not the move: for an out-of-band sleeve, required_move_total = max(0, gap - max(allowed_residual, gap_band_pp)) MUST still trade (see reference_execution). Overrides are PER-SLEEVE (mandatory 'sleeve' field, OVERRIDE_SCHEMA_V1_1). gap_band_pp = how far a sleeve's Current may sit off Reference before the analyzer MUST either trade toward it or file an override — a 'hold' beyond this band is itself an override toward inaction and must carry a record. ASYMMETRY (spec §6): a de-risk override (toward more defense) passes with >=1 clean evidence item at full size; a re-risk override (toward more risk / less defense) needs >= re_risk_min_evidence items, else it is DOWNSIZED (magnitude halved), and with no evidence it is rejected. Structural gates (falsifier + falsifier_date + clean_data_only + within band + valid direction + sleeve) apply to both. An override never loosens the deployment gate.",
+  "_override_protocol_note": "Phase 4 (Tier-2). The analyzer executes toward reference_weights and may deviate only via a structured, falsifiable override record. max_magnitude_pp = the hard Tier-2 band — and per Finding 2 D1 it caps the RESIDUAL an override may SHELTER, not the move: for an out-of-band sleeve, required_move_total = max(0, gap - max(allowed_residual, gap_band_pp)) MUST still trade (see reference_execution). Overrides are PER-SLEEVE (mandatory 'sleeve' field, OVERRIDE_SCHEMA_V1_1). gap_band_pp = how far a sleeve's Current may sit off Reference before the analyzer MUST either trade toward it or file an override — a 'hold' beyond this band is itself an override toward inaction and must carry a record. ASYMMETRY (spec §6): a de-risk override (toward more defense) passes with >=1 clean evidence item at full size; a re-risk override (toward more risk / less defense) needs >= re_risk_min_evidence items, else it is DOWNSIZED (magnitude halved), and with no evidence it is rejected. Structural gates (falsifier + falsifier_date + clean_data_only + within band + valid direction + sleeve) apply to both. An override never loosens the deployment gate. relative_band_frac (2026-08-06 audit O4) — the HYBRID band: a sleeve's effective shelter is min(gap_band_pp, relative_band_frac * reference_pct) whenever reference_pct > 0, so a small strategic target (e.g. intl_broad/VXUS at a 2.0% reference) becomes enforceable once it drifts more than relative_band_frac of its OWN reference away, rather than sheltering forever inside the fixed 5pp band built for the much-larger core amplifiers. A zero-reference sleeve (LEGACY_EXITS, a zeroed non-selected pool member) is unaffected — the relative term never applies when reference_pct <= 0, so its shelter stays the plain absolute gap_band_pp.",
 
   "reference_execution": {
     "tranche_pp_max": 10.0,
@@ -82,6 +83,29 @@
   "quadrant_performance": {
     "suspect_after_sessions": 10
   },
+
+  "bond_signals": {
+    "hy_oas_trend_bp": 10.0
+  },
+  "_bond_signals_note": "2026-08-06 audit B1 — `credit.hy_oas.trend_4w` (tightening/widening/flat) was referenced by both `_build_leading_growth` and `_build_market_implied_quadrant` but never actually SET by `_build_bond_signals` (a key-name mismatch — the dict only ever carried `delta_20d_bp` etc.), so the HY-OAS vote silently read None in both consumers every session. `trend_4w` is now derived from `delta_20d_bp` vs +/-hy_oas_trend_bp (tightening below -bp, widening above +bp, else flat).",
+
+  "labor_leading": {
+    "forward_softening_gap_k": 20.0
+  },
+  "_labor_leading_note": "2026-08-06 audit O3 — ADP private payrolls (FRED NPPTTL) as a deterministic LEADING labor sub-signal, surfaced explicitly (collector._build_labor_leading) as a forward-risk flag; it never overwrites the binding BLS-PAYEMS scorecard in labor_signals. forward_softening_gap_k is how far below the trailing 3m-average pace (in thousands) the latest ADP print must miss to flag forward_softening_flag. Motivating incident: 08-05's ADP miss (+44K vs +70K consensus) — the session's most important forward labor signal — was caught only because the analyzer happened to parse it out of the forex-news feed.",
+
+  "market_shock": {
+    "news_baseline_min_sessions": 10,
+    "news_baseline_window_sessions": 20,
+    "news_z_watch": 1.5,
+    "news_z_elevated": 2.5,
+    "news_z_acute": 3.5,
+    "persistent_theme_sessions": 10,
+    "persistent_theme_hits_floor": 15.0,
+    "dxy_news_corroboration_hits": 8,
+    "no_baseline_watch_floor_hits": 5
+  },
+  "_market_shock_note": "2026-08-06 audit B3 — the news channel used to trigger off ABSOLUTE daily keyword-hit counts (>=20/15/5) with no baseline, so a persistent multi-week theme (e.g. Iran/Hormuz, 130-147 hits/day) permanently maxed shock_level at 3 with the price channel benign (SPY up, VIX down) — the news channel alone drove the 25%-of-equity shock3_ceiling every session. The news channel now scores a Z-SCORE of total_hits vs a trailing news_baseline_window_sessions-session mean/std (persisted to blob market-shock/news-hits-history.json; news_baseline_min_sessions of history required before a z-score computes at all — until then a conservative single-session no_baseline_watch_floor_hits floor caps news-alone at 'watch'). PRICE and NEWS channels are scored independently (price: SPY/VIX/DXY hard signals + credit-stress escalation, unaffected by news) and combined via level=max(price_level, news_level). The SYMMETRIC benign-tape guard: whenever price_level<=1 ('benign' — no elevated/acute price signal), news-alone is capped at level 2, or level 1 once the SAME dominant news category has held >= persistent_theme_hits_floor hits for >= persistent_theme_sessions consecutive sessions (the Iran/Hormuz case) — level 3 requires genuine price-channel corroboration. dxy_news_corroboration_hits is the pre-existing DXY-move-plus-news-corroboration combo (kept — DXY is a price signal, so this was never the bug).",
 
   "literal_cash_floor_pct": 0.75,
   "_literal_cash_floor_note": "Task D (F6, 2026-07-23): after any SGOV sweep, the analyzer's post-model guard trims the sweep notional so that literal cash does not fall below this fraction of equity. Prevents the 07-22 ratchet (sweep sized without netting same-day buy notionals, leaving cash at 0.79% vs the 1.50% target). D-G1 default 0.75%.",

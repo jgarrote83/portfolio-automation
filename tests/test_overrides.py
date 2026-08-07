@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from shared.overrides import (  # noqa: E402
     OVERRIDE_DEFAULTS,
+    evaluate_falsifier,
     validate_override,
     validate_overrides,
 )
@@ -250,3 +251,52 @@ def test_validate_overrides_threads_gaps_for_derivation():
     assert len(res["accepted"]) == 1
     assert res["accepted"][0]["direction"] == "de_risk"
     assert res["accepted"][0]["declared_direction"] == "re_risk"
+
+
+# --- evaluate_falsifier (2026-08-06 audit M1) --------------------------------
+
+def _axis(raw_direction, raw_streak):
+    return {"raw_direction": raw_direction, "raw_streak": raw_streak}
+
+
+def test_falsifier_two_clauses_both_met():
+    text = "inflation falling 5+ runs AND growth rising 3+ vintages"
+    result = evaluate_falsifier(
+        text, growth_axis=_axis("rising", 4), inflation_axis=_axis("falling", 5),
+    )
+    assert result is True
+
+
+def test_falsifier_one_clause_not_yet_met():
+    """The 08-04 -> 08-05 motivating case: inflation's raw_streak is 4, not the
+    5+ the falsifier requires -> not met."""
+    text = "inflation falling 5+ runs AND growth rising 3+ vintages"
+    result = evaluate_falsifier(
+        text, growth_axis=_axis("rising", 3), inflation_axis=_axis("falling", 4),
+    )
+    assert result is False
+
+
+def test_falsifier_wrong_direction_not_met():
+    text = "inflation falling 5+ runs"
+    result = evaluate_falsifier(text, inflation_axis=_axis("rising", 8))
+    assert result is False
+
+
+def test_falsifier_unparseable_text_is_indeterminate():
+    """Free-text prose that doesn't match the recognized pattern must return
+    None (indeterminate) — never a fabricated True/False."""
+    text = "core PCE reaccelerates above 3.6% in the July print"
+    assert evaluate_falsifier(text, growth_axis=_axis("rising", 10)) is None
+
+
+def test_falsifier_empty_text_is_indeterminate():
+    assert evaluate_falsifier("", growth_axis=_axis("rising", 10)) is None
+    assert evaluate_falsifier(None) is None
+
+
+def test_falsifier_missing_axis_block_is_indeterminate():
+    """A clause referencing an axis whose block wasn't supplied -> indeterminate,
+    not False (missing data must never fabricate a verdict)."""
+    text = "policy hawkish 3+ sessions"
+    assert evaluate_falsifier(text) is None

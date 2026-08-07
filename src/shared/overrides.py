@@ -30,13 +30,88 @@ re-risk direction from *asserting* the gate should open (flagged, not silently p
 """
 from __future__ import annotations
 
+import re
+
 from shared.reference_execution import derive_override_direction
+
+# 2026-08-06 audit M1 — a best-effort DETERMINISTIC parse of the common
+# falsifier phrasing this system's overrides actually use ("inflation falling
+# 5+ runs AND growth rising 3+ vintages"): <axis> <direction> <N>+ <unit>.
+# Never a false True/False — an unparseable falsifier (free text, ultimately
+# the model's own prose) returns None (indeterminate), same "missing data
+# never fabricates a verdict" doctrine as the divergence detectors.
+_FALSIFIER_CLAUSE_RE = re.compile(
+    r"(inflation|growth|policy)\s+(falling|rising|hawkish|dovish)\s+(\d+)\+?\s*"
+    r"(?:consecutive\s+)?(?:runs?|sessions?|vintages?|days?)",
+    re.IGNORECASE,
+)
+
+
+def _falsifier_clause_axis_state(
+    axis: str, growth_axis: dict | None, inflation_axis: dict | None, policy_axis: dict | None,
+) -> tuple[str, int]:
+    """(raw_direction, raw_streak) for one of growth/inflation/policy — the SAME
+    fields the axis-direction-confirmation hysteresis (D-2) already tracks, so
+    this reuses existing deterministic state rather than re-deriving anything."""
+    axis = axis.lower()
+    if axis == "inflation":
+        block = inflation_axis or {}
+    elif axis == "growth":
+        block = growth_axis or {}
+    elif axis == "policy":
+        block = policy_axis or {}
+    else:
+        return "", 0
+    raw_dir = str(block.get("raw_direction") or block.get("raw_stance") or "").lower()
+    try:
+        streak = int(block.get("raw_streak") or 0)
+    except (TypeError, ValueError):
+        streak = 0
+    return raw_dir, streak
+
+
+def evaluate_falsifier(
+    falsifier_text: str | None,
+    growth_axis: dict | None = None,
+    inflation_axis: dict | None = None,
+    policy_axis: dict | None = None,
+) -> bool | None:
+    """Best-effort deterministic truth value for a filed override's falsifier
+    text, against the CURRENT run's axis-confirmation state. Returns:
+
+      - ``True``/``False`` when every AND-clause in the falsifier parses
+        against a recognized ``<axis> <direction> <N>+ <unit>`` pattern (e.g.
+        "inflation falling 5+ runs AND growth rising 3+ vintages") — each
+        clause is met when that axis's CURRENT raw_direction matches AND its
+        raw_streak has reached N.
+      - ``None`` when the falsifier is empty or ANY clause fails to parse —
+        never fabricates a verdict off free text that doesn't fit the
+        pattern; the analyzer/human adjudicates those manually.
+    """
+    if not falsifier_text or not str(falsifier_text).strip():
+        return None
+    clauses = _FALSIFIER_CLAUSE_RE.findall(falsifier_text)
+    if not clauses:
+        return None
+    results: list[bool] = []
+    for axis, direction_word, count_s in clauses:
+        try:
+            count = int(count_s)
+        except (TypeError, ValueError):
+            return None
+        raw_dir, streak = _falsifier_clause_axis_state(
+            axis, growth_axis, inflation_axis, policy_axis)
+        if not raw_dir:
+            return None   # axis block absent/unreadable — indeterminate, not False
+        results.append(raw_dir == direction_word.lower() and streak >= count)
+    return all(results)
 
 # Fallback config if risk-limits.json lacks an override_protocol block (mirror that file).
 OVERRIDE_DEFAULTS = {
     "max_magnitude_pp": 15.0,
     "re_risk_min_evidence": 2,
     "gap_band_pp": 5.0,
+    "relative_band_frac": 0.5,
 }
 
 _VALID_DIRECTIONS = ("de_risk", "re_risk")

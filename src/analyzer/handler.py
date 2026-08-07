@@ -410,7 +410,11 @@ def _flagged_sleeves_addendum(recon_sleeves: dict) -> str:
     tranche move and that band enforcement could not synthesize (a re-risk
     shortfall is never auto-traded, spec §6 asymmetry: e.g. a legacy exit slow-
     walked below tranche pace with no override filed). Unconditional, no gate —
-    empty string when nothing is flagged.
+    empty string when nothing is flagged. Deliberately excludes
+    `rationed_by_envelope` sleeves (2026-08-06 audit B6) — a re-risk shortfall
+    that already covers its pro-rata share of the session's aggregate re-risk
+    envelope is rationed by pacing/cash, not a discretionary hold, and must not
+    carry the "file an honest override" instruction below.
     """
     flagged = {
         sym: e for sym, e in (recon_sleeves or {}).items()

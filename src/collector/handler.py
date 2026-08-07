@@ -15,6 +15,7 @@ from shared.storage import (
     read_snapshot,
     read_trades,
     upsert_entity,
+    write_json_blob,
     write_perf_quadrant_config,
     write_perf_series,
     write_snapshot,
@@ -48,6 +49,7 @@ from shared.quadrants import (
 )
 from flex.regime import resolve_quadrant
 from shared.reference_execution import effective_execution_config
+from shared.overrides import evaluate_falsifier
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +90,7 @@ _DIVERGENCE_DEFAULTS = {
     "dollar_vs_intl_tilt": {"intl_heavy_pct": 20.0, "intl_light_pct": 8.0},
     "leading_vs_lagging_growth": {"diffusion_threshold": 0.3},
     "market_vs_macro_quadrant": {"basket_momentum_min_pct": 2.0, "vote_majority_threshold": 0.5},
+    "market_implied_quadrant": {"confidence_min_populated": {"low": 2, "medium": 3, "high": 5}},
     "staleness_days": 7,
 }
 
@@ -128,6 +131,23 @@ _RISK_LIMITS_DEFAULTS = {
     },
     "quadrant_performance": {
         "suspect_after_sessions": 10,
+    },
+    "bond_signals": {
+        "hy_oas_trend_bp": 10.0,
+    },
+    "labor_leading": {
+        "forward_softening_gap_k": 20.0,
+    },
+    "market_shock": {
+        "news_baseline_min_sessions": 10,
+        "news_baseline_window_sessions": 20,
+        "news_z_watch": 1.5,
+        "news_z_elevated": 2.5,
+        "news_z_acute": 3.5,
+        "persistent_theme_sessions": 10,
+        "persistent_theme_hits_floor": 15.0,
+        "dxy_news_corroboration_hits": 8,
+        "no_baseline_watch_floor_hits": 5,
     },
 }
 
@@ -174,6 +194,17 @@ _MA_LONG_DAYS = 200
 _MA_SHORT_DAYS = 50
 # Pure-international subset used for MA-cross signals against SPY.
 _INTL_RATIO_TICKERS = ["IDMO", "AIA", "IEMG", "EWJ"]
+# FRED deep-history fetch depth for the rotation/bond-signals pre-computes —
+# tied to _ROTATION_WINDOW_DAYS (the widest consumer) + a calendar-gap buffer
+# (weekends/holidays/occasional missing prints) rather than a bare literal
+# (2026-08-06 audit B4).
+_MACRO_DEEP_FETCH_DAYS = _ROTATION_WINDOW_DAYS + 30
+# Days DTWEXBGS's latest observation may lag `today` before the FX-pairs
+# dollar_proxy fallback kicks in. Boundary fixed 2026-08-06 (audit B4): was
+# `> 5`, which left the fallback dark at exactly 5 days stale; also now fires
+# when the DXY cadence can't be evaluated at all (no observation whatsoever,
+# not just a stale one).
+_DXY_STALE_FALLBACK_DAYS = 5
 
 # Market shock detection: short-horizon move windows and keyword sets.
 # The analyzer uses the resulting shock_level to optionally override the 60d
@@ -574,6 +605,45 @@ def _build_price_universe(
     ))
 
 
+def _correct_10x_ingestion_error(
+    price_now: float, high_52: float, low_52: float,
+) -> tuple[float, bool, str]:
+    """R1 (2026-08-06 audit) — ingestion-level 10x sanity CORRECTION, applied
+    BEFORE the quarantine backstop below. A feed off by a clean factor of ~10x
+    (a decimal-place / cents-vs-dollars mixup) against its OWN 52-week range
+    can be corrected at the source instead of merely re-quarantining the same
+    bad print every session forever (observed: MU printing ~10x its real
+    price every session, never corrected). Only corrects when the RESULT
+    lands back inside a generous band around the 52-week range — never
+    guesses a correction that doesn't itself look sane.
+
+    Returns ``(price, corrected, note)``; ``note`` is ``""`` when uncorrected.
+    Never raises — any bad input just returns the original price uncorrected.
+    """
+    if high_52 <= 0 or low_52 <= 0 or price_now <= 0:
+        return price_now, False, ""
+    mid = (high_52 + low_52) / 2.0
+    if mid <= 0:
+        return price_now, False, ""
+    ratio = price_now / mid
+    sane_lo, sane_hi = low_52 * 0.5, high_52 * 1.5
+    if 7.0 <= ratio <= 13.0:
+        candidate = price_now / 10.0
+        if sane_lo <= candidate <= sane_hi:
+            return candidate, True, (
+                f"price {price_now:.2f} is ~10x the 52-wk range midpoint {mid:.2f} — "
+                f"corrected to {candidate:.2f} at ingestion"
+            )
+    elif 0.07 <= ratio <= 0.13:
+        candidate = price_now * 10.0
+        if sane_lo <= candidate <= sane_hi:
+            return candidate, True, (
+                f"price {price_now:.2f} is ~1/10th the 52-wk range midpoint {mid:.2f} — "
+                f"corrected to {candidate:.2f} at ingestion"
+            )
+    return price_now, False, ""
+
+
 def _quarantine_flex_price(
     profile: dict,
     prices: dict,
@@ -584,10 +654,14 @@ def _quarantine_flex_price(
     """Task E (F7): structural price-sanity guard for flex candidates.
 
     Returns (quarantined: bool, reason: str).
-    Quarantine when:
-      1. Price is outside the symbol's 52-week high/low range by > range_pct, OR
-      2. Price moved > single_day_move_pct vs prior snapshot EOD without a corroborating
-         news hit in company_news for that symbol.
+    First applies the R1 (2026-08-06 audit) 10x ingestion CORRECTION — when it
+    fires, ``prices[sym]["c"]`` and ``profile`` are updated in place (the fix
+    at the SOURCE) and the corrected price feeds the checks below. Quarantine
+    (the backstop, unchanged) fires when:
+      1. Price (post-correction) is outside the symbol's 52-week high/low
+         range by > range_pct, OR
+      2. Price moved > single_day_move_pct vs prior snapshot EOD without a
+         corroborating news hit in company_news for that symbol.
 
     Never raises — returns (False, "") on any input error.
     """
@@ -606,12 +680,23 @@ def _quarantine_flex_price(
     except (TypeError, ValueError):
         return False, ""
 
-    # --- Gate 1: 52-week range check ----------------------------------------
     try:
         high_52 = float(profile.get("yearHigh") or 0)
         low_52 = float(profile.get("yearLow") or 0)
     except (TypeError, ValueError):
         high_52 = low_52 = 0.0
+
+    # --- Gate 0: 10x ingestion correction (source fix, before quarantine) ---
+    corrected_price, was_corrected, correction_note = _correct_10x_ingestion_error(
+        price_now, high_52, low_52)
+    if was_corrected:
+        prices[sym]["c"] = corrected_price
+        profile["price_corrected_10x"] = True
+        profile["price_correction_note"] = correction_note
+        logger.warning("Flex candidate %s: %s", sym, correction_note)
+        price_now = corrected_price
+
+    # --- Gate 1: 52-week range check (backstop) ------------------------------
     if high_52 > 0 and low_52 > 0:
         # Allow a range_pct% overshoot beyond either bound before quarantining.
         if price_now > high_52 * (1 + range_pct / 100.0):
@@ -1410,6 +1495,74 @@ def _build_override_record() -> dict:
     return _aggregate_override_record(query_entities("OverrideHistory"))
 
 
+# Filed overrides older than this are never surfaced as "pending" — an
+# un-graded row this old more likely reflects a Phase-5 stamping gap than a
+# live adjudication the analyst still owes (2026-08-06 audit M1).
+_PRIOR_OVERRIDE_LOOKBACK_DAYS = 60
+
+
+def _build_prior_overrides_pending(
+    today: str, growth_axis: dict, inflation_axis: dict, policy_axis: dict,
+) -> list[dict]:
+    """Still-live filed overrides the analyzer must explicitly adjudicate this
+    session (2026-08-06 audit M1) — closes the seam where 08-04 filed a de-risk
+    TLT hold with a dated falsifier, and 08-05 sold TLT to the floor without
+    ever engaging with whether that falsifier had actually fired.
+
+    A prior override is "pending" while: it was ACCEPTED or DOWNSIZED (a
+    rejected record authorizes nothing, so there is nothing to adjudicate),
+    Phase 5's stamper has not yet graded it (``outcome_status`` still empty —
+    once graded it is a closed matter, not a live one), and it was filed within
+    ``_PRIOR_OVERRIDE_LOOKBACK_DAYS``. Each entry echoes the falsifier verbatim,
+    a best-effort deterministic ``falsifier_met`` (``shared/overrides.py::
+    evaluate_falsifier`` — None when the free-text falsifier doesn't parse,
+    never a fabricated verdict), and the current axis raw_direction/raw_streak
+    the evaluation used, so the analyzer/human can adjudicate an unparseable
+    falsifier from the same numbers this function looked at.
+
+    Non-fatal by construction (caller wraps in try/except); a table-query
+    failure surfaces as an empty list, never blocks the snapshot.
+    """
+    rows = query_entities("OverrideHistory", "layer eq 'override'")
+    cutoff = (date.fromisoformat(today) - timedelta(days=_PRIOR_OVERRIDE_LOOKBACK_DAYS)).isoformat()
+
+    out: list[dict] = []
+    for r in rows:
+        if r.get("outcome") not in ("accepted", "downsized"):
+            continue
+        if r.get("outcome_status"):
+            continue   # already graded by Phase 5 — resolved, not pending
+        filed = str(r.get("recommended_at") or "")[:10]
+        if not filed or filed < cutoff or filed >= today:
+            continue
+        falsifier = r.get("falsifier") or ""
+        met = evaluate_falsifier(falsifier, growth_axis, inflation_axis, policy_axis)
+        out.append({
+            "sleeve": r.get("sleeve"),
+            "direction": r.get("direction"),
+            "filed_date": filed,
+            "falsifier": falsifier,
+            "falsifier_date": r.get("falsifier_date"),
+            "falsifier_met": met,
+            "current_axis_state": {
+                "growth": {
+                    "raw_direction": (growth_axis or {}).get("raw_direction"),
+                    "raw_streak": (growth_axis or {}).get("raw_streak"),
+                },
+                "inflation": {
+                    "raw_direction": (inflation_axis or {}).get("raw_direction"),
+                    "raw_streak": (inflation_axis or {}).get("raw_streak"),
+                },
+                "policy": {
+                    "raw_direction": (policy_axis or {}).get("raw_stance"),
+                    "raw_streak": (policy_axis or {}).get("raw_streak"),
+                },
+            },
+        })
+    out.sort(key=lambda x: x["filed_date"], reverse=True)
+    return out
+
+
 def run() -> None:
     today = date.today().isoformat()
     logger.info("=== Collector starting for %s ===", today)
@@ -1672,9 +1825,9 @@ def run() -> None:
     macro_data = fred.get_all_series(list(macro_meta.keys()))
     # Series that need deeper history for the rotation + bond-signals pre-compute
     # (get_all_series only fetches the latest 5 observations per series).
-    macro_data["DTWEXBGS"] = fred.get_series_latest("DTWEXBGS", limit=90)
-    macro_data["DGS2"]     = fred.get_series_latest("DGS2",     limit=90)
-    macro_data["DFF"]      = fred.get_series_latest("DFF",      limit=90)
+    macro_data["DTWEXBGS"] = fred.get_series_latest("DTWEXBGS", limit=_MACRO_DEEP_FETCH_DAYS)
+    macro_data["DGS2"]     = fred.get_series_latest("DGS2",     limit=_MACRO_DEEP_FETCH_DAYS)
+    macro_data["DFF"]      = fred.get_series_latest("DFF",      limit=_MACRO_DEEP_FETCH_DAYS)
     # Bond-signals pre-compute needs ~90d for percentiles + 4w deltas.
     for _bond_sid in (
         "DGS10", "DGS30", "DGS3MO", "T10Y2Y", "T10Y3M",
@@ -1690,6 +1843,10 @@ def run() -> None:
     for _labor_sid in ("PAYEMS", "UNRATE", "CES0500000003", "JTSJOL",
                        "CIVPART", "SAHMREALTIME"):
         macro_data[_labor_sid] = fred.get_series_latest(_labor_sid, limit=24)
+    # O3 (2026-08-06 audit): ADP private payrolls — a LEADING labor signal
+    # (available days before BLS PAYEMS). Never overwrites the PAYEMS
+    # scorecard; see _build_labor_leading.
+    macro_data["NPPTTL"] = fred.get_series_latest("NPPTTL", limit=24)
     # Inflation pre-compute (quadrant inflation axis): monthly series need >=13 obs
     # so the analyzer can compute YoY and the 3-month annualized direction (the
     # realized-CPI/PCE read that governs the regime label over forward breakevens).
@@ -1809,6 +1966,10 @@ def run() -> None:
         labor_signals.get("payrolls", {}).get("delta_3m_avg_k"),
     )
 
+    # News-hits trailing baseline (2026-08-06 audit B3) — persisted so the
+    # z-score has a real history to compare against across runs.
+    _news_hist_raw = read_json_blob("market-shock", "news-hits-history.json")
+    _news_hist: list[dict] = _news_hist_raw if isinstance(_news_hist_raw, list) else []
     market_shock = _build_market_shock(
         fmp=fmp,
         macro_data=macro_data,
@@ -1817,20 +1978,50 @@ def run() -> None:
         stock_news=stock_news,
         company_news=company_news,
         bond_signals=bond_signals,
+        news_hits_history=_news_hist,
     )
     logger.info(
-        "Market shock: level=%s, spy_1d_z=%s, news_hits=%s",
-        market_shock.get("shock_level"),
+        "Market shock: level=%s (price=%s news=%s), spy_1d_z=%s, news_hits=%s news_z=%s",
+        market_shock.get("shock_level"), market_shock.get("price_level"),
+        market_shock.get("news_level"),
         market_shock.get("spy", {}).get("return_1d_zscore"),
-        market_shock.get("news_hits_total"),
+        market_shock.get("news_hits_total"), market_shock.get("news_hits_zscore"),
     )
+    try:
+        _dominant_cat = (
+            max(market_shock["news_hits_by_category"], key=lambda c: market_shock["news_hits_by_category"][c])
+            if market_shock.get("news_hits_total", 0) > 0 else None
+        )
+        _news_hist_window = int(
+            (_load_risk_limits().get("market_shock") or {}).get("news_baseline_window_sessions", 20))
+        _news_hist_updated = [h for h in _news_hist if h.get("date") != today]
+        _news_hist_updated.append({
+            "date": today,
+            "total_hits": market_shock.get("news_hits_total", 0),
+            "hits_by_category": market_shock.get("news_hits_by_category", {}),
+            "dominant_category": _dominant_cat,
+        })
+        _news_hist_updated = _news_hist_updated[-_news_hist_window:]
+        write_json_blob("market-shock", "news-hits-history.json", _news_hist_updated)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not persist news-hits history (non-fatal)")
 
     # --- Quadrant axes (deterministic; analyzer ECHOES these, see prompt) ----
     # Growth + inflation direction are the two axes that decide the quadrant. They
     # were previously left to the LLM on raw macro.data — the discretion point where
     # it rationalized its prior label. Now pre-computed like bond/labor signals.
     growth_axis_raw = _build_growth_axis(macro_data)
-    inflation_axis_raw = _build_inflation_axis(macro_data)
+    # O2 (2026-08-06 audit): FRED's DCOILWTICO/DCOILBRENTEU run 8-9d stale every
+    # session — on the exact channel that can flip the inflation axis to
+    # "rising". USO (a liquid, daily-traded oil ETF) is fetched as a fresher
+    # trend proxy; _build_inflation_axis falls back to FRED when it's
+    # unavailable/thin. One extra FMP call, well within the 250/day budget.
+    try:
+        _oil_proxy_cache = _close_by_date(fmp, "USO")
+    except Exception:  # noqa: BLE001
+        logger.debug("Inflation axis: USO oil-proxy fetch failed (non-fatal)")
+        _oil_proxy_cache = {}
+    inflation_axis_raw = _build_inflation_axis(macro_data, _oil_proxy_cache)
 
     # Session 2026-07-28 (Task A, decision D-2): N=2 confirmation on the CONSUMED
     # `direction` field — a label change (any value, including flat) only reaches
@@ -1934,9 +2125,12 @@ def run() -> None:
     # new leading_vs_lagging_growth divergence and generalises transition_watch.
     # Fetch historical closes for market-derived ratio signals (XLY, CPER, GLD, XLP)
     # — 4 extra FMP calls; within the 250/day budget (see PR body).
+    # Hoisted above the try (2026-08-06 audit B1/B2) so it's always defined even
+    # if leading_growth's build fails before populating it — market_implied_quadrant
+    # below reuses the SAME cache for its copper/gold and XLY/XLP votes.
+    _lg_close_cache: dict[str, dict[str, float]] = {}
     leading_growth: dict = {"available": False}
     try:
-        _lg_close_cache: dict[str, dict[str, float]] = {}
         for _lg_sym in ("XLY", "CPER", "GLD", "XLP"):
             try:
                 _lg_close_cache[_lg_sym] = _close_by_date(fmp, _lg_sym)
@@ -1955,11 +2149,13 @@ def run() -> None:
     # --- Task B (#18): market_implied_quadrant --------------------------------
     # Built BEFORE divergences — loads the perf series from blob directly so it
     # doesn't depend on the in-memory `series` (which is built post-reference_weights).
-    # Prices injected for the copper/gold and XLY/XLP votes.
+    # Prices injected for the copper/gold and XLY/XLP votes; close_cache reuses the
+    # leading_growth fetch above (2026-08-06 audit B1/B2 — zero extra FMP calls).
     market_implied_quadrant: dict = {"available": False}
     try:
         market_implied_quadrant = _build_market_implied_quadrant(
-            [], macro_data, bond_signals, regional_rotation, today, prices=prices
+            [], macro_data, bond_signals, regional_rotation, today, prices=prices,
+            close_cache=_lg_close_cache,
         )
         logger.info(
             "Market implied quadrant: implied=%s confidence=%s growth=%s inflation=%s",
@@ -1971,15 +2167,19 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Market implied quadrant build failed (non-fatal)")
 
-    # --- Task B (#18) sub-item: daily dollar proxy (when DTWEXBGS stale >5d) --
+    # --- Task B (#18) sub-item: daily dollar proxy (DTWEXBGS stale/unavailable) --
+    # 2026-08-06 audit B4: fires at >=_DXY_STALE_FALLBACK_DAYS (was `> 5`, dark
+    # at exactly 5d stale) OR when dxy_stale is None — DTWEXBGS returning ZERO
+    # usable observations (dxy_latest_date never set) previously left the DXY
+    # signal blind on BOTH the primary and fallback paths simultaneously.
     dxy_date = (regional_rotation or {}).get("dxy_latest_date")
     dxy_stale = _days_stale(dxy_date, today)
     dollar_proxy: dict = {"available": False}
     try:
-        if dxy_stale is not None and dxy_stale > 5:
+        if _should_use_dollar_proxy(dxy_stale):
             dollar_proxy = _daily_dollar_proxy(macro_data, today)
             logger.info(
-                "Dollar proxy (DTWEXBGS %dd stale): available=%s direction=%s",
+                "Dollar proxy (DTWEXBGS stale=%s): available=%s direction=%s",
                 dxy_stale, dollar_proxy.get("available"), dollar_proxy.get("proxy_direction"),
             )
     except Exception:  # noqa: BLE001
@@ -2292,6 +2492,21 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Override record build failed (non-fatal)")
 
+    # --- 2026-08-06 audit M1: prior_overrides_pending (falsifier adjudication) ---
+    prior_overrides_pending: list[dict] = []
+    try:
+        prior_overrides_pending = _build_prior_overrides_pending(
+            today, growth_axis, inflation_axis, policy_axis,
+        )
+        if prior_overrides_pending:
+            logger.info(
+                "Prior overrides pending: %d (%s)",
+                len(prior_overrides_pending),
+                [(p["sleeve"], p["falsifier_met"]) for p in prior_overrides_pending],
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Prior overrides pending build failed (non-fatal)")
+
     # --- Session 2026-07-15, Task A1: execution_review (fill/failure visibility) --
     # Non-fatal. Alpaca-only, FMP budget untouched. See _build_execution_review's
     # docstring — this is the fix for the MU incident's invisibility, not the MU
@@ -2405,6 +2620,7 @@ def run() -> None:
         "quadrant_performance": quadrant_performance,
         "track_record": track_record,
         "override_record": override_record,
+        "prior_overrides_pending": prior_overrides_pending,
         "execution_review": execution_review,
         "execution_config": execution_config,
         "series_deltas": series_deltas,
@@ -2781,6 +2997,20 @@ def _build_day_pl_zero_watch(
     anomaly. Omitting ``prior_qty`` (the default) preserves the original
     unconditional delta-only behavior — no share-count data means no resize
     determination is possible.
+
+    Two INDEPENDENT trigger paths (2026-08-06 audit B7 — before this, the price-
+    identity signal only ever fired as a resize-suppression OVERRIDE, still
+    gated behind the outer ``abs(delta) > threshold_usd`` check; a stuck feed on
+    a SMALL-delta position — 08-05's VDE, a ~4.1% position with $0.00 day P/L
+    the same session COWZ was flagged — slipped through entirely):
+      1. ``delta_trigger`` — the original mechanism: day_pl==0 and
+         ``abs(total_pl_delta) > threshold_usd``.
+      2. ``identity_trigger`` — day_pl==0 AND ``lastday_price == current_price``
+         AND qty>0, completely INDEPENDENT of total_pl_delta's magnitude (or
+         even its availability).
+    A position qualifies via EITHER path. Resize-suppression applies ONLY to a
+    delta-only qualifier (``delta_trigger and not identity_trigger``) — the
+    identity path, being independent of delta, is never suppressed by a resize.
     """
     if not prior_total_pl:
         return {"available": False, "reason": "no prior snapshot total P/L available", "flagged": []}
@@ -2796,36 +3026,39 @@ def _build_day_pl_zero_watch(
             continue
         if day_pl != 0.0:
             continue
-        prior = prior_total_pl.get(sym)
-        if prior is None:
-            continue
+
         try:
             total_pl = float(p.get("unrealized_pl") or 0)
         except (TypeError, ValueError):
             continue
-        delta = round(total_pl - prior, 2)
-        if abs(delta) <= threshold_usd:
-            continue
+        prior = prior_total_pl.get(sym)
+        delta = round(total_pl - prior, 2) if prior is not None else None
+        delta_trigger = delta is not None and abs(delta) > threshold_usd
 
         try:
             current_qty = float(p.get("qty")) if p.get("qty") is not None else None
         except (TypeError, ValueError):
             current_qty = None
+        try:
+            price_frozen = float(p.get("lastday_price")) == float(p.get("current_price"))
+        except (TypeError, ValueError):
+            price_frozen = False
+        identity_trigger = price_frozen and current_qty is not None and current_qty > 0
+
+        if not (delta_trigger or identity_trigger):
+            continue
+
         prior_qty_val = (prior_qty or {}).get(sym)
         resized = (
             prior_qty_val is not None and current_qty is not None
             and current_qty != prior_qty_val
         )
-        try:
-            price_frozen = float(p.get("lastday_price")) == float(p.get("current_price"))
-        except (TypeError, ValueError):
-            price_frozen = False
 
-        # Task C2: a resize fully (or partly) explains the total-P/L move on its
-        # own — do not flag on total_pl_delta ALONE in that case. The frozen-
-        # quote price-identity signal is a separate, genuine anomaly and must
+        # Task C2 (unchanged): a resize fully (or partly) explains the total-P/L
+        # move on its own — do not flag on total_pl_delta ALONE in that case.
+        # The frozen-quote identity signal is independent of delta and must
         # still surface even on a resized position (annotated, not suppressed).
-        if resized and not price_frozen:
+        if delta_trigger and not identity_trigger and resized:
             continue
 
         flagged.append({
@@ -2841,8 +3074,23 @@ def _build_day_pl_zero_watch(
             "prior_qty": prior_qty_val,
             "current_qty": current_qty,
             "position_resized": resized,
+            "identity_trigger": identity_trigger,
         })
-    return {"available": True, "flagged": flagged}
+
+    out: dict = {"available": True, "flagged": flagged}
+    if len(flagged) > 1:
+        # 2026-08-06 audit B7: multiple tickers sharing the identical frozen-
+        # quote symptom in one session most likely reflects a shared upstream
+        # feed issue, not N independent per-ticker anomalies — collapse to one
+        # snapshot-wide note (full per-ticker detail stays in `flagged` below).
+        symbols = [f["symbol"] for f in flagged]
+        out["multi_symbol_note"] = (
+            f"{len(flagged)} positions ({', '.join(symbols)}) show a frozen day-P/L "
+            "price mark this session (unrealized_intraday_pl == $0.00, "
+            "lastday_price == current_price) — likely a shared upstream feed issue, "
+            "not independent per-ticker anomalies. See flagged[] for per-ticker detail."
+        )
+    return out
 
 
 # The freshness-set macro series the analyzer actually cites in cadence/new-print
@@ -3540,6 +3788,21 @@ def _build_bond_signals(macro_data: dict) -> dict:
     hy_pct = _percentile(hy, hy_latest)
     ig_pct = _percentile(ig, ig_latest)
 
+    # trend_4w: coarse tightening/widening/flat label off the 20d (~4w) HY OAS
+    # delta — consumed by _build_leading_growth and _build_market_implied_quadrant.
+    # 2026-08-06 audit B1: this key was referenced by both but never actually set
+    # here (mismatch against the raw delta_20d_bp field), so the HY-OAS vote read
+    # None in both consumers every session.
+    _hy_trend_bp = float((_load_risk_limits().get("bond_signals") or {}).get("hy_oas_trend_bp", 10.0))
+    hy_trend_4w: str | None = None
+    if hy_d20 is not None:
+        if hy_d20 <= -_hy_trend_bp:
+            hy_trend_4w = "tightening"
+        elif hy_d20 >= _hy_trend_bp:
+            hy_trend_4w = "widening"
+        else:
+            hy_trend_4w = "flat"
+
     credit_reasons: list[str] = []
     if hy_d20 is not None and hy_d20 >= 50.0:
         credit_reasons.append(f"HY OAS +{hy_d20}bp over 4w (>=+50bp)")
@@ -3554,6 +3817,7 @@ def _build_bond_signals(macro_data: dict) -> dict:
             "delta_5d_bp": _delta_bp(hy, 5),
             "delta_20d_bp": hy_d20,
             "pct_rank_90d": hy_pct,
+            "trend_4w": hy_trend_4w,
         },
         "ig_oas": {
             "latest": ig_latest,
@@ -3686,6 +3950,48 @@ def _build_bond_signals(macro_data: dict) -> dict:
     return out
 
 
+def _build_labor_leading(macro_data: dict) -> dict:
+    """O3 (2026-08-06 audit) — deterministic LEADING labor sub-signal: ADP
+    private payrolls (FRED ``NPPTTL``), surfaced explicitly as a forward-risk
+    flag. This is a LEADING indicator (available days before BLS PAYEMS) and
+    NEVER overwrites the binding PAYEMS scorecard in ``_build_labor_signals``
+    — it is additive context only.
+
+    Motivating incident: 2026-08-05's ADP miss (+44K vs +70K consensus) — the
+    session's most important forward labor signal — was caught only because
+    the analyzer happened to parse it out of the forex-news feed; there was no
+    deterministic field for it at all.
+
+    Degrades gracefully (``available: False``) when ``NPPTTL`` has fewer than
+    2 usable observations (series absent, renamed, or not yet fetched) —
+    never a crash, never a fabricated reading.
+    """
+    vals = _macro_vals(macro_data, "NPPTTL")   # newest-first, thousands of persons
+    if len(vals) < 2:
+        return {"available": False, "reason": "NPPTTL (ADP) series absent or insufficient history"}
+
+    delta_1m_k = round(vals[0] - vals[1], 1)
+    delta_3m_avg_k = round((vals[0] - vals[3]) / 3.0, 1) if len(vals) > 3 else None
+
+    gap_k = float((_load_risk_limits().get("labor_leading") or {}).get("forward_softening_gap_k", 20.0))
+    forward_softening_flag = (
+        delta_3m_avg_k is not None and delta_1m_k < delta_3m_avg_k - gap_k
+    )
+
+    return {
+        "available": True,
+        "source": "FRED_NPPTTL",
+        "latest_k": round(vals[0], 0),
+        "delta_1m_k": delta_1m_k,
+        "delta_3m_avg_k": delta_3m_avg_k,
+        "forward_softening_flag": forward_softening_flag,
+        "note": (
+            "ADP private-payrolls LEADING signal (forward risk only) — never overwrites "
+            "the binding BLS-PAYEMS scorecard; feeds the labor read as additive context."
+        ),
+    }
+
+
 def _build_labor_signals(macro_data: dict) -> dict:
     """Pre-compute a four-signal labor-market scorecard for the analyzer.
 
@@ -3719,6 +4025,7 @@ def _build_labor_signals(macro_data: dict) -> dict:
         "unemployment": {},
         "wages":        {},
         "scorecard":    {},
+        "leading":      _build_labor_leading(macro_data),
         "notes": (
             "Labor leads the cycle. ICSA 4w rising >10% vs 26w avg, "
             "SAHMREALTIME >=0.5, or PAYEMS 3m avg <100k are early-warning "
@@ -4278,7 +4585,23 @@ def _build_growth_axis(macro_data: dict) -> dict:
     }
 
 
-def _build_inflation_axis(macro_data: dict) -> dict:
+def _fresh_oil_20d_pct(close_cache: dict[str, float] | None) -> tuple[float | None, str | None]:
+    """20-trading-day % change from a ``{date: close}`` cache (e.g. USO) — the
+    O2 (2026-08-06 audit) fresher-oil-proxy source for the inflation-axis energy
+    overlay. Returns ``(pct_change, as_of_date)``; ``(None, None)`` when the
+    cache is empty or thinner than 21 trading days."""
+    if not close_cache:
+        return None, None
+    dates = sorted(close_cache, reverse=True)
+    if len(dates) <= 20:
+        return None, None
+    latest, past = close_cache[dates[0]], close_cache[dates[20]]
+    if not past:
+        return None, dates[0]
+    return round((latest / past - 1.0) * 100.0, 1), dates[0]
+
+
+def _build_inflation_axis(macro_data: dict, oil_proxy_close_cache: dict[str, float] | None = None) -> dict:
     """Deterministic inflation-direction read — the quadrant *inflation axis*.
 
     Realized core (PCE-first, then CPI) governs via the 3-month-annualized-vs-YoY
@@ -4288,10 +4611,18 @@ def _build_inflation_axis(macro_data: dict) -> dict:
     oil spike), the headline is about to roll over -> do NOT force 'rising'; classify
     by core and flag the pending disinflation. Breakevens are secondary (expectations).
 
-    NOTE: the energy overlay keys off the *actual oil price trend* (DCOILWTICO /
-    DCOILBRENTEU 20-session change), NOT the news-keyword ``market_shock`` level — the
-    shock detector is a headline-count signal prone to false positives, and binding
-    realized-inflation direction to it would hard-wire stagflation off a news flurry.
+    NOTE: the energy overlay keys off the *actual oil price trend*, NOT the
+    news-keyword ``market_shock`` level — the shock detector is a headline-count
+    signal prone to false positives, and binding realized-inflation direction to
+    it would hard-wire stagflation off a news flurry.
+
+    O2 (2026-08-06 audit): FRED's DCOILWTICO/DCOILBRENTEU run 8-9d stale every
+    session — on the exact channel that can flip this axis to "rising".
+    ``oil_proxy_close_cache`` (optional, a liquid daily-traded proxy like USO,
+    fetched by the caller via ``_close_by_date``) sources the 20-session trend
+    when available (>20 trading days of history); FRED is the fallback when it
+    isn't. The overlay RULE is unchanged either way — it keys on the price
+    trend, never the news-shock level.
     """
     def _yoy(sid: str, base: int = 0) -> float | None:
         v = _macro_vals(macro_data, sid)
@@ -4304,6 +4635,10 @@ def _build_inflation_axis(macro_data: dict) -> dict:
     def _oil_20d_pct(sid: str) -> float | None:
         v = _macro_vals(macro_data, sid)   # newest-first
         return round((v[0] / v[20] - 1) * 100, 1) if len(v) > 20 else None
+
+    def _bp_delta_20d(sid: str) -> float | None:
+        v = _macro_vals(macro_data, sid)   # newest-first, in percentage points
+        return round((v[0] - v[20]) * 100.0, 1) if len(v) > 20 else None
 
     head_yoy = _yoy("CPIAUCSL")
     head_yoy_prev = _yoy("CPIAUCSL", base=1)
@@ -4318,7 +4653,13 @@ def _build_inflation_axis(macro_data: dict) -> dict:
     )
     oil_wti_20d = _oil_20d_pct("DCOILWTICO")
     oil_brent_20d = _oil_20d_pct("DCOILBRENTEU")
-    oil_chgs = [c for c in (oil_wti_20d, oil_brent_20d) if c is not None]
+    oil_proxy_20d, oil_proxy_as_of = _fresh_oil_20d_pct(oil_proxy_close_cache)
+    if oil_proxy_20d is not None:
+        oil_trend_source = "USO_proxy"
+        oil_chgs = [oil_proxy_20d]
+    else:
+        oil_trend_source = "fred_futures"
+        oil_chgs = [c for c in (oil_wti_20d, oil_brent_20d) if c is not None]
     oil_rising = bool(oil_chgs) and max(oil_chgs) >= 10.0      # genuine energy push
     oil_falling = bool(oil_chgs) and min(oil_chgs) <= -10.0    # spike reversing
 
@@ -4356,6 +4697,39 @@ def _build_inflation_axis(macro_data: dict) -> dict:
             f"Classified by realized core."
         )
 
+    # --- O1 (2026-08-06 audit): secondary, NON-BINDING breakeven bridge -------
+    # Core CPI/PCE are monthly (60-65d stale for most of the window between
+    # prints) — this promotes the already-fresh breakeven series (T5YIFR/
+    # T5YIE) to an explicit bridge read so the analyzer has SOMETHING current
+    # between prints. Reuses the SAME bp threshold the leading_vs_lagging_
+    # inflation divergence already uses (no new magic number). realized core
+    # still governs `direction` above — this block never touches it.
+    be_5y_delta = _bp_delta_20d("T5YIE")
+    be_10y_delta = _bp_delta_20d("T10YIE")
+    be_5y5y_delta = _bp_delta_20d("T5YIFR")
+    _be_thr = float(
+        (_load_divergence_config().get("leading_vs_lagging_inflation") or {})
+        .get("breakeven_delta_20d_bp", 15.0)
+    )
+    # Prefer the 5y5y forward breakeven (least contaminated by near-term noise,
+    # the same series the leading_vs_lagging_inflation divergence keys on);
+    # fall back to the 5y spot breakeven when 5y5y lacks history.
+    if be_5y5y_delta is not None:
+        bridge_basis, bridge_delta = "breakeven_5y5y", be_5y5y_delta
+    elif be_5y_delta is not None:
+        bridge_basis, bridge_delta = "breakeven_5y", be_5y_delta
+    else:
+        bridge_basis, bridge_delta = None, None
+
+    if bridge_delta is None:
+        bridge_direction = None
+    elif bridge_delta > _be_thr:
+        bridge_direction = "rising"
+    elif bridge_delta < -_be_thr:
+        bridge_direction = "falling"
+    else:
+        bridge_direction = "flat"
+
     return {
         "direction": direction,
         "reason": reason,
@@ -4367,9 +4741,25 @@ def _build_inflation_axis(macro_data: dict) -> dict:
         "core_pce_ann3": core_pce_ann3,
         "oil_wti_20d_pct": oil_wti_20d,
         "oil_brent_20d_pct": oil_brent_20d,
+        "oil_trend_source": oil_trend_source,
+        "oil_proxy_20d_pct": oil_proxy_20d,
+        "oil_proxy_as_of": oil_proxy_as_of,
         "breakeven_5y5y": be_5y5y[0] if be_5y5y else None,
+        "bridge_direction": bridge_direction,
+        "bridge_basis": bridge_basis,
+        "bridge_delta_20d_bp": bridge_delta,
+        "bridge_delta_20d_bp_threshold": _be_thr,
+        "breakeven_5y_delta_20d_bp": be_5y_delta,
+        "breakeven_10y_delta_20d_bp": be_10y_delta,
+        "breakeven_5y5y_delta_20d_bp": be_5y5y_delta,
         "realized_governs": True,
         "note": note,
+        "bridge_note": (
+            "bridge_direction is a SECONDARY, NON-BINDING read off the already-fresh "
+            "breakeven series, meant to bridge the 60-65d gap between monthly core "
+            "CPI/PCE prints — it never overrides `direction`, which realized core "
+            "always governs."
+        ),
     }
 
 
@@ -5839,6 +6229,17 @@ def _days_stale(as_of: str | None, today: str) -> int | None:
         return None
 
 
+def _should_use_dollar_proxy(dxy_stale: int | None) -> bool:
+    """Whether the FX-pairs dollar_proxy fallback should fire (2026-08-06 audit
+    B4). True when DTWEXBGS is >= `_DXY_STALE_FALLBACK_DAYS` calendar days stale
+    OR when its cadence can't be evaluated at all (`dxy_stale is None` — zero
+    usable observations reached `regional_rotation`, so `dxy_latest_date` was
+    never set). Before this fix the trigger was a bare `dxy_stale > 5` — dark at
+    EXACTLY 5 days stale, and dark whenever DTWEXBGS returned no usable
+    observations at all, leaving the DXY signal blind on both paths at once."""
+    return dxy_stale is None or dxy_stale >= _DXY_STALE_FALLBACK_DAYS
+
+
 # ---------------------------------------------------------------------------
 # Task A (FOLLOWUPS #17): Leading-growth composite
 # ---------------------------------------------------------------------------
@@ -5896,6 +6297,40 @@ def _price_return_pct(prices: dict, symbol: str, window_td: int) -> float | None
             except (TypeError, ValueError, ZeroDivisionError):
                 return None
     return None
+
+
+def _ratio_20d_signal(
+    close_cache: dict[str, dict[str, float]],
+    sym_a: str,
+    sym_b: str,
+    window: int = 20,
+    thr_pct: float = 2.0,
+) -> dict:
+    """20-trading-day relative-momentum trend of ``sym_a``/``sym_b`` from a
+    ``{symbol: {date: close}}`` close cache (e.g. CPER/GLD, XLY/XLP).
+
+    Shared by ``_build_leading_growth`` and ``_build_market_implied_quadrant``
+    so the two copper/gold and cyclicals/defensives reads can never drift apart
+    (2026-08-06 audit B1/B2 — before this, market_implied_quadrant read these
+    ratios off the CORE_ROSTER-only perf-series ``closes`` dict, which never
+    contains CPER or XLY, so both votes were structurally always null).
+
+    Returns ``{"direction": "rising"|"falling"|"flat"|None, "pct_change": float|None,
+    "as_of": str|None}``. None when fewer than ``window + 1`` common dates.
+    """
+    a_map = close_cache.get(sym_a) or {}
+    b_map = close_cache.get(sym_b) or {}
+    common = sorted(set(a_map) & set(b_map), reverse=True)
+    if len(common) <= window:
+        return {"direction": None, "pct_change": None, "as_of": common[0] if common else None}
+    try:
+        r_now = a_map[common[0]] / b_map[common[0]]
+        r_then = a_map[common[window]] / b_map[common[window]]
+        pct = (r_now / r_then - 1.0) * 100.0
+    except (ZeroDivisionError, TypeError):
+        return {"direction": None, "pct_change": None, "as_of": common[0]}
+    direction = "rising" if pct > thr_pct else ("falling" if pct < -thr_pct else "flat")
+    return {"direction": direction, "pct_change": round(pct, 2), "as_of": common[0]}
 
 
 def _build_leading_growth(
@@ -6012,45 +6447,22 @@ def _build_leading_growth(
 
     # --- CPER/GLD ratio (copper/gold growth proxy) -- market-derived --------
     # Uses the closes_cache so we don't re-fetch (same data as sleeve scorecard).
-    cper_map = close_cache.get("CPER") or {}
-    gld_map = close_cache.get("GLD") or {}
-    # Compute ratio at each common date then 20d return on the ratio.
-    common_dates = sorted(set(cper_map) & set(gld_map), reverse=True)
-    cg_dir: str | None = None
-    cg_latest: float | None = None
-    if len(common_dates) > 20:
-        try:
-            r_now = cper_map[common_dates[0]] / gld_map[common_dates[0]]
-            r_then = cper_map[common_dates[20]] / gld_map[common_dates[20]]
-            cg_20d = (r_now / r_then - 1.0) * 100.0
-            cg_latest = round(cg_20d, 2)
-            cg_dir = "rising" if cg_20d > 2.0 else ("falling" if cg_20d < -2.0 else "flat")
-        except (ZeroDivisionError, TypeError):
-            pass
-    signals.append({"name": "CPER_GLD_20d", "direction": cg_dir, "as_of": common_dates[0] if common_dates else None,
-                    "latest": cg_latest})
+    # Shared helper (2026-08-06 audit B1/B2) so this can never drift from the
+    # identical read in _build_market_implied_quadrant.
+    cg = _ratio_20d_signal(close_cache, "CPER", "GLD")
+    cg_dir = cg["direction"]
+    signals.append({"name": "CPER_GLD_20d", "direction": cg_dir, "as_of": cg["as_of"],
+                    "latest": cg["pct_change"]})
     if cg_dir == "rising":
         votes_up += 1
     elif cg_dir == "falling":
         votes_down += 1
 
     # --- XLY/XLP ratio (cyclicals vs defensives, 20d) ----------------------
-    xly_map = close_cache.get("XLY") or {}
-    xlp_map = close_cache.get("XLP") or {}
-    common_xl = sorted(set(xly_map) & set(xlp_map), reverse=True)
-    xl_dir: str | None = None
-    xl_latest: float | None = None
-    if len(common_xl) > 20:
-        try:
-            r_now = xly_map[common_xl[0]] / xlp_map[common_xl[0]]
-            r_then = xly_map[common_xl[20]] / xlp_map[common_xl[20]]
-            xl_20d = (r_now / r_then - 1.0) * 100.0
-            xl_latest = round(xl_20d, 2)
-            xl_dir = "rising" if xl_20d > 2.0 else ("falling" if xl_20d < -2.0 else "flat")
-        except (ZeroDivisionError, TypeError):
-            pass
-    signals.append({"name": "XLY_XLP_20d", "direction": xl_dir, "as_of": common_xl[0] if common_xl else None,
-                    "latest": xl_latest})
+    xl = _ratio_20d_signal(close_cache, "XLY", "XLP")
+    xl_dir = xl["direction"]
+    signals.append({"name": "XLY_XLP_20d", "direction": xl_dir, "as_of": xl["as_of"],
+                    "latest": xl["pct_change"]})
     if xl_dir == "rising":
         votes_up += 1
     elif xl_dir == "falling":
@@ -6224,6 +6636,7 @@ def _build_market_implied_quadrant(
     regional_rotation: dict,
     today: str,
     prices: dict | None = None,
+    close_cache: dict[str, dict[str, float]] | None = None,
 ) -> dict:
     """Market-implied quadrant from cross-asset tape momentum (FOLLOWUPS #18).
 
@@ -6238,6 +6651,10 @@ def _build_market_implied_quadrant(
 
     `prices` (optional): today's EOD prices dict — used to extend the series with
     the current day's closes for signals that aren't in perf_series yet.
+    `close_cache` (optional): the SAME `{symbol: {date: close}}` cache
+    `_build_leading_growth` uses for CPER/GLD/XLY/XLP (2026-08-06 audit B1/B2) —
+    the copper/gold and XLY/XLP votes read this, NOT the perf-series `closes`
+    (which only ever contains CORE_ROSTER tickers and never CPER/XLY).
 
     Output: {implied_quadrant, confidence, vote_count, total_votes, votes, basis}.
     Describe-only — never touches reference_weights or regime_gate.
@@ -6262,6 +6679,11 @@ def _build_market_implied_quadrant(
     votes: list[dict] = []
     growth_up_score = 0.0   # positive = growth-favoring (Q1 or Q2)
     infl_up_score = 0.0     # positive = inflation-favoring (Q2 or Q3)
+    # Per-vote sign contributions (2026-08-06 audit B2) — used to detect when
+    # populated votes DISAGREE on an axis (some +, some -), which caps
+    # confidence at 'medium' regardless of populated-vote count.
+    growth_signs: list[float] = []
+    infl_signs: list[float] = []
 
     for window_days, weight in ((20, 0.4), (60, 0.6)):
         idx = _cutoff_idx(window_days)
@@ -6286,6 +6708,8 @@ def _build_market_implied_quadrant(
             def_avg = sum(def_) / len(def_)
             growth_delta = ro_avg - def_avg   # >0 → growth, <0 → stagflation/deflation
             growth_up_score += weight * growth_delta / 10.0   # normalise (baskets ≈ 100)
+            if growth_delta != 0:
+                growth_signs.append(growth_delta)
         # Inflation axis vote: compare inflationary (Q2+Q3) vs deflationary (Q1+Q4).
         inf_ = [v for v in (q2, q3) if v is not None]
         def_lat = [v for v in (q1, q4) if v is not None]
@@ -6294,6 +6718,8 @@ def _build_market_implied_quadrant(
             def_lat_avg = sum(def_lat) / len(def_lat)
             infl_delta = inf_avg - def_lat_avg
             infl_up_score += weight * infl_delta / 10.0
+            if infl_delta != 0:
+                infl_signs.append(infl_delta)
         votes.append({
             "source": f"basket_momentum_{window_days}d",
             "vote": {
@@ -6305,54 +6731,35 @@ def _build_market_implied_quadrant(
         })
 
     # --- Per-signal cross-asset votes (simple up/down flags) ----------------
-    # Copper/gold proxy (from perf-series closes — GLD is in CORE_ROSTER).
-    last_closes = (perf_series[-1] if perf_series else {}).get("closes") or {}
-    prev_closes = {}
-    for pt in reversed(perf_series):
-        if pt["date"] < (perf_series[-1]["date"] if perf_series else ""):
-            prev_closes = pt.get("closes") or {}
-            break
-
-    cper_now = last_closes.get("CPER")
-    gld_now = last_closes.get("GLD")
-    cper_prev = prev_closes.get("CPER")
-    gld_prev = prev_closes.get("GLD")
-    cg_vote = None
-    if cper_now and gld_now and cper_prev and gld_prev:
-        try:
-            ratio_now = float(cper_now) / float(gld_now)
-            ratio_prev = float(cper_prev) / float(gld_prev)
-            cg_pct = (ratio_now / ratio_prev - 1.0) * 100.0
-            if cg_pct > 2.0:
-                cg_vote = "growth"   # copper>gold → risk-on, growth
-                growth_up_score += 0.10
-            elif cg_pct < -2.0:
-                cg_vote = "stagflation"  # gold>copper → defensive
-                growth_up_score -= 0.10
-        except (ZeroDivisionError, TypeError):
-            pass
-    votes.append({"source": "copper_gold_ratio", "vote": cg_vote})
+    # Copper/gold + XLY/XLP read the SAME close_cache _build_leading_growth uses
+    # (2026-08-06 audit B1/B2) — the perf-series `closes` dict only ever carries
+    # CORE_ROSTER tickers and never contains CPER or XLY, so these two votes were
+    # structurally always null before this fix.
+    _cc = close_cache or {}
+    cg = _ratio_20d_signal(_cc, "CPER", "GLD")
+    cg_vote = "growth" if cg["direction"] == "rising" else (
+        "stagflation" if cg["direction"] == "falling" else None)
+    if cg_vote == "growth":
+        growth_up_score += 0.10
+        growth_signs.append(1.0)
+    elif cg_vote == "stagflation":
+        growth_up_score -= 0.10
+        growth_signs.append(-1.0)
+    votes.append({"source": "copper_gold_ratio", "vote": cg_vote,
+                  "as_of": cg["as_of"], "value": cg["pct_change"]})
 
     # XLY/XLP (cyclicals vs defensives)
-    xly_now = last_closes.get("XLY")
-    xlp_now = last_closes.get("XLP")
-    xly_prev = prev_closes.get("XLY")
-    xlp_prev = prev_closes.get("XLP")
-    xl_vote = None
-    if xly_now and xlp_now and xly_prev and xlp_prev:
-        try:
-            ratio_now = float(xly_now) / float(xlp_now)
-            ratio_prev = float(xly_prev) / float(xlp_prev)
-            xl_pct = (ratio_now / ratio_prev - 1.0) * 100.0
-            if xl_pct > 2.0:
-                xl_vote = "growth"
-                growth_up_score += 0.10
-            elif xl_pct < -2.0:
-                xl_vote = "defensive"
-                growth_up_score -= 0.10
-        except (ZeroDivisionError, TypeError):
-            pass
-    votes.append({"source": "XLY_XLP", "vote": xl_vote})
+    xl = _ratio_20d_signal(_cc, "XLY", "XLP")
+    xl_vote = "growth" if xl["direction"] == "rising" else (
+        "defensive" if xl["direction"] == "falling" else None)
+    if xl_vote == "growth":
+        growth_up_score += 0.10
+        growth_signs.append(1.0)
+    elif xl_vote == "defensive":
+        growth_up_score -= 0.10
+        growth_signs.append(-1.0)
+    votes.append({"source": "XLY_XLP", "vote": xl_vote,
+                  "as_of": xl["as_of"], "value": xl["pct_change"]})
 
     # DXY trend (from regional_rotation; inverted for growth — weaker USD → growth/intl)
     dxy_trend = (regional_rotation or {}).get("dxy_tailwind_for_intl")
@@ -6360,9 +6767,11 @@ def _build_market_implied_quadrant(
     if dxy_trend == "tailwind":     # USD weakening → favors intl/risk
         dxy_vote = "growth"
         growth_up_score += 0.05
+        growth_signs.append(1.0)
     elif dxy_trend == "headwind":   # USD strengthening → defensive/Q4
         dxy_vote = "defensive"
         growth_up_score -= 0.05
+        growth_signs.append(-1.0)
     votes.append({"source": "DXY_trend", "vote": dxy_vote})
 
     # Breakevens direction (from bond_signals)
@@ -6373,9 +6782,11 @@ def _build_market_implied_quadrant(
         if float(be_delta) > 15.0:
             be_vote = "reflation"    # rising breakevens → Q2/Q3
             infl_up_score += 0.10
+            infl_signs.append(1.0)
         elif float(be_delta) < -15.0:
             be_vote = "disinflation"  # falling → Q1/Q4
             infl_up_score -= 0.10
+            infl_signs.append(-1.0)
     votes.append({"source": "breakevens_20d", "vote": be_vote,
                   "value": round(be_delta, 1) if be_delta is not None else None})
 
@@ -6386,9 +6797,11 @@ def _build_market_implied_quadrant(
     if hy_trend_val == "tightening":
         hy_vote = "growth"
         growth_up_score += 0.08
+        growth_signs.append(1.0)
     elif hy_trend_val == "widening":
         hy_vote = "defensive"
         growth_up_score -= 0.08
+        growth_signs.append(-1.0)
     votes.append({"source": "HY_OAS_trend", "vote": hy_vote})
 
     # 2s10s steepening (steepening → growth/reflation expectation)
@@ -6401,9 +6814,11 @@ def _build_market_implied_quadrant(
             if delta_2s10 > 0.05:
                 slope_vote = "growth"    # steepening → growth
                 growth_up_score += 0.08
+                growth_signs.append(1.0)
             elif delta_2s10 < -0.05:
                 slope_vote = "defensive"  # flattening → defensive
                 growth_up_score -= 0.08
+                growth_signs.append(-1.0)
         except (TypeError, ValueError):
             pass
     votes.append({"source": "2s10s_steepening", "vote": slope_vote})
@@ -6432,14 +6847,27 @@ def _build_market_implied_quadrant(
     vote_count = sum(1 for v in votes if v.get("vote") is not None)
     total_votes = len(votes)
 
-    if vote_count == 0:
-        confidence = "none"
-    elif abs(growth_up_score) + abs(infl_up_score) > 0.4:
+    # --- Confidence: gated on POPULATED VOTE COUNT + axis agreement ---------
+    # (2026-08-06 audit B2 — replaces the old score-MAGNITUDE gate, under which
+    # a strongly-divergent basket-momentum pair alone — the only 2 of 8 votes
+    # wired correctly pre-B1-fix — could swing confidence to "high" even with
+    # every one of the 6 per-signal cross-asset votes null.) Thresholds are on
+    # vote_count (0-8: both basket windows + the 6 per-signal votes), so 2
+    # populated basket votes alone land exactly at "low", never above it.
+    _miq_cfg = (_load_divergence_config().get("market_implied_quadrant") or {})
+    _thr = _miq_cfg.get("confidence_min_populated") or {"low": 2, "medium": 3, "high": 5}
+    growth_disagree = any(s > 0 for s in growth_signs) and any(s < 0 for s in growth_signs)
+    infl_disagree = any(s > 0 for s in infl_signs) and any(s < 0 for s in infl_signs)
+    disagreement = growth_disagree or infl_disagree
+
+    if vote_count >= float(_thr.get("high", 5)) and not disagreement:
         confidence = "high"
-    elif abs(growth_up_score) + abs(infl_up_score) > 0.15:
+    elif vote_count >= float(_thr.get("medium", 3)):
         confidence = "medium"
-    else:
+    elif vote_count >= float(_thr.get("low", 2)):
         confidence = "low"
+    else:
+        confidence = "none"
 
     return {
         "available": True,
@@ -6447,6 +6875,7 @@ def _build_market_implied_quadrant(
         "implied_growth": implied_growth,
         "implied_inflation": implied_infl,
         "confidence": confidence,
+        "confidence_axis_disagreement": disagreement,
         "growth_score": round(growth_up_score, 3),
         "inflation_score": round(infl_up_score, 3),
         "vote_count": vote_count,
@@ -6579,10 +7008,21 @@ def _build_pnl_decomposition(
         b = _bucket(sym)
         r = realized_by_sym.get(sym, 0.0)
         u = unrealized_by_sym.get(sym, 0.0)
+        # R1 (2026-08-06 audit) — "open" (currently held, even at $0 unrealized)
+        # vs "closed" (realized-only, no live position) per symbol. Without
+        # this, a fully-closed off-roster name's historical realized loss reads
+        # as an ONGOING structural drag from a position that no longer exists
+        # (the -$803 off-roster figure reported alongside 0.00% off-roster
+        # weight — the position was already closed, not currently sized at a
+        # weight that would explain a drag).
+        is_open = sym in unrealized_by_sym
         buckets[b]["realized_usd"] += r
         buckets[b]["unrealized_usd"] += u
-        buckets[b]["symbols"][sym] = {"realized_usd": round(r, 2), "unrealized_usd": round(u, 2),
-                                      "total_usd": round(r + u, 2)}
+        buckets[b]["symbols"][sym] = {
+            "realized_usd": round(r, 2), "unrealized_usd": round(u, 2),
+            "total_usd": round(r + u, 2),
+            "position_status": "open" if is_open else "closed",
+        }
 
     equity = float(paper_account.get("equity") or 0) or 1.0
     result: dict = {"available": True, "inception_date": inception_date,
@@ -6593,11 +7033,13 @@ def _build_pnl_decomposition(
         total = r + u
         # Top 15 contributors by absolute total P&L.
         top15 = sorted(b_data["symbols"].items(), key=lambda kv: abs(kv[1]["total_usd"]), reverse=True)[:15]
+        has_open_position = any(v["position_status"] == "open" for v in b_data["symbols"].values())
         result[b_name] = {
             "realized_usd": round(r, 2),
             "unrealized_usd": round(u, 2),
             "total_usd": round(total, 2),
             "pct_of_equity": round(total / equity * 100.0, 3),
+            "has_open_position": has_open_position,
             "contributors": [{"symbol": sym, **v} for sym, v in top15],
         }
 
@@ -7175,6 +7617,7 @@ def _build_market_shock(
     stock_news: list,
     company_news: dict,
     bond_signals: dict | None = None,
+    news_hits_history: list[dict] | None = None,
 ) -> dict:
     """Detect short-horizon market shocks so the analyzer can override the 60d
     rotation windows and lift tilt limits when a structural event hits.
@@ -7190,6 +7633,21 @@ def _build_market_shock(
                         tilts and immediate de-risking
 
     The analyzer prompt defines exactly what each level unlocks.
+
+    PRICE and NEWS are scored as two INDEPENDENT channels and combined via
+    ``max(price_level, news_level)`` (2026-08-06 audit B3). The news channel
+    used to trigger off absolute daily keyword-hit counts with no baseline, so
+    a persistent multi-week theme (e.g. Iran/Hormuz, 130-147 hits/day) alone
+    pinned shock_level at 3 even on a benign tape (SPY up, VIX down) — that
+    alone lifts the cash-sleeve ceiling to shock3_ceiling (25%) every session.
+    News now scores a Z-SCORE of ``news_hits_total`` against a trailing
+    baseline (``news_hits_history``, caller-supplied — persisted to blob so
+    it survives across runs; see ``run()``), and — the SYMMETRIC guard —
+    whenever the price channel is benign (``price_level <= 1``), news-alone is
+    capped at 2, or at 1 once the SAME dominant news category has persisted
+    >= ``persistent_theme_sessions`` consecutive sessions. Level 3 requires
+    genuine price-channel corroboration. Thresholds in
+    ``risk-limits.json -> market_shock``.
     """
     out: dict = {
         "shock_level": 0,
@@ -7344,12 +7802,7 @@ def _build_market_shock(
     out["news_hits_total"] = total_hits
     out["news_hits_by_category"] = hits_by_cat
     out["news_examples"] = examples
-    if total_hits >= 20:
-        triggers.append(f"News keyword hits {total_hits} (>=20, elevated)")
-    elif total_hits >= 10:
-        triggers.append(f"News keyword hits {total_hits} (>=10, watch+)")
-    elif total_hits >= 5:
-        triggers.append(f"News keyword hits {total_hits} (>=5, watch)")
+    dominant_cat_today = max(hits_by_cat, key=lambda c: hits_by_cat[c]) if total_hits > 0 else None
 
     # --- 4b. Credit-stress signal from bond_signals ------------------------
     credit_stress = False
@@ -7360,35 +7813,100 @@ def _build_market_shock(
             for reason in cs.get("reasons", []):
                 triggers.append(f"Credit stress: {reason}")
 
-    # --- 5. Composite shock level -----------------------------------------
-    level = 0
-    # Acute: extreme tape OR (elevated tape + heavy news cluster)
-    if (spy_1d_z is not None and abs(spy_1d_z) >= 3.5) or total_hits >= 25:
-        level = 3
+    # --- 5. PRICE channel level (hard tape signals only — never news-gated) --
+    _mscfg = (_load_risk_limits().get("market_shock") or {})
+    dxy_corrob_hits = float(_mscfg.get("dxy_news_corroboration_hits", 8))
+
+    price_level = 0
+    if spy_1d_z is not None and abs(spy_1d_z) >= 3.5:
+        price_level = 3
     elif (
         (spy_1d_z is not None and abs(spy_1d_z) >= 2.5)
         or (vix_latest is not None and vix_latest >= 35.0)
         or (vix_1d_pct is not None and vix_1d_pct >= 30.0)
-        or total_hits >= 15
-        or (dxy_5d_pct is not None and abs(dxy_5d_pct) >= 3.0 and total_hits >= 8)
+        or (dxy_5d_pct is not None and abs(dxy_5d_pct) >= 3.0 and total_hits >= dxy_corrob_hits)
     ):
-        level = 2
+        price_level = 2
     elif (
         (spy_1d_z is not None and abs(spy_1d_z) >= 1.5)
-        or total_hits >= 5
         or (vix_1d_pct is not None and vix_1d_pct >= 15.0)
         or credit_stress
     ):
-        level = 1
-
-    # Credit stress paired with any equity-side signal escalates to L2.
-    if credit_stress and level == 1 and (
+        price_level = 1
+    # Credit stress paired with a genuine price-side signal escalates to L2.
+    if credit_stress and price_level == 1 and (
         (spy_1d_z is not None and abs(spy_1d_z) >= 1.5)
-        or total_hits >= 5
         or (vix_1d_pct is not None and vix_1d_pct >= 15.0)
     ):
-        level = 2
+        price_level = 2
 
+    # --- 6. NEWS channel level: Z-SCORE vs trailing baseline, not raw count --
+    # (2026-08-06 audit B3 — see docstring). news_hits_history is caller-supplied,
+    # oldest-first, each {date, total_hits, hits_by_category, dominant_category}.
+    min_baseline = int(_mscfg.get("news_baseline_min_sessions", 10))
+    watch_z = float(_mscfg.get("news_z_watch", 1.5))
+    elevated_z = float(_mscfg.get("news_z_elevated", 2.5))
+    acute_z = float(_mscfg.get("news_z_acute", 3.5))
+    persistent_sessions = int(_mscfg.get("persistent_theme_sessions", 10))
+    persistent_floor = float(_mscfg.get("persistent_theme_hits_floor", 15.0))
+    no_baseline_floor = float(_mscfg.get("no_baseline_watch_floor_hits", 5))
+
+    hist = news_hits_history or []
+    hist_counts = [float(h["total_hits"]) for h in hist if isinstance(h.get("total_hits"), (int, float))]
+    news_z: float | None = None
+    if len(hist_counts) >= min_baseline:
+        mean_h = sum(hist_counts) / len(hist_counts)
+        var_h = sum((x - mean_h) ** 2 for x in hist_counts) / len(hist_counts)
+        sd_h = var_h ** 0.5
+        news_z = round((total_hits - mean_h) / sd_h, 2) if sd_h > 0 else (
+            0.0 if total_hits == mean_h else acute_z + 1.0)
+
+    if news_z is None:
+        news_level = 1 if total_hits >= no_baseline_floor else 0
+        if news_level:
+            triggers.append(f"News keyword hits {total_hits} (no baseline yet, watch floor)")
+    elif news_z >= acute_z:
+        news_level = 3
+        triggers.append(f"News hits z-score {news_z} (>={acute_z}, acute)")
+    elif news_z >= elevated_z:
+        news_level = 2
+        triggers.append(f"News hits z-score {news_z} (>={elevated_z}, elevated)")
+    elif news_z >= watch_z:
+        news_level = 1
+        triggers.append(f"News hits z-score {news_z} (>={watch_z}, watch)")
+    else:
+        news_level = 0
+
+    # Persistent-theme streak: same dominant category above the floor, today
+    # counting back through history, unbroken.
+    persistent_streak = 0
+    if dominant_cat_today and hits_by_cat.get(dominant_cat_today, 0) >= persistent_floor:
+        persistent_streak = 1
+        for h in reversed(hist):
+            h_dom = h.get("dominant_category")
+            h_hits = (h.get("hits_by_category") or {}).get(h_dom, 0) if h_dom else 0
+            if h_dom == dominant_cat_today and h_hits >= persistent_floor:
+                persistent_streak += 1
+            else:
+                break
+    out["news_persistent_theme_streak"] = persistent_streak
+    out["news_hits_zscore"] = news_z
+
+    # Symmetric benign-tape guard: a benign price channel (no elevated/acute
+    # price signal) caps news-alone at 2, or at 1 once the theme has persisted.
+    price_benign = price_level <= 1
+    if price_benign:
+        cap = 1 if persistent_streak >= persistent_sessions else 2
+        if news_level > cap:
+            triggers.append(
+                f"News-alone level capped {news_level}->{cap} (benign tape"
+                + (f", persistent theme {persistent_streak} sessions" if cap == 1 else "") + ")"
+            )
+            news_level = cap
+
+    level = max(price_level, news_level)
+    out["price_level"] = price_level
+    out["news_level"] = news_level
     out["shock_level"] = level
     out["shock_label"] = {0: "none", 1: "watch", 2: "elevated", 3: "acute"}[level]
     out["triggers"] = triggers
