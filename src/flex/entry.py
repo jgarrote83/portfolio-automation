@@ -1,14 +1,15 @@
 """Deterministic flex-entry confirmation pipeline (pure).
 
-The LLM nominates a catalyst candidate and asserts regime fit; **this module
-computes the trigger, the stop, and the size** — the model never eyeballs
-intraday data. Run the gates in order; the first failure short-circuits with a
-``skip_reason`` and ``entry_trigger == "fail"``. Missing data never raises and
-never forces a trade.
+The LLM nominates a catalyst candidate; **this module computes the trigger,
+the stop, and the size** — the model never eyeballs intraday data. Run the
+gates in order; the first failure short-circuits with a ``skip_reason`` and
+``entry_trigger == "fail"``. Missing data never raises and never forces a
+trade.
 
-Pipeline: regime fit → liquidity (ADV) → entry window → gap-vs-ADR (raises the
-bar, never auto-skips) → VWAP hold + slope → ATR stop / max-stop / risk-budget
-sizing.
+Pipeline: regime fit (computed + surfaced, INFORMATIONAL only as of session
+2026-08-10 — see ``regime_fit`` below) → liquidity (ADV) → entry window →
+gap-vs-ADR (raises the bar, never auto-skips) → VWAP hold + slope → ATR stop /
+max-stop / risk-budget sizing.
 """
 from __future__ import annotations
 
@@ -133,13 +134,17 @@ def build_flex_entry(
     if not intraday_bars or not daily_bars:
         return _skip("no_bars")
 
-    # G1 — regime fit (the shared quadrant input). The basis (active /
-    # borderline_5d_tiebreak / favored_single / unresolved) is surfaced so
-    # flex_state shows WHY a quadrant was or wasn't in force.
+    # Regime fit (the shared quadrant input) — DEMOTED from a hard entry veto to
+    # an informational field (session 2026-08-10, catalyst-sleeve-funnel Task E).
+    # A monthly-vintage macro quadrant has no business vetoing a 5-day catalyst
+    # trade — cadence mismatch. Still computed and still surfaced (the basis —
+    # active / borderline_5d_tiebreak / favored_single / unresolved — shows WHY a
+    # quadrant was or wasn't in force) so `flex_state` and the catalyst scorer can
+    # consume it, but a miss no longer short-circuits the pipeline; liquidity,
+    # window, VWAP, and sizing all still run. Preserves the D1 (2026-07-21) fix:
+    # an unresolved quadrant (`quadrant` falsy) still yields `regime_fit=False`
+    # here, but that no longer resurrects the old G1 freeze either.
     out["regime_fit"] = regime_fit(sector, quadrant)
-    if not out["regime_fit"]:
-        _basis = f" ({quadrant_basis})" if quadrant_basis else ""
-        return _skip(f"regime_fit:{sector!r} not in {quadrant or 'unknown'}{_basis}")
 
     # Liquidity screen — tied to IEX-VWAP validity.
     adv = avg_dollar_volume(daily_bars)

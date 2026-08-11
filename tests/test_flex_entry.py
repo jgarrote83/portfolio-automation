@@ -60,10 +60,17 @@ def test_pre_window_and_after_cutoff():
     assert _run(bars, _daily(), minutes=120)["skip_reason"] == "after_cutoff"
 
 
-def test_regime_fit_fail():
+def test_regime_mismatch_reaches_sizing():
+    # Session 2026-08-10 (catalyst-sleeve-funnel Task E): regime_fit is demoted
+    # from a hard veto to an informational field. Utilities does not fit Q1, but
+    # with otherwise-clean structure (identical bars to the passing case above)
+    # the pipeline must reach sizing anyway — liquidity/window/VWAP/stop govern,
+    # not regime.
     r = _run(_intraday([100, 100.5, 101, 101.5, 102, 102.5, 103]), _daily(), sector="Utilities")
-    assert r["entry_trigger"] == "fail"
-    assert r["skip_reason"].startswith("regime_fit")
+    assert r["regime_fit"] is False
+    assert r["entry_trigger"] == "pass"
+    assert r["skip_reason"] is None
+    assert r["size_shares"] >= 1
 
 
 def test_big_gap_strong_vwap_passes():
