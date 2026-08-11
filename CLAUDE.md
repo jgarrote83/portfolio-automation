@@ -300,6 +300,18 @@ The intl sleeve is the `intl_broad` (VXUS; pool VXUS/ACWX/IXUS) + `intl_leader` 
 - Phase 1 must run clean 30+ days before Phase 2 is enabled
 - Temperature 0.2 for Claude analysis calls (consistency)
 - Sells execute before buys in multi-trade recommendations (free up cash)
+- **Test-count baselines are MEASURED, never carried forward from a prior FOLLOWUPS
+  entry or PR body.** Both the "before" and "after" numbers in a session's `Suite
+  X→Y green` line come from an actual run — `git checkout <base-ref> && PYTHONPATH=src
+  pytest -q | tail -1`, then the same on the branch — and both commands' output goes in
+  the PR body. Diagnosed 2026-08-10 (PR #37 pre-merge correction): entry #57 recorded
+  `922→979` for PR #36 without re-running the suite at the PR's actual base
+  (`e402bbc`, the true count was 983); entry #60 then copied that already-wrong `979`
+  forward as ITS baseline instead of measuring `e402bbc` itself, compounding one wrong
+  number into two. A baseline copied from a written record — even one from the same
+  repo, even from last session — is exactly the kind of unverified claim the
+  empirical-verification doctrine (grep/inspection vs. actually running the code)
+  already exists to catch; it just hadn't been applied to this specific number before.
 
 ## Deployment lessons (hard-won — see infra/modules/storage-roles.bicep + .github/workflows/deploy-code.yml)
 - Function App MI requires **Storage Account Contributor** on the storage account in addition to Blob Data Owner / Queue Data Contributor / Table Data Contributor. Host startup calls `BlobServiceClient.GetPropertiesAsync()` which needs `blobServices/read`, not in the data-plane roles. Without it: persistent `AuthorizationPermissionMismatch 403`, host faults, zero functions registered.
