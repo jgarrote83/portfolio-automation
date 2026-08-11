@@ -29,6 +29,15 @@ local.settings.json
 *.suo
 *.user
 
+# VS Code "Mermaid Chart" extension's auto-generated Copilot AI-skills pack
+# (mermaidChart.installAiSkills) -- personal editor tooling, same category as
+# .vscode/settings.json above, not a project-level decision to configure
+# GitHub Copilot for this repo. Diagnosed 2026-08-10 (PR #37 pre-merge
+# correction, Task 3) after it showed up untracked/unexplained in a
+# self-verification git status block.
+.github/copilot-instructions.md
+.github/instructions/
+
 # OS
 .DS_Store
 Thumbs.db
