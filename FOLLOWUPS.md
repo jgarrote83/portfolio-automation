@@ -3,7 +3,10 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-08-06 (08-03/04/05 report audit: market_implied_quadrant votes/confidence, market_shock z-score, DXY fallback, deployable-envelope shortfalls, day-P/L identity trigger, override falsifier adjudication, inflation/oil/labor signal freshness, hybrid band, MU ingestion guard, branch `fix/20260806-signal-integrity-audit`).**
+**▶ START HERE — last session 2026-08-10 (Catalyst Sleeve Funnel: candidate discovery + scoring, branch `feat/20260810-catalyst-sleeve-funnel`).**
+Six-task PR closing the three structural gaps that meant the Flex Catalyst Engine could only ever trade names it already knew about — labelled G1/G2/G3 in this PR's own scope doc (**not** the flex-entry gatekeeper's pre-existing G1-G5 gate numbering referenced elsewhere in this file — different scheme, same letter, disambiguated here on purpose). **G1** (Task A): `earnings_calendar_market` stops discarding the market-wide FMP earnings calendar outright — the additional (non-book) rows are now screened to a plain-ticker-format proxy (the calendar row carries no volume/market-cap field for a true liquidity floor) and capped, at **zero extra FMP calls** (the rows were already fetched and thrown away). **G2** (Task B): `get_stock_news`'s symbol list is extended from held-only to held ∪ flex_candidates ∪ the full catalyst discovery set — a single call regardless of list size (verified empirically against the client, `tests/test_catalyst_news.py`) — plus a deterministic per-symbol `news_recency`/`news_tone` read reusing the `_SHOCK_KEYWORDS` pattern (`_CATALYST_TONE_KEYWORDS`). **G3** (Task D): new `src/collector/catalyst_screen.py` — pure, equal-weighted (#23 doctrine: no backtest harness exists yet, so tuned coefficients would be unfalsifiable; weights ship equal until graded rows exist) `catalyst_score` over a genuinely NEW discovery universe (sourced from `earnings_calendar_market` + market-wide congressional flow, zero extra cost for the symbol list itself; ~2 FMP calls/candidate for the capped discovery fetch — see the PR body for the daily delta). The **absent-vs-zero** composite rule is the load-bearing fix: a missing component (most concretely, no scheduled earnings date) drops out of the mean instead of scoring 0, which is what was silently turning every no-earnings-date name into a permanent laggard before this existed. A ≥4-of-6-components floor keeps a thinly-covered name from posting a flatteringly high score off 1-2 lucky inputs. Top-15 survivors merge into `flex_candidates` with a new `"screened"` provenance alongside the existing `"static"`/`"dynamic"`. Task E demotes `regime_fit` from a hard entry veto to an informational/scored field in `src/flex/entry.py` (cadence mismatch — a monthly-vintage macro quadrant has no business vetoing a 5-day catalyst trade); `flex_separation_set` is UNTOUCHED (still an absolute gate — book-collision prevention, not a regime opinion; do not conflate the two). Task C probes the FMP tier for FOLLOWUPS **#34**'s prerequisite index/forex quotes — script committed (`scripts/probe_fmp_tier.py`) but **not executed**: this session had no live FMP key and no access to the EasyGridsProduction Azure tenant/subscription (a different identity from the dev environment's `az` session — see this file's Deployment-lessons-style note in CLAUDE.md), so #34 stays open pending an actual run. Task F rewrites the flex-nomination prompt contract (regime fit reframed as context not a gate; the `catalyst_score` ranking documented) with new prompt sentinels (`tests/test_catalyst_prompt_sentinels.py`). Suite 922→979 green (57 new tests across 6 new + 4 modified test files), ruff clean, every new/modified test confirmed failing on pre-fix source (new modules via import-level failure; modified assertions via `git stash` isolation on `src/flex/entry.py`+`src/flex/regime.py`). **Three decision gates surfaced in the PR body, unresolved:** (1) earnings event policy — pre- vs post-print entries (recommendation: post-print only for v1, a stop is not a hedge against a gap-through print); (2) overnight gap protection (day / GTC / flatten-before-close); (3) top-N screen size (shipped default 15, discovery-fetch cap 25) + news lookback window (shipped default 7 calendar days). **Auto-merge: NO, human review required.**
+
+**▶ Prior session 2026-08-06 (08-03/04/05 report audit: market_implied_quadrant votes/confidence, market_shock z-score, DXY fallback, deployable-envelope shortfalls, day-P/L identity trigger, override falsifier adjudication, inflation/oil/labor signal freshness, hybrid band, MU ingestion guard, branch `fix/20260806-signal-integrity-audit`).**
 13-task PR (B1+B2, B3, B4, B6, B7, M1+M2, O1, O2, O3, O4, R1) fixing dead/miscalibrated deterministic signals the LLM was reasoning against every session — a strongly-wired 2-vote basket pair swinging `market_implied_quadrant` confidence to `high` while 6 other votes were structurally null (B1+B2); a persistent news theme alone pinning `market_shock` at level 3 for weeks on a benign tape, lifting the cash ceiling to 25% (B3); the DXY dollar-proxy fallback dark at exactly 5d stale AND whenever DTWEXBGS returns zero observations at all (B4); every sleeve in a multi-sleeve de-cash program flagged `non_compliant_flagged` even when the model deployed its full aggregate tranche pro-rata (B6); a frozen-quote day-P/L symptom slipping through on small positions because the old trigger required a large delta too (B7); a filed override's falsifier never adjudicated on a later run, and an identical sub-min-notional setup flip-flopping between hold and floor-sell with no override either day (M1+M2); a 60-65d inflation-data blind spot with no bridge (O1); an 8-9d-stale FRED oil series on the exact channel that flips the inflation axis (O2); an ADP miss caught only via a forex-news parse (O3); a small strategic target (VXUS) permanently inside the fixed absolute band, never funded (O4); and MU printing ~10x its real price every session, merely re-quarantined never corrected, plus a closed position's historical P&L narrated as an ongoing drag (R1). Two items deferred by explicit decision: B5 (growth-axis recency slope) and R2 (Risk Score sensitivity, investigation stub only) — see entries **#54**/**#55**; R1's strategy half (what to actually do about the MU position) is Jorge's call, tracked separately as entry **#56**. Suite 901→922 green, ruff clean, every new/modified test confirmed failing on pre-fix source via `git stash` isolation. **Auto-merge: NO, human review required** — see entry **#53** below for the full per-task design.
 
 **▶ Prior session 2026-08-01 (07-30/07-31 report audit: pass-1 clamp visibility, SGOV carve-out reconciliation, zero-watch resize awareness, cash-ceiling deployment doctrine, report hygiene, branch `fix/20260801-clamp-visibility-cash-deadlock`).**
@@ -314,6 +317,43 @@ wiped them.
 ---
 
 ## Open
+
+### 58. `catalyst_score` weight tuning — gated on graded outcome rows (LOW — data-gated, do not touch early)
+From the 2026-08-10 catalyst-sleeve-funnel session (entry **#57**). `src/collector/catalyst_screen.py`'s
+composite is deliberately EQUAL-WEIGHTED across its 6 components in v1 — the
+same #23 doctrine already applied to `sleeve_selection`'s momentum blend and
+every other scored-not-tuned composite in this system: with no point-in-time
+backtest harness, a hand-picked weight is an unfalsifiable prior dressed as
+signal, and once shipped it becomes very hard to distinguish "this component
+matters" from "we assumed this component matters." **Do not tune before:**
+(a) a meaningful sample of `catalyst_screen.ledger` rows have matured into
+graded flex outcomes (the Phase C `track_record`/`OverrideHistory` stamping
+pattern is the template — a `catalyst_score` layer would need the same
+falsifier-date + counterfactual grading, not yet built), and (b) ideally the
+#23 ALFRED-style point-in-time harness exists so a proposed weight change can
+be validated against history rather than against this cycle's few outcomes.
+**Acceptance when picked up:** a specific evidence_n threshold (mirror the
+Learning Loop's `evidence_n >= 10` bar for parameter-class proposals), a
+before/after comparison on graded rows, and — per the Learning Loop's own
+proposer≠approver invariant — a human-reviewed PR, never an autonomous edit.
+
+### 59. Overnight/sector read-through investigation — gated on #34 + the `catalyst_screen` ledger (LOW — data-gated)
+From the 2026-08-10 catalyst-sleeve-funnel session (entry **#57**). Once (a)
+FOLLOWUPS **#34** (`global_overnight` tone block) has an actual answer from
+`scripts/probe_fmp_tier.py` run with a live key, and (b) `catalyst_screen.ledger`
+has accumulated enough runs to show which SECTORS/quadrants the discovery
+universe keeps surfacing candidates from, this is worth a dedicated
+investigation: does overnight Asia/Europe tone read through into which US
+sectors the NEXT-DAY earnings-calendar/congressional-flow discovery pool
+favors (e.g. a risk-off Asia session correlating with the discovery pool
+skewing defensive the same morning)? This is explicitly NOT the same question
+as #34 itself (#34 is a pre-open risk-tone instrument for flex ENTRY/ABSTENTION
+decisions on already-nominated names; this item is about whether overnight tone
+predicts what DISCOVERY surfaces in the first place) — keep the two separate
+investigations, don't conflate them. No design proposed yet; this is a park
+note, not a spec. Do not start without both prerequisites — a sector
+read-through claim without the ranking-ledger history to test it against is
+exactly the kind of unfalsifiable pattern-matching #23 exists to prevent.
 
 ### 54. Growth-axis head-to-tail slope mislabels a rolled-over trajectory as "rising" (B5, deferred by decision 2026-08-06)
 From the 2026-08-06 signal-integrity audit (entry **#53**) — deliberately NOT
@@ -1156,6 +1196,19 @@ flex names. A risk-tone instrument, not an alpha predictor — record this frami
   timestamps between 04:00–09:00 ET same day; tone/carry unit tests on fixtures;
   prompt section added; a deliberately-degraded fixture (two inputs missing) yields
   reduced confidence, never a fabricated tone.
+- **Task C probe (2026-08-10, catalyst-sleeve-funnel session, entry #57):** the
+  FMP-tier verification this item has been gated on since 2026-07-04 is now a
+  committed, runnable script — `scripts/probe_fmp_tier.py` — instead of an
+  open question. It hits `^N225`/`^KS11` (Asia), `^GDAXI`/`^STOXX50E` (Europe),
+  and `USDJPY` (forex) via `/stable/quote` and reports raw status/payload for
+  each, treating a 402 the same way `get_etf_holdings` is already treated
+  (unavailable on this tier, park it). **NOT YET RUN** — this session had no
+  live `FMP_API_KEY` and no access to the EasyGridsProduction Azure
+  tenant/subscription the real key lives in (a different identity from this
+  dev environment's default `az` session). Whoever picks this item up next:
+  run the script first (`$env:FMP_API_KEY = "..."; python
+  scripts/probe_fmp_tier.py`) — its exit code and printed verdict per symbol
+  answer the gating question directly; only then decide build vs. park.
 
 ### 35. Fresher commodity quote for `market_shock` corroboration (LOW–MEDIUM)
 The collector's oil inputs come from FRED (`DCOILWTICO` / `DCOILBRENTEU`), which lag
@@ -1473,6 +1526,133 @@ fills (or explains a deviation).
 ---
 
 ## Done
+### 57. 2026-08-10 session: Catalyst Sleeve Funnel — candidate discovery + scoring — Done, branch `feat/20260810-catalyst-sleeve-funnel` (auto-merge: NO, human review required)
+The Flex Catalyst Engine (`src/flex/`) was fully built but could only ever
+trade names it already knew about — three structural gaps in the FUNNEL that
+feeds it, labelled G1/G2/G3 in this session's own scope doc (**not** the
+flex-entry gatekeeper's pre-existing G1-G5 gate numbering used elsewhere in
+this file — same letter, different scheme; disambiguated here on purpose so a
+future reader doesn't conflate them). Suite 922→979 green (57 new tests across
+6 new + 4 modified test files), ruff clean, every new/modified test confirmed
+failing on pre-fix source (new modules/functions via straightforward
+import/attribute-error on master; modified assertions in
+`tests/test_flex_entry.py` + `tests/test_flex_quadrant_resolution.py` via
+`git stash` isolation of `src/flex/entry.py` + `src/flex/regime.py`, test
+files kept in place).
+
+- **Task A (G1) — stop discarding the market-wide earnings calendar.**
+  `collector.handler.get_earnings_calendar` was fetched, filtered down to the
+  book's own universe (`_filter_earnings_to_universe`, unchanged, still the
+  ONLY thing existing consumers see), and everything else thrown away. New
+  `_screen_earnings_market_rows` keeps the ADDITIONAL rows — screened to a
+  plain-ticker-format proxy (`_TICKER_FORMAT_RE`; the calendar row has no
+  volume/market-cap field for a true liquidity floor, that applies downstream
+  once a name is promoted to the catalyst screen) and capped at
+  `_EARNINGS_MARKET_CAP` (40, nearest-dated first) — emitted as a new
+  `earnings_calendar_market` snapshot block with a `dropped_by_cap` count.
+  **API cost: zero** — the rows were already being fetched.
+- **Task B (G2) — news for candidates, not just holdings.** `get_stock_news`'s
+  symbol list is extended from `tickers` (held only) to
+  `tickers ∪ flex_candidate_tickers ∪ catalyst_discovery` — verified
+  empirically (`tests/test_catalyst_news.py`, mocks the HTTP layer and
+  inspects the actual params `FMPClient.get_stock_news` sends) that the client
+  does not truncate a large symbol list before sending; it's one call
+  regardless of size, so this costs nothing extra. `limit` bumped 30→100
+  (`_STOCK_NEWS_LIMIT`) since far more symbols now compete for the same
+  article pool — one of the decision-gate-3 defaults below. New
+  `_CATALYST_TONE_KEYWORDS` (positive/negative sets) mirrors the
+  `_SHOCK_KEYWORDS` pattern exactly (same headline+summary extraction, same
+  first-match-per-item-per-category counting) for the `news_tone` component.
+- **Task D (G3) — `catalyst_score`: a deterministic ranked candidate pool.**
+  The pre-existing `_load_flex_candidates` merges a static seed with the
+  PREVIOUS run's own `watch_candidates` emission — self-referential, nothing
+  ever generated a genuinely new name. New `src/collector/catalyst_screen.py`
+  (pure functions, no I/O) scores a DISCOVERY universe built by
+  `discovery_symbols()` from `earnings_calendar_market` ∪ market-wide
+  `congressional` trades (both already fetched elsewhere — zero extra cost for
+  the symbol list itself), minus held/flex_separation_set/non-reenterable
+  legacy, capped at `_CATALYST_DISCOVERY_CAP` (25). Each surviving candidate
+  gets 2 FMP calls (profile + `get_historical_price_light`, reversed to
+  ascending + reshaped — see the data-availability note below) — the only
+  recurring cost this funnel adds. **Composite:** `catalyst_score = mean` of
+  up to 6 EQUAL-WEIGHTED components (`earnings_proximity`, `news_recency`,
+  `news_tone`, `momentum`, `regime_fit_score`, `political_flow`) — no weights
+  config, per #23 doctrine (no backtest harness exists to falsify a tuned
+  coefficient against; see new entry **#58**). **ABSENT-VS-ZERO is the
+  load-bearing rule:** a component with no underlying data drops OUT of the
+  mean rather than scoring 0 — proven by
+  `test_no_earnings_date_but_strong_signal_outranks_weak_earnings_name` (a
+  no-earnings-date name with strong everything-else outranks a weak name that
+  merely happens to have a print today) and mirrored end-to-end in
+  `tests/test_build_catalyst_screen.py`. A **≥4-of-6 components** floor
+  (`MIN_COMPONENTS_RANKABLE`) keeps a thinly-covered name from posting a
+  flattering score off 1-2 lucky inputs — proven by
+  `test_thin_coverage_never_nominated_regardless_of_score`. Every screened
+  candidate (survivor or not) lands in a full `ledger` — the raw material for
+  #58's future weight-tuning and #59's sector read-through investigation. Top
+  `_CATALYST_TOP_N` (15) survivors merge into `flex_candidates` with a new
+  `source: "screened"` provenance (alongside the existing `"static"`/
+  `"dynamic"`), running through the SAME price-quarantine guard (F7) as every
+  other candidate, with their already-fetched latest close merged directly
+  into `prices` (the price-universe fetch already ran earlier in `collect()`,
+  so a nominee would otherwise have no price entry this run).
+  **Data-availability finding (verified by reading `FMPClient.get_eod_prices`'s
+  own field extraction, not assumed):** the integrated `/historical-price-eod
+  /light` endpoint returns close+volume only, no high/low — so a literal ATR
+  is not computable from it. The `momentum` component and the "price history
+  present" hard filter are close-price-only (`_CATALYST_MIN_PRICE_OBS`, 20
+  observations) rather than a true ATR read; documented in
+  `catalyst_screen.py`'s module docstring and the screen's
+  `insufficient_price_history` reason string (never named `..._atr_data` —
+  that would have claimed a check this PR does not actually perform).
+- **Task E — demote `regime_fit` in the entry pipeline.** `src/flex/entry.py`
+  used to `return _skip(...)` on a regime mismatch before liquidity/window/
+  VWAP/sizing ever ran. `regime_fit` is still computed and surfaced (the
+  D1 2026-07-21 no-read-quadrant fix is unaffected — an unresolved quadrant
+  still reads `False` here, it just no longer disqualifies on its own) but no
+  longer short-circuits; new `flex.regime.regime_fit_score` gives the
+  catalyst-screen composite a graded reading (1.0 pinned-fit / 0.6
+  tiebreak-fit / 0.0 real mismatch / `None` no-read — the same absent-vs-zero
+  distinction the composite needs everywhere else, which the boolean
+  `regime_fit` alone can't express). `flex_separation_set` is UNTOUCHED —
+  still an absolute gate (book-collision prevention), never conflated with the
+  regime opinion. `tests/test_flex_entry.py::test_regime_mismatch_reaches_sizing`
+  and `tests/test_flex_quadrant_resolution.py::
+  test_build_entry_no_longer_skips_tech_in_q3_regime_mismatch` both confirmed
+  failing against pre-fix master.
+- **Task C — FMP tier probe (FOLLOWUPS #34 prereq).** `scripts/probe_fmp_tier.py`
+  hits `^N225`/`^KS11`/`^GDAXI`/`^STOXX50E`/`USDJPY` via `/stable/quote` and
+  reports raw status per symbol (a 402 = unavailable, park it — same verdict
+  already recorded for `get_etf_holdings`). **NOT executed** — no live
+  `FMP_API_KEY` and no access to the EasyGridsProduction Azure tenant in this
+  session (see the updated note on entry **#34**). Does not build
+  `global_overnight` regardless of result, per the task's own scope.
+- **Task F — prompt contract + bookkeeping.** `project-instructions.md`'s
+  flex-nomination section rewritten: regime fit is now framed as context, not
+  a gate ("a mismatch is a WEAKER thesis, not a disqualified one"); the
+  `catalyst_score` ranking is documented, with the explicit instruction that
+  the model reads it, never computes it. New
+  `tests/test_catalyst_prompt_sentinels.py` guards the new doctrine sentences
+  the same way `test_prompt_hygiene_sentinels.py` guards prior sessions' — a
+  silently-dropped sentence now fails a test instead of shipping quietly. The
+  ≤10-flex-ticker / ≤25%-sleeve hard caps are untouched and explicitly
+  re-asserted present by test.
+
+**Three decision gates surfaced in the PR body, deliberately left unresolved
+for the account holder (do not treat any of these as settled by this entry):**
+1. **Earnings event policy** — pre- vs post-print entries. Recommendation: post-
+   print drift only for v1 (a trailing stop is a market order triggered on a
+   print; a gap-through fills wherever the tape is, an unhedged bet with a
+   comforting label) — revisit once Phase C has graded rows.
+2. **Overnight gap protection** — day orders (current) / GTC stops that survive
+   overnight / flatten before close. Matters more now that overnight-sourced
+   signals (congressional flow) influence discovery. Broker bracket/OCO orders
+   remain out of scope (2026-06-13 doctrine — single-leg orders only).
+3. **Top-N screen size + news lookback window** — shipped as defaults
+   (`_CATALYST_TOP_N=15`, `_CATALYST_DISCOVERY_CAP=25`,
+   `_CATALYST_NEWS_LOOKBACK_DAYS=7`, `_STOCK_NEWS_LIMIT=100`) per Task D's own
+   spec, not yet confirmed by the account holder.
+
 ### 53. 2026-08-06 session: Signal-integrity audit — market_implied_quadrant votes/confidence, market_shock z-score, DXY fallback, deployable-envelope shortfalls, day-P/L identity trigger, override falsifier adjudication, inflation/oil/labor signal freshness, hybrid band, MU ingestion guard — Done, branch `fix/20260806-signal-integrity-audit` (auto-merge: NO, human review required)
 Audit of the 08-03/08-04/08-05 daily reports against master (922 green
 baseline after this PR, up from 901 pre-PR — collector/handler.py wc -l
