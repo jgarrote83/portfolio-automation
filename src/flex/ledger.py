@@ -8,6 +8,8 @@ stop is always sized to it.
 """
 from __future__ import annotations
 
+import uuid
+
 from shared.storage import read_json_blob, write_json_blob
 
 _CONTAINER = "flex-ledger"
@@ -30,8 +32,24 @@ def new_entry(
     initial_stop: float,
     qty: int,
     order_ids: list[str] | None = None,
+    trade_id: str | None = None,
+    catalyst_score: float | None = None,
+    score_components: dict | None = None,
+    nomination_thesis: str = "",
 ) -> dict:
-    """Build a fresh ledger row for a newly opened flex position."""
+    """Build a fresh ledger row for a newly opened flex position.
+
+    ``trade_id`` is generated once here (unless explicitly supplied, e.g. by a
+    test) and carried unchanged through every fill and repair for this
+    position's lifetime — it is the idempotency key
+    ``flex.trades.record_closed_trade`` keys on, so it must never be
+    regenerated later (unlike ``order_ids``, which DOES get overwritten on
+    every stop replace). ``catalyst_score``/``score_components`` (session
+    2026-08-10, Flex Sleeve Performance Ledger Task B) are stamped at entry
+    from the funnel's ranking ledger so they carry through to the eventual
+    closed-trade record — the single highest-value field for later
+    weight-tuning (was `news_tone` predictive? was `momentum`?).
+    """
     return {
         "symbol": symbol.upper(),
         "entry_price": float(entry_price),
@@ -43,4 +61,9 @@ def new_entry(
         "scaled_out": False,
         "current_stop": float(initial_stop),
         "order_ids": list(order_ids or []),
+        "trade_id": trade_id or f"FLEX-{entry_date}-{symbol.upper()}-{uuid.uuid4().hex[:8]}",
+        "fills": [],
+        "catalyst_score": catalyst_score,
+        "score_components": score_components,
+        "nomination_thesis": nomination_thesis,
     }
