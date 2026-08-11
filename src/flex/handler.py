@@ -17,6 +17,7 @@ import logging
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
+from flex import trades as flex_trades
 from flex.config import load_flex_config
 from flex.entry import build_flex_entry
 from flex.exit_state import build_flex_exit_state
@@ -75,8 +76,16 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
         "orphan_orders": orphan_orders,
     }
     for ex in exits_to_record:
-        _record_trade_history(today, ex["symbol"], "sell", int(ex["entry"].get("qty_current") or 0),
-                              status="closed_at_broker", extra={})
+        trade = None
+        try:
+            trade = _finalize_closed_trade(client, ex["entry"], ex["symbol"], "stop_fill", today)
+        except Exception as cte:  # noqa: BLE001
+            logger.exception("closed-trade finalize failed for %s (broker-truth path)", ex["symbol"])
+            _record_closed_trade_write_failure(decisions, ex["symbol"], "stop_fill", cte)
+        _record_trade_history(
+            today, ex["symbol"], "sell", int(ex["entry"].get("qty_current") or 0),
+            status="closed_at_broker", extra=_trade_history_extra(trade),
+        )
     if not dry_run:
         for rep in repairs:
             _apply_repair(client, rep, today, decisions, executions)
@@ -102,6 +111,10 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
     held_syms = frozenset(str(p.get("symbol") or "").upper() for p in positions if p.get("symbol"))
     nominations = _flex_nominations(read_trades(today), held_symbols=held_syms, exclude=daytrade_syms)
     minutes = _session_minutes(client, today, now_et)
+    # Flex Sleeve Performance Ledger Task B: read the funnel's catalyst_score
+    # per symbol directly from the snapshot rather than trusting the model's
+    # nomination JSON to echo it back — it's already reachable here.
+    catalyst_lookup = _catalyst_score_lookup(snapshot)
 
     # ── STEP 3 — fetch bars for held ∪ nominated symbols ─────────────────────
     symbols = sorted(set(ledger) | {n["symbol"] for n in nominations})
@@ -141,12 +154,25 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
         )
         decisions["entries"].append(e)
         if e["entry_trigger"] == "pass" and not dry_run:
-            opened = _open_position(client, ledger, sym, e, nom, today, decisions, executions)
+            opened = _open_position(client, ledger, sym, e, nom, today, decisions, executions,
+                                    catalyst_lookup.get(sym))
             if opened:
                 sleeve_used += e["notional_usd"]
 
     # ── STEP 6/7 — persist ───────────────────────────────────────────────────
     write_ledger(ledger)
+    # Flex Sleeve Performance Ledger Task C: daily sleeve mark, upserted on
+    # every in-hours tick (decision gate 1, PR body — this converges to the
+    # LAST successful in-hours tick without needing to detect which tick is
+    # "last"). Broker state is STEP 0's positions read (this tick's start),
+    # same basis reconcile itself uses. Non-fatal — a mark failure must never
+    # block ledger/state persistence.
+    try:
+        closed_trades = flex_trades.read_closed_trades()
+        mark = flex_trades.build_sleeve_mark(today, positions, ledger, closed_trades, equity)
+        flex_trades.upsert_equity_point(mark)
+    except Exception:  # noqa: BLE001
+        logger.exception("sleeve equity-mark write failed (non-fatal)")
     _persist(today, decisions, quadrant=quadrant, ledger=ledger, executions=executions,
              quadrant_basis=quadrant_basis)
     return {
@@ -254,7 +280,17 @@ def _act_on_exit(client, ledger, sym, st, today, decisions, executions) -> None:
                     sym, qty, "sell", order_type="market", time_in_force="day",
                     client_order_id=_coid(today, sym, "tstop"))
                 _issued(decisions, executions, sym, "time_stop", order)
-                _record_trade_history(today, sym, "sell", qty, status="time_stop", extra={})
+                fill_price = _order_fill_price(client, order.get("id"))
+                extra_fill = {"date": today, "qty": qty, "price": fill_price, "reason": "time_stop"}
+                trade = None
+                try:
+                    trade = _finalize_closed_trade(
+                        client, entry, sym, "time_stop", today, extra_fill=extra_fill)
+                except Exception as cte:  # noqa: BLE001
+                    logger.exception("closed-trade finalize failed for %s (time_stop)", sym)
+                    _record_closed_trade_write_failure(decisions, sym, "time_stop", cte)
+                _record_trade_history(today, sym, "sell", qty, status="time_stop",
+                                      extra=_trade_history_extra(trade))
             ledger.pop(sym, None)
 
         elif action == "scale_out":
@@ -264,7 +300,11 @@ def _act_on_exit(client, ledger, sym, st, today, decisions, executions) -> None:
                     sym, qty, "sell", order_type="market", time_in_force="day",
                     client_order_id=_coid(today, sym, "scale"))
                 _issued(decisions, executions, sym, "scale_out", order)
-                _record_trade_history(today, sym, "sell", qty, status="scale_out", extra={})
+                fill_price = _order_fill_price(client, order.get("id"))
+                entry.setdefault("fills", []).append(
+                    {"date": today, "qty": qty, "price": fill_price, "reason": "scale_out"})
+                _record_trade_history(today, sym, "sell", qty, status="scale_out",
+                                      extra=_trade_history_extra_partial(qty, fill_price))
                 entry["qty_current"] = int(entry.get("qty_current") or 0) - qty
                 entry["scaled_out"] = True
             # Move the stop to breakeven on the remainder.
@@ -279,7 +319,7 @@ def _act_on_exit(client, ledger, sym, st, today, decisions, executions) -> None:
         decisions["orders_suppressed"].append({"symbol": sym, "reason": f"exit_error:{action}:{e}"})
 
 
-def _open_position(client, ledger, sym, e, nom, today, decisions, executions) -> bool:
+def _open_position(client, ledger, sym, e, nom, today, decisions, executions, catalyst=None) -> bool:
     qty = int(e["size_shares"])
     stop_price = round(float(e["stop_price"]), 2)
     try:
@@ -296,9 +336,13 @@ def _open_position(client, ledger, sym, e, nom, today, decisions, executions) ->
 
     legs = order.get("legs") or []
     stop_ids = [str(leg.get("id")) for leg in legs if str(leg.get("type", "")).startswith("stop")]
+    catalyst = catalyst or {}
     ledger[sym] = new_entry(
         sym, float(e["entry_price"]), today, stop_price, qty,
         order_ids=[str(order.get("id"))] + stop_ids,
+        catalyst_score=catalyst.get("score"),
+        score_components=catalyst.get("components"),
+        nomination_thesis=nom.get("rationale") or "",
     )
     # Persist the ledger IMMEDIATELY on entry (defensive — MU orphan incident). The
     # tick otherwise only writes the ledger at end-of-STEP-6; a crash/timeout after
@@ -400,6 +444,138 @@ def _daytrade_ledger_symbols() -> frozenset[str]:
     """The DayTrade Lab's open symbols (blob read only — no daytrade import)."""
     data = read_json_blob("daytrade-ledger", "ledger.json")
     return frozenset(data.keys()) if isinstance(data, dict) else frozenset()
+
+
+def _catalyst_score_lookup(snapshot: dict) -> dict[str, dict]:
+    """symbol -> {"score":, "components":} from the collector's
+    `catalyst_screen` ledger (catalyst-sleeve-funnel PR), so a flex entry
+    carries the SAME score the discovery/ranking pipeline computed for it —
+    read directly from the snapshot rather than trusting the model's
+    nomination JSON to echo it back verbatim (Flex Sleeve Performance Ledger
+    Task B: "if the funnel PR's components aren't reachable from
+    _open_position, plumb them through the nomination" — they ARE reachable
+    here, so no plumbing through the nomination is needed)."""
+    cs = snapshot.get("catalyst_screen") or {}
+    out: dict[str, dict] = {}
+    for row in cs.get("ledger") or ():
+        sym = str(row.get("symbol") or "").upper()
+        if sym:
+            out[sym] = {"score": row.get("score"), "components": row.get("components")}
+    return out
+
+
+def _order_fill_price(client, order_id) -> float | None:
+    """Best-effort ACTUAL fill price for a just-submitted order — never the
+    intended/modeled price ("reconciliation is broker truth"). None if the
+    order hasn't confirmed a fill yet; the caller must not fabricate a
+    fallback — an unpriced fill flows through to a null `pnl_usd` rather
+    than a guessed one."""
+    try:
+        o = client.get_order(order_id)
+        price = o.get("filled_avg_price")
+        return float(price) if price is not None else None
+    except Exception:  # noqa: BLE001
+        logger.warning("fill-price lookup for order %s failed", order_id)
+        return None
+
+
+def _record_closed_trade_write_failure(decisions, symbol, exit_reason, error) -> None:
+    """Surface a `_finalize_closed_trade` failure into the run's `decisions`
+    dict (PR #37 pre-merge correction, Task 2) — swallowing the exception at
+    the call site stays correct (bookkeeping must never block or corrupt an
+    order action), but a persistent write failure dropping closed trades
+    silently while the sleeve keeps trading would understate the performance
+    curve with nothing anywhere surfacing it. Lands in the persisted
+    flex-decisions blob (visible to the daily report), not just Azure logs.
+    Visibility only — no retry, no dead-letter queue; recovery is a separate
+    decision.
+    """
+    decisions.setdefault("closed_trade_write_failures", []).append({
+        "symbol": symbol, "exit_reason": exit_reason, "error": str(error),
+    })
+
+
+def _finalize_closed_trade(client, entry, symbol, exit_reason, today, extra_fill=None) -> dict | None:
+    """Broker-truth trade close — the single funnel every close path routes
+    through (Flex Sleeve Performance Ledger Task A). Reconciles the ledger
+    row's own fill record against actual Alpaca FILL activity since entry,
+    builds the closed-trade record, and writes it via the idempotent
+    `flex_trades.record_closed_trade`.
+
+    Returns the written record, or ``None`` when there is no confirmed
+    broker BUY fill at all since entry — the entry-side failure path
+    (nothing was ever actually bought; recording a "trade" here would
+    fabricate an entry price for shares that were never bought, so nothing
+    is recorded — this IS capturing the outcome, just as "no real trade
+    occurred," not a silent drop).
+    """
+    entry_date = entry.get("entry_date") or today
+    try:
+        activities = client.get_activities("FILL", after=entry_date)
+    except Exception:  # noqa: BLE001
+        logger.exception("fill-activity lookup for %s failed", symbol)
+        activities = []
+    buys = flex_trades.fills_from_activities(activities, symbol, "buy")
+    sells = flex_trades.fills_from_activities(activities, symbol, "sell")
+
+    if not buys:
+        logger.warning(
+            "%s closed with no confirmed broker buy fill since %s — entry "
+            "never filled at the broker; no closed-trade record written",
+            symbol, entry_date,
+        )
+        return None
+
+    broker_entry_price = round(
+        sum(b["qty"] * b["price"] for b in buys) / sum(b["qty"] for b in buys), 4,
+    )
+    recorded = list(entry.get("fills") or [])
+    # An unpriced extra_fill (get_order hadn't confirmed a fill yet at
+    # submission time) must NOT be folded into `recorded` — merge_broker_fills
+    # treats recorded qty as "already accounted for" and skips it, which would
+    # let a null price silently shadow a real broker-confirmed one already
+    # sitting in `sells`. Only a PRICED extra_fill short-circuits the broker
+    # lookup; an unpriced one is left entirely to broker-truth reconciliation.
+    if extra_fill is not None and extra_fill.get("price") is not None:
+        recorded = recorded + [extra_fill]
+    fills = flex_trades.merge_broker_fills(recorded, sells, exit_reason)
+
+    trade = flex_trades.build_closed_trade(
+        {**entry, "entry_price": broker_entry_price}, fills, exit_reason, today,
+    )
+    flex_trades.record_closed_trade(trade)
+    return trade
+
+
+def _trade_history_extra(trade: dict | None) -> dict:
+    """Backfill `_record_trade_history`'s `extra={}` from a finalized closed
+    trade so the TradeHistory audit trail and the closed-trade ledger agree
+    (Task A) — two records that disagree are worse than one."""
+    if not trade:
+        return {}
+    fills = trade.get("fills") or []
+    priced = [f for f in fills if f.get("price") is not None]
+    total_qty = sum(f.get("qty") or 0 for f in priced)
+    price = None
+    if priced and total_qty and len(priced) == len(fills):
+        proceeds = sum((f.get("qty") or 0) * (f.get("price") or 0) for f in priced)
+        price = round(proceeds / total_qty, 4)
+    proceeds_usd = round(sum((f.get("qty") or 0) * (f.get("price") or 0) for f in priced), 2) \
+        if priced else None
+    return {
+        "price": price,
+        "proceeds_usd": proceeds_usd,
+        "pnl_usd": trade.get("pnl_usd"),
+        "trade_id": trade.get("trade_id"),
+    }
+
+
+def _trade_history_extra_partial(qty: int, price: float | None) -> dict:
+    """Backfill for a scale_out's TradeHistory row — a partial realization,
+    not yet a closed trade, so just the fill itself (Task A)."""
+    if price is None:
+        return {}
+    return {"price": price, "proceeds_usd": round(qty * price, 2)}
 
 
 def _sector_for(sym, snapshot, nom) -> str | None:
