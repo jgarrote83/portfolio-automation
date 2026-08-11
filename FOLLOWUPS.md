@@ -3,8 +3,11 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-08-10 (Catalyst Sleeve Funnel: candidate discovery + scoring, branch `feat/20260810-catalyst-sleeve-funnel`).**
-Six-task PR closing the three structural gaps that meant the Flex Catalyst Engine could only ever trade names it already knew about — labelled G1/G2/G3 in this PR's own scope doc (**not** the flex-entry gatekeeper's pre-existing G1-G5 gate numbering referenced elsewhere in this file — different scheme, same letter, disambiguated here on purpose). **G1** (Task A): `earnings_calendar_market` stops discarding the market-wide FMP earnings calendar outright — the additional (non-book) rows are now screened to a plain-ticker-format proxy (the calendar row carries no volume/market-cap field for a true liquidity floor) and capped, at **zero extra FMP calls** (the rows were already fetched and thrown away). **G2** (Task B): `get_stock_news`'s symbol list is extended from held-only to held ∪ flex_candidates ∪ the full catalyst discovery set — a single call regardless of list size (verified empirically against the client, `tests/test_catalyst_news.py`) — plus a deterministic per-symbol `news_recency`/`news_tone` read reusing the `_SHOCK_KEYWORDS` pattern (`_CATALYST_TONE_KEYWORDS`). **G3** (Task D): new `src/collector/catalyst_screen.py` — pure, equal-weighted (#23 doctrine: no backtest harness exists yet, so tuned coefficients would be unfalsifiable; weights ship equal until graded rows exist) `catalyst_score` over a genuinely NEW discovery universe (sourced from `earnings_calendar_market` + market-wide congressional flow, zero extra cost for the symbol list itself; ~2 FMP calls/candidate for the capped discovery fetch — see the PR body for the daily delta). The **absent-vs-zero** composite rule is the load-bearing fix: a missing component (most concretely, no scheduled earnings date) drops out of the mean instead of scoring 0, which is what was silently turning every no-earnings-date name into a permanent laggard before this existed. A ≥4-of-6-components floor keeps a thinly-covered name from posting a flatteringly high score off 1-2 lucky inputs. Top-15 survivors merge into `flex_candidates` with a new `"screened"` provenance alongside the existing `"static"`/`"dynamic"`. Task E demotes `regime_fit` from a hard entry veto to an informational/scored field in `src/flex/entry.py` (cadence mismatch — a monthly-vintage macro quadrant has no business vetoing a 5-day catalyst trade); `flex_separation_set` is UNTOUCHED (still an absolute gate — book-collision prevention, not a regime opinion; do not conflate the two). Task C probes the FMP tier for FOLLOWUPS **#34**'s prerequisite index/forex quotes — script committed (`scripts/probe_fmp_tier.py`) but **not executed**: this session had no live FMP key and no access to the EasyGridsProduction Azure tenant/subscription (a different identity from the dev environment's `az` session — see this file's Deployment-lessons-style note in CLAUDE.md), so #34 stays open pending an actual run. Task F rewrites the flex-nomination prompt contract (regime fit reframed as context not a gate; the `catalyst_score` ranking documented) with new prompt sentinels (`tests/test_catalyst_prompt_sentinels.py`). Suite 922→979 green (57 new tests across 6 new + 4 modified test files), ruff clean, every new/modified test confirmed failing on pre-fix source (new modules via import-level failure; modified assertions via `git stash` isolation on `src/flex/entry.py`+`src/flex/regime.py`). **Three decision gates surfaced in the PR body, unresolved:** (1) earnings event policy — pre- vs post-print entries (recommendation: post-print only for v1, a stop is not a hedge against a gap-through print); (2) overnight gap protection (day / GTC / flatten-before-close); (3) top-N screen size (shipped default 15, discovery-fetch cap 25) + news lookback window (shipped default 7 calendar days). **Auto-merge: NO, human review required.**
+**▶ START HERE — last session 2026-08-10, later same day (Flex Sleeve Performance Ledger + SWA panel, branch `feat/20260810-flex-performance-ledger`).**
+Seven-task PR building the closed-trade record the sleeve never had — before this, all four close/realization paths (`time_stop`, `scale_out`, a broker stop fill via `reconcile_ledger`'s `exits_to_record`, and an entry that never actually filled) dropped the trade's outcome on the floor; `_record_trade_history` wrote a TradeHistory row with `extra={}` (no price, no P&L — an audit trail, not a performance record). **Task A**: new `src/flex/trades.py` (`closed-trade ledger + equity-series helpers, mirrors flex/ledger.py's I/O-plus-pure-builders pattern) + a single `_finalize_closed_trade` funnel in `flex/handler.py` every close path routes through. **Reconciliation is broker truth, not engine intent** — `merge_broker_fills` reconstructs the ACTUAL fill history from `AlpacaClient.get_activities("FILL", ...)` rather than trusting what the engine submitted; an entry with zero confirmed broker buy fills (the entry-side-failure case) writes NO closed-trade record at all — recording one would fabricate an entry price for shares never bought. `record_closed_trade` is idempotent on `trade_id` (generated once at open, carried through every fill — unlike `order_ids`, which DOES get overwritten on stop replacement). **A genuine bug caught by the empirical-verification doctrine, not by inspection:** an unpriced `extra_fill` (get_order hadn't confirmed a fill yet) was being folded into the "already accounted for" qty in `merge_broker_fills`, silently shadowing the broker's own later-confirmed price — `tests/test_flex_close_paths.py::test_time_stop_pnl_present_when_broker_confirms_both_fills` failed against the first cut of the fix and caught it before it shipped. **Task B**: `catalyst_score`/`score_components` stamped onto the ledger row at entry, read directly from the snapshot's `catalyst_screen.ledger` (catalyst-sleeve-funnel PR, entry **#57**) rather than trusting the model's nomination JSON to echo it back — the highest-value field in the schema for the eventual weight-tuning question (did `news_tone` actually predict anything?). **Task C**: `flex-ledger/equity-series.json`, upserted on every in-hours tick (decision gate 1: converges to "last successful tick" without needing to detect which tick is last). **Task D**: `/api/performance` gains `sleeve_contribution_pp`/`sleeve_trade_count` per point plus top-level `sleeve_available`/`sleeve_closed_trade_count_total` — cumulative from the WINDOW START, deliberately never normalized to a start=100 buy-and-hold index (the sleeve is intermittently deployed and flat much of the time; indexing it would render opening a position as a "return"). **Task E**: a second `<canvas>` on `web/performance.html` (never a 7th dataset — different units), sharing the x-axis/window selector/`regimeBands` plugin; color `#b8348f`, validated via the dataviz skill's `validate_palette.js` against the panel surface and all 6 existing series colors (contrast ≥3:1 on every pair, CVD ΔE clean-PASS ≥8 on every pair — worst is 9.5 vs Q1 green, short of the ≥13 stated target but a real PASS not a WARN; normal-vision ΔE ≥15 on every pair — full numbers in the PR body). Below N=30 closed trades the line renders dashed/greyed with a visible caption; no Sharpe/win-rate/skill stat anywhere on the panel at any N (decision gate 3: 30 is proposed, not confirmed). **Task F**: `_OUTCOME_HORIZONS=[30,60,90]`/`_HEADLINE_HORIZON=60` are wrong for a 5-day-time-stop sleeve (a catalyst trade is closed and gone before its first outcome stamp matures) — recorded as new entry **#61**, NOT redesigned this cycle; flex TradeHistory rows were already correctly `layer: "flex"` tagged (`_record_trade_history` hardcodes it) so no code change was needed there, just confirmation. Suite 979→1024 green (45 new tests across 4 new test files), ruff clean, every new test confirmed failing on pre-fix source (`git stash` isolation on `src/flex/handler.py`+`src/flex/ledger.py`+`web/api/function_app.py`; `src/flex/trades.py` via import-level failure). **Three decision gates surfaced in the PR body, unresolved:** (1) daily mark timing — last-in-hours-tick chosen and implemented, not yet confirmed; (2) no backfill — the ledger starts empty at first write, an explicit inception date on the panel rather than reconstructing from incomplete `TradeHistory`; (3) N=30 sample-size floor, proposed not confirmed. **Auto-merge: NO, human review required.**
+
+**▶ Prior session 2026-08-10 (Catalyst Sleeve Funnel: candidate discovery + scoring, branch `feat/20260810-catalyst-sleeve-funnel`) — merged, PR #36.**
+Six-task PR closing the three structural gaps that meant the Flex Catalyst Engine could only ever trade names it already knew about (G1 market-wide earnings calendar discarded outright, G2 news fetch held-only, G3 self-referential candidate pool) plus the `regime_fit` hard-veto demotion. See entry **#57** below for the full per-task design.
 
 **▶ Prior session 2026-08-06 (08-03/04/05 report audit: market_implied_quadrant votes/confidence, market_shock z-score, DXY fallback, deployable-envelope shortfalls, day-P/L identity trigger, override falsifier adjudication, inflation/oil/labor signal freshness, hybrid band, MU ingestion guard, branch `fix/20260806-signal-integrity-audit`).**
 13-task PR (B1+B2, B3, B4, B6, B7, M1+M2, O1, O2, O3, O4, R1) fixing dead/miscalibrated deterministic signals the LLM was reasoning against every session — a strongly-wired 2-vote basket pair swinging `market_implied_quadrant` confidence to `high` while 6 other votes were structurally null (B1+B2); a persistent news theme alone pinning `market_shock` at level 3 for weeks on a benign tape, lifting the cash ceiling to 25% (B3); the DXY dollar-proxy fallback dark at exactly 5d stale AND whenever DTWEXBGS returns zero observations at all (B4); every sleeve in a multi-sleeve de-cash program flagged `non_compliant_flagged` even when the model deployed its full aggregate tranche pro-rata (B6); a frozen-quote day-P/L symptom slipping through on small positions because the old trigger required a large delta too (B7); a filed override's falsifier never adjudicated on a later run, and an identical sub-min-notional setup flip-flopping between hold and floor-sell with no override either day (M1+M2); a 60-65d inflation-data blind spot with no bridge (O1); an 8-9d-stale FRED oil series on the exact channel that flips the inflation axis (O2); an ADP miss caught only via a forex-news parse (O3); a small strategic target (VXUS) permanently inside the fixed absolute band, never funded (O4); and MU printing ~10x its real price every session, merely re-quarantined never corrected, plus a closed position's historical P&L narrated as an ongoing drag (R1). Two items deferred by explicit decision: B5 (growth-axis recency slope) and R2 (Risk Score sensitivity, investigation stub only) — see entries **#54**/**#55**; R1's strategy half (what to actually do about the MU position) is Jorge's call, tracked separately as entry **#56**. Suite 901→922 green, ruff clean, every new/modified test confirmed failing on pre-fix source via `git stash` isolation. **Auto-merge: NO, human review required** — see entry **#53** below for the full per-task design.
@@ -317,6 +320,40 @@ wiped them.
 ---
 
 ## Open
+
+### 61. Sleeve-appropriate Phase C grading — realized R-multiple + component regression, not calendar drift (MEDIUM — data-gated, cross-refs #23 + #58)
+From the 2026-08-10 Flex Sleeve Performance Ledger session (entry **#60**),
+Task F — recorded, deliberately NOT fixed this cycle (redesigning Phase C
+grading was explicitly out of scope for that PR). `collector/handler.py`'s
+`_OUTCOME_HORIZONS = [30, 60, 90]` / `_HEADLINE_HORIZON = 60` stamp a
+recommendation's outcome vs SPY at 30/60/90 calendar days out — a design
+built for the CORE book's monthly/event cadence. The flex catalyst sleeve has
+a hard 5-day time stop (`FlexConfig.time_stop_days`): a trade is closed and
+gone long before its first outcome stamp (30d) even matures. Stamping a
+60-day market drift onto a position that was held 4 days measures the
+market's subsequent wander, not the quality of the decision — the horizon
+mismatch means every flex row's `outcome_status`/`resolved_correct` (once
+stamped) is measuring the wrong thing entirely, not just imprecisely.
+- **What "sleeve-appropriate" means, concretely:** grade a closed flex trade
+  on its OWN realized `r_multiple` at `closed_date` (already captured by
+  `flex.trades.build_closed_trade`, entry **#60**) — the trade's actual
+  outcome, at the actual time it ended — not a fixed-calendar-horizon
+  drift stamped later. The `catalyst_score` weight-tuning question entry
+  **#58** exists to ask ("did `news_tone` actually predict anything") is a
+  component-vs-realized-r_multiple regression over `closed-trades.json`
+  rows, NOT anything routed through `_OUTCOME_HORIZONS`.
+- **Prereqs:** a meaningful sample of closed-trades rows (same evidence bar
+  as #58 — do not build a grading pipeline to run on a handful of trades);
+  ideally after the #23 point-in-time backtest harness exists so a proposed
+  grading change can be validated against history rather than against
+  whatever this cycle happened to produce.
+- **Acceptance when picked up:** flex rows segregate cleanly by `layer:
+  "flex"` (already true, verified this session — `_record_trade_history`
+  hardcodes it, no change needed) from core `layer: "core"` rows in whatever
+  new grading path is built; the existing `_OUTCOME_HORIZONS` core-book
+  grading is UNTOUCHED (this is an additive sleeve-specific path, not a
+  replacement); a human-reviewed PR per the Learning Loop's proposer≠approver
+  invariant if the grading feeds any autonomous decision.
 
 ### 58. `catalyst_score` weight tuning — gated on graded outcome rows (LOW — data-gated, do not touch early)
 From the 2026-08-10 catalyst-sleeve-funnel session (entry **#57**). `src/collector/catalyst_screen.py`'s
@@ -1526,7 +1563,136 @@ fills (or explains a deviation).
 ---
 
 ## Done
-### 57. 2026-08-10 session: Catalyst Sleeve Funnel — candidate discovery + scoring — Done, branch `feat/20260810-catalyst-sleeve-funnel` (auto-merge: NO, human review required)
+### 60. 2026-08-10 session (later same day): Flex Sleeve Performance Ledger + SWA panel — Done, branch `feat/20260810-flex-performance-ledger` (auto-merge: NO, human review required)
+The Flex Catalyst Engine had no performance record — `src/flex/ledger.py` was
+open-position-only (`entry_price`/`initial_stop`/`qty_current`/`current_stop`/
+`order_ids`), and every one of the four ways a position stops being tracked
+(engine-initiated `time_stop`, a partial `scale_out`, a broker-side stop fill
+surfacing via `reconcile_ledger`'s `exits_to_record`, and an entry order that
+never actually filled) dropped the trade's outcome with no exit price, no
+P&L, no record. `_record_trade_history` wrote a TradeHistory audit row per
+sell, but with `extra={}` — status/qty only, nothing to build a curve from.
+This PR builds the closed-trade record once, correctly, and serves three
+consumers from it: this SWA panel, Phase C grading (once #61 lands), and the
+`catalyst_score` weight-tuning question (#58).
+
+- **Task A — closed-trade ledger, one funnel, four callers.** New
+  `src/flex/trades.py` (mirrors `flex/ledger.py`'s I/O-plus-pure-builders
+  shape; `reconcile.py`/`exit_state.py` untouched and still pure). A single
+  `flex/handler.py::_finalize_closed_trade` every close path routes through:
+  it re-derives the trade's fills from `AlpacaClient.get_activities("FILL",
+  after=entry_date)` (**reconciliation is broker truth, not engine intent**
+  — `flex.trades.merge_broker_fills` treats the engine's own recorded fills
+  as a floor, not a ceiling, and fills in whatever broker activity the engine
+  didn't itself witness, labeling the LAST unaccounted sell the trade's
+  `exit_reason` and any earlier one a broker-confirmed `scale_out` the engine
+  missed). A ledger row with **zero confirmed broker buy fills** (the
+  entry-side-failure path — the OTO order never actually filled) writes
+  **no closed-trade record** — recording one would fabricate an entry price
+  for shares that were never bought; this is the resolution to the fourth
+  "close path" the task spec named without a line reference. `record_closed_
+  trade` is idempotent on `trade_id` (`flex.ledger.new_entry` now generates
+  one ONCE at open and carries it unchanged through every fill/repair — unlike
+  `order_ids`, which a stop replace DOES overwrite). `_record_trade_history`'s
+  `extra={}` is backfilled with fill price/proceeds/pnl/trade_id on every
+  close path so the TradeHistory audit trail and the closed-trade ledger can
+  never quietly disagree.
+- **A real bug, caught by running the tests, not by reading the code.**
+  The first cut folded a just-submitted-but-unconfirmed `extra_fill`
+  (`price: None` — `get_order` hadn't confirmed a fill yet) into
+  `merge_broker_fills`'s "already accounted for" quantity — which meant a
+  LATER broker-confirmed price for that exact fill, already sitting in
+  `get_activities`'s response, got silently discarded in favor of the null.
+  `tests/test_flex_close_paths.py::test_time_stop_pnl_present_when_broker_
+  confirms_both_fills` failed (`pnl_usd` came back `None` instead of the
+  expected `-600.0`) against that first cut, which is exactly what caught
+  it — fixed by only folding a PRICED `extra_fill` into the recorded set,
+  leaving an unpriced one entirely to broker-truth reconciliation.
+- **Task B — `catalyst_score` stamped at entry.** `_open_position` now
+  reads `snapshot["catalyst_screen"]["ledger"]` (catalyst-sleeve-funnel PR,
+  entry **#57**) directly via a new `_catalyst_score_lookup`, keyed by
+  symbol, and stamps `catalyst_score`/`score_components` onto the ledger row
+  at open — reachable directly from the snapshot already loaded in
+  `run_flex_intraday`, so no plumbing through the model's nomination JSON
+  was needed (the fallback the task spec allowed for turned out to be
+  unnecessary). `nomination_thesis` comes from the nomination's `rationale`
+  field. Both carry through unchanged to the eventual closed-trade record —
+  the field #58's weight-tuning work depends on entirely.
+- **Task C — daily sleeve mark.** New `flex-ledger/equity-series.json`
+  (`flex.trades.build_sleeve_mark` + `upsert_equity_point`, upserted by date
+  on every in-hours tick of `run_flex_intraday`). **Decision gate 1
+  (last-in-hours-tick vs 09:00-collector-against-prior-close): implemented
+  as an idempotent per-date overwrite every tick**, which converges to
+  "whatever the last successful tick of the day computed" without needing to
+  detect which tick is actually last — simpler and more robust than explicit
+  last-tick detection, not yet confirmed by the account holder. Broker state
+  basis is STEP 0's positions read (this tick's start), the same basis
+  `reconcile_ledger` itself uses.
+- **Task D — `/api/performance` extension.** `web/api/function_app.py` gains
+  `_sleeve_series`/`_attach_sleeve_series`, attached to BOTH the fast-path
+  (cache) and legacy-fallback response branches. Per point: `sleeve_
+  contribution_pp` = `(cumulative_realized_usd + unrealized_usd) /
+  total_equity × 100`, **cumulative from the WINDOW START** (the first
+  in-window point's raw value is subtracted as a baseline) — **deliberately
+  NEVER normalized to a start=100 buy-and-hold index** like `portfolio_norm`/
+  `spy_norm`/`quadrants`: the sleeve is intermittently deployed and flat much
+  of the time, so indexing it the same way would render simply opening a
+  position as a "return." `sleeve_trade_count` is the same window-scoped
+  cumulative delta for the tooltip; `sleeve_closed_trade_count_total` (top
+  level) is the ALL-TIME count, used for the N=30 sample-size gate regardless
+  of which window is selected. An absent/malformed `flex-ledger/equity-
+  series.json` degrades to `sleeve_available: false` with the rest of the
+  response byte-identical to before this PR (verified by test).
+- **Task E — second chart panel.** `web/performance.html` gains a
+  `#sleeveChart` canvas BELOW `#perfChart` (never a 7th dataset on the
+  existing one — different units entirely, per the dataviz skill's "one
+  axis" rule). Shares x-axis labels, the window selector, and the existing
+  `regimeBands` plugin (reuses `renderChart`'s `regimeKeys`, so it must run
+  first each `load()`). **Color `#b8348f`, validated with the dataviz
+  skill's `scripts/validate_palette.js`** against the panel surface
+  (`#161a22`, dark mode) and every existing series color individually:
+  contrast ≥3:1 on every pair (PASS), CVD ΔE — the skill's own gate is ≥8 for
+  a clean PASS (6-8 is a WARN, legal only with secondary encoding) — clears
+  that on every pair, worst case 9.5 (vs Q1 green `#199e70`; every other pair
+  is 13.5-21.9), short of the task's own stated "≥13" target but a genuine
+  PASS not a WARN; normal-vision ΔE ≥15 (the skill's hard-fail floor) on
+  every pair, worst case 15.5, most 17-32. Full per-pair numbers in the PR
+  body — reported exactly as measured, not rounded up to claim the "13" bar
+  the source prompt asked for. **Sample-size honesty:** the closed-trade
+  count is always shown (`renderSleeveSummary`); below N=30 the line renders
+  dashed AND grey (`#5a6070`) with a visible caption; no Sharpe, win rate, or
+  any skill statistic anywhere on this panel at any N (decision gate 3: 30
+  proposed, not confirmed).
+- **Task F — Phase C horizon mismatch, recorded not fixed.** `_OUTCOME_
+  HORIZONS=[30,60,90]`/`_HEADLINE_HORIZON=60` grade a recommendation's
+  outcome at fixed calendar horizons — built for the core book's monthly
+  cadence, wrong for a sleeve with a 5-day time stop (a flex trade is closed
+  and gone before its first outcome stamp even matures). Not redesigned this
+  cycle (explicitly out of scope) — recorded as new entry **#61**, cross-
+  referencing #23 (backtest harness) and #58 (weight-tuning, which needs
+  sleeve-appropriate grading to have anything to regress against).
+  `layer: "flex"` tagging was AUDITED, not changed — `_record_trade_history`
+  already hardcodes it on every flex TradeHistory row regardless of `extra`
+  contents, confirmed by reading the function body, no code change needed.
+- **Task G — bookkeeping.** This entry; entry **#61** (Task F above); the
+  N=30 threshold recorded as a decision gate (proposed, not yet confirmed)
+  rather than a placeholder; `CLAUDE.md` records the closed-trade ledger as
+  the canonical sleeve performance record and the single-funnel-per-close-
+  path rule; `docs/specs/Flex_Catalyst_Engine_v1.0.md` updated with the new
+  persistence surface.
+
+**Three decision gates surfaced in the PR body, deliberately left unresolved:**
+1. **Daily mark timing** — implemented as last-in-hours-tick (idempotent
+   per-tick overwrite, converges without explicit last-tick detection); the
+   09:00-collector-against-prior-close alternative was not built. Confirm or
+   override.
+2. **Backfill** — none attempted. The ledger starts empty at first write;
+   existing `TradeHistory` flex rows have no prices to reconstruct from. The
+   panel should show an explicit inception date rather than implying history
+   that doesn't exist.
+3. **N=30 sample-size floor** — proposed default, not yet confirmed.
+
+### 57. 2026-08-10 session: Catalyst Sleeve Funnel — candidate discovery + scoring — Done, merged PR #36 (`feat/20260810-catalyst-sleeve-funnel` → master, commit `e402bbc`)
 The Flex Catalyst Engine (`src/flex/`) was fully built but could only ever
 trade names it already knew about — three structural gaps in the FUNNEL that
 feeds it, labelled G1/G2/G3 in this session's own scope doc (**not** the

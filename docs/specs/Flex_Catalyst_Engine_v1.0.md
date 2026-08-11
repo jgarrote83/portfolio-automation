@@ -142,9 +142,50 @@ incl. suppressed actions), `flex-executions/{date}.json` (order results). Flex t
 also write `TradeHistory` rows (`layer:"flex"`, `engine:"flex_intraday"`) so Phase C
 outcome-stamping + `track_record` keep measuring them.
 
+**Performance persistence (session 2026-08-10, Flex Sleeve Performance Ledger —
+`src/flex/trades.py`).** Two more blobs, same `flex-ledger` container:
+
+- **`closed-trades.json`** — append-only, one row per REALIZED trade (not per fill —
+  a 2R scale-out plus its eventual stop/time-stop close are ONE trade with a `fills[]`
+  array). Written through a single funnel, `flex/handler.py::_finalize_closed_trade`,
+  that every close path (`time_stop`, the reconcile-driven broker-stop-fill path, and
+  the entry-that-never-filled no-op) routes through — `scale_out` itself only APPENDS
+  a fill to the still-open ledger row, it doesn't close the trade. Fills are
+  reconciled against `AlpacaClient.get_activities("FILL", ...)` — broker truth, never
+  the engine's own intent — so `pnl_usd`/`r_multiple` are `null` (with a
+  `pnl_unavailable_reason`) rather than fabricated whenever a fill price can't be
+  confirmed. Idempotent on `trade_id` (generated once at open in `flex/ledger.py::
+  new_entry`, unlike `order_ids` which a stop replace overwrites). Each row also
+  carries the `catalyst_score`/`score_components` the name had at entry (from the
+  catalyst-sleeve-funnel's `catalyst_screen.ledger`) and `nomination_thesis` — the
+  raw material for future weight-tuning (FOLLOWUPS #58) and sleeve-appropriate Phase C
+  grading (FOLLOWUPS #61, not yet built — the existing `_OUTCOME_HORIZONS`
+  30/60/90-day core-book grading is the wrong shape for a 5-day-time-stop sleeve).
+- **`equity-series.json`** — one row per trading day (`sleeve_notional_usd`,
+  `unrealized_usd`, `cumulative_realized_usd`, `total_equity`, `open_positions`,
+  `closed_trades_to_date`), upserted by date on every in-hours tick (converges to
+  the last successful tick of the day without needing to detect which tick is last).
+  Consumed by `GET /api/performance` (`sleeve_contribution_pp`/`sleeve_trade_count`,
+  cumulative from the window start, never a start=100 index — the sleeve is
+  intermittently deployed, unlike the always-invested core book) and rendered as a
+  separate panel on `web/performance.html` below N=30 closed trades shown dashed/
+  greyed, no skill statistic ever computed on it.
+
 ## 12. Tests
 
 Pure-module suites: `test_flex_indicators`, `test_flex_sizing`, `test_flex_entry`,
 `test_flex_exit`, `test_flex_reconcile`, `test_flex_separation`, `test_flex_prompt_schema`.
-The handler is thin orchestration validated by the dry-run path (`POST /api/flex
-{"dry_run":true}`) and the live-paper verification, not by unit tests.
+The handler's orchestration loop (`run_flex_intraday` itself) is still validated by
+the dry-run path (`POST /api/flex {"dry_run":true}`) and live-paper verification, not
+by unit tests — but as of session 2026-08-10, its individually-callable helper
+functions ARE unit tested with a stub Alpaca client: `test_flex_trades` (the pure
+`flex/trades.py` builders — `build_closed_trade`, `merge_broker_fills`,
+`fills_from_activities`, `build_sleeve_mark` — plus idempotency on `record_
+closed_trade`) and `test_flex_close_paths` (every close path — `time_stop`,
+`scale_out`, the broker-stop-fill reconcile path, and the entry-never-filled
+no-record case — called directly against `flex/handler.py`'s `_act_on_exit`/
+`_open_position`/`_finalize_closed_trade`/`_catalyst_score_lookup`, storage
+monkeypatched to an in-memory blob store). This caught a real bug pre-merge: an
+unpriced just-submitted fill was shadowing a broker-confirmed price in `merge_
+broker_fills` until the PnL assertion in `test_time_stop_pnl_present_when_broker_
+confirms_both_fills` failed against it.
