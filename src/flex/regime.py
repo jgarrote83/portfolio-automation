@@ -147,3 +147,32 @@ def regime_fit(sector: str | None, quadrant: str | None) -> bool:
     if not fits:
         return False
     return q in fits
+
+
+def regime_fit_score(sector: str | None, quadrant: str | None, basis: str | None) -> float | None:
+    """Graded regime-fit reading for the catalyst-screen composite (session
+    2026-08-10 — regime_fit demoted from a hard entry veto to a scored input,
+    ``src/flex/entry.py``). Unlike ``regime_fit`` (boolean, deliberately
+    conservative for ENTRY), this distinguishes a real negative reading (a
+    recognized sector that does not fit) from a genuine absence of any regime
+    read (an unresolved quadrant or an unrecognized sector) — the composite's
+    absent-vs-zero rule requires that distinction; collapsing both to a boolean
+    False would silently handicap every candidate scored on a no-read day.
+
+    Returns ``None`` (absent) when there is no regime read to score against.
+    Returns ``0.0`` when the sector is recognized but does not fit the resolved
+    quadrant — a real negative reading. Returns ``1.0`` when it fits under a
+    fully-pinned (``basis == "active"``) quadrant, or ``0.6`` when it fits only
+    under a lower-confidence resolution (``favored_single`` /
+    ``borderline_5d_tiebreak``) — a fit is still a fit, but a tiebreak-resolved
+    regime is a weaker prior than a pinned one.
+    """
+    q = (quadrant or "").upper()
+    if q not in ("Q1", "Q2", "Q3", "Q4"):
+        return None  # no resolved quadrant — absent, not a negative reading
+    fits = _SECTOR_QUADRANTS.get((sector or "").strip().lower())
+    if not fits:
+        return None  # unrecognized sector — absent, not a negative reading
+    if q not in fits:
+        return 0.0
+    return 1.0 if basis == "active" else 0.6

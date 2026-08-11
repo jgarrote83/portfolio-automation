@@ -111,15 +111,21 @@ def test_build_entry_admits_defensive_past_g1_in_resolved_q3():
     assert e["quadrant_basis"] == "borderline_5d_tiebreak"
 
 
-def test_build_entry_skips_tech_in_q3_with_basis_in_reason():
+def test_build_entry_no_longer_skips_tech_in_q3_regime_mismatch():
+    # Session 2026-08-10 (catalyst-sleeve-funnel Task E): regime_fit is demoted
+    # from a hard veto to an informational field, so a mismatched sector no
+    # longer short-circuits the pipeline on its own — regime_fit is still
+    # computed and surfaced (basis included), but full trending structure
+    # reaches sizing exactly as it would for a fitting sector.
     e = build_flex_entry(
         {"symbol": "NVDA", "sector": "Technology"},
-        _intraday([100, 101, 102]), _daily(),
+        _intraday([100, 100.5, 101, 101.5, 102, 102.5, 103]), _daily(),
         "Q3", 1_000_000.0, 45, FlexConfig(), quadrant_basis="borderline_5d_tiebreak",
     )
     assert e["regime_fit"] is False
-    assert e["skip_reason"].startswith("regime_fit:")
-    assert "borderline_5d_tiebreak" in e["skip_reason"]
+    assert e["quadrant_basis"] == "borderline_5d_tiebreak"
+    assert e["entry_trigger"] == "pass"
+    assert e["skip_reason"] is None
 
 
 # --- engine consumption + fallback -------------------------------------------
