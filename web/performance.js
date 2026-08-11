@@ -16,7 +16,20 @@
   const QLABEL = { Q1: "Q1 Goldilocks", Q2: "Q2 Reflation",
                    Q3: "Q3 Stagflation", Q4: "Q4 Deflation" };
 
+  // Flex sleeve panel (session 2026-08-10, Flex Sleeve Performance Ledger
+  // Task E). #b8348f validated with scripts/validate_palette.js (dataviz
+  // skill) against the panel surface (#161a22, dark mode) and every existing
+  // series color in this file: contrast >=3:1 and CVD ΔE >=8 (a clean PASS,
+  // not the 6-8 WARN band) on every pair, normal-vision ΔE >=15 on every
+  // pair (well above the hard-fail floor); worst simulated-CVD pair is vs Q1
+  // green at ΔE 9.5 — full details in the PR body. A muted grey substitutes
+  // for it below the N=30 sample floor (never a skill/win-rate stat here).
+  const SLEEVE_COLOR = "#b8348f";
+  const SLEEVE_THIN_COLOR = "#5a6070";
+  const SLEEVE_MIN_N = 30;
+
   let chart = null;
+  let sleeveChart = null;
   let regimeKeys = [];  // per-point favored-bucket key, set before chart build
 
   async function load(windowKey) {
@@ -25,9 +38,11 @@
     try {
       const data = await window.pfauto.api(`/api/performance?window=${encodeURIComponent(windowKey)}`);
       renderChart(data);
+      renderSleeveChart(data);  // after renderChart -- shares its regimeKeys
       renderTable(data);
       renderSummary(data);
       renderQuadSummary(data);
+      renderSleeveSummary(data);
     } catch (e) {
       summaryEl.textContent = `Error: ${e.message}`;
     }
@@ -186,6 +201,83 @@
     if (chart) chart.destroy();
     regimeKeys = series.map(p => (p.favored_bucket || []).join("+"));
     chart = new Chart(canvas, cfg);
+  }
+
+  // Sample-size honesty (required, not optional — Task E): the closed-trade
+  // count is always shown, and no Sharpe/win-rate/skill statistic is ever
+  // computed or displayed on this panel at any N.
+  function renderSleeveSummary(data) {
+    const el = document.getElementById("sleeve-summary");
+    if (!el) return;
+    if (!data.sleeve_available) {
+      el.textContent = "No sleeve activity recorded yet.";
+      return;
+    }
+    const n = data.sleeve_closed_trade_count_total || 0;
+    el.innerHTML = n < SLEEVE_MIN_N
+      ? `<strong>${n} closed trade${n === 1 ? "" : "s"}</strong> since inception — ` +
+        `below ${SLEEVE_MIN_N}, not yet a meaningful sample (line shown dashed/greyed).`
+      : `<strong>${n} closed trades</strong> since inception.`;
+  }
+
+  // Separate panel, separate y-axis unit (percentage points of equity
+  // contributed, not a buy-and-hold index) — shares x-axis labels, the
+  // window selector, and the regimeBands plugin/regimeKeys with the main
+  // chart above (renderChart must run first each load() to set regimeKeys).
+  function renderSleeveChart(data) {
+    const canvas = document.getElementById("sleeveChart");
+    if (sleeveChart) { sleeveChart.destroy(); sleeveChart = null; }
+    if (!data.sleeve_available) return;
+
+    const series = data.series || [];
+    const labels = series.map(p => p.date);
+    const n = data.sleeve_closed_trade_count_total || 0;
+    const thin = n < SLEEVE_MIN_N;
+    const sleeveData = series.map(p => p.sleeve_contribution_pp != null ? p.sleeve_contribution_pp : null);
+
+    const cfg = {
+      type: "line",
+      data: {
+        labels,
+        datasets: [{
+          label: "Flex sleeve contribution",
+          data: sleeveData,
+          borderColor: thin ? SLEEVE_THIN_COLOR : SLEEVE_COLOR,
+          backgroundColor: "transparent",
+          borderWidth: 2,
+          borderDash: thin ? [5, 4] : [],
+          tension: 0.15, pointRadius: 0, pointHoverRadius: 4, spanGaps: true,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { labels: { color: thin ? SLEEVE_THIN_COLOR : "#e6e8ee" } },
+          tooltip: {
+            callbacks: {
+              label: (ctx) => {
+                const v = ctx.parsed.y;
+                const pt = series[ctx.dataIndex];
+                const tc = pt && pt.sleeve_trade_count != null ? pt.sleeve_trade_count : null;
+                const pct = v == null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(3)}pp`;
+                return tc != null ? `${ctx.dataset.label}: ${pct} (${tc} trades)` : `${ctx.dataset.label}: ${pct}`;
+              },
+            },
+          },
+        },
+        scales: {
+          x: { ticks: { color: "#8a93a6", maxTicksLimit: 10 }, grid: { color: "#262c38" } },
+          y: {
+            ticks: { color: "#8a93a6", callback: (v) => `${v >= 0 ? "+" : ""}${Number(v).toFixed(2)}pp` },
+            grid: { color: "#262c38" },
+            title: { display: true, text: "percentage points of equity contributed", color: "#8a93a6" },
+          },
+        },
+      },
+      plugins: [regimeBands],
+    };
+    sleeveChart = new Chart(canvas, cfg);
   }
 
   function renderTable(data) {
