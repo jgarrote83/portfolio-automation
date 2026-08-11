@@ -116,6 +116,77 @@ def test_time_stop_pnl_present_when_broker_confirms_both_fills(blob_store, monke
     assert trades[0]["pnl_usd"] == -600.0  # (94-100)*100
 
 
+# --- write-failure visibility (PR #37 pre-merge correction, Task 2) ---------
+
+def test_time_stop_write_failure_still_pops_ledger_and_records_history(blob_store, monkeypatch):
+    """A record_closed_trade failure must not block the order action (the
+    ledger row is popped, TradeHistory is still written) but must surface
+    exactly once in decisions["closed_trade_write_failures"] -- visibility,
+    not recovery."""
+    entry = _open_ledger_entry()
+    ledger = {"XYZ": entry}
+    client = _StubAlpaca(activities=[
+        {"symbol": "XYZ", "side": "buy", "qty": "100", "price": "100.00",
+         "transaction_time": "2026-08-10T14:31:00Z"},
+        {"symbol": "XYZ", "side": "sell", "qty": "100", "price": "94.00",
+         "transaction_time": "2026-08-14T15:00:00Z"},
+    ])
+
+    def _boom(trade):
+        raise RuntimeError("blob write failed")
+    monkeypatch.setattr(trades_mod, "record_closed_trade", _boom)
+
+    history_calls = []
+    monkeypatch.setattr(handler, "_record_trade_history",
+                        lambda *a, **k: history_calls.append((a, k)))
+
+    st = {"next_action": "time_stop", "scale_out_qty": 100}
+    decisions = {"orders_suppressed": [], "orders_issued": []}
+    handler._act_on_exit(client, ledger, "XYZ", st, "2026-08-14", decisions, [])
+
+    assert "XYZ" not in ledger  # order action unblocked -- still popped
+    assert len(history_calls) == 1  # TradeHistory still recorded
+    failures = decisions.get("closed_trade_write_failures")
+    assert failures is not None and len(failures) == 1
+    assert failures[0]["symbol"] == "XYZ"
+    assert failures[0]["exit_reason"] == "time_stop"
+    assert "blob write failed" in failures[0]["error"]
+    # And the failure genuinely means nothing landed -- no fabricated record.
+    assert trades_mod.read_closed_trades() == []
+
+
+def test_broker_stop_fill_write_failure_surfaces_in_decisions(blob_store, monkeypatch):
+    entry = _open_ledger_entry()
+    client = _StubAlpaca(activities=[
+        {"symbol": "XYZ", "side": "buy", "qty": "100", "price": "100.00",
+         "transaction_time": "2026-08-10T14:31:00Z"},
+        {"symbol": "XYZ", "side": "sell", "qty": "100", "price": "96.00",
+         "transaction_time": "2026-08-13T10:05:00Z"},
+    ])
+
+    def _boom(trade):
+        raise RuntimeError("blob write failed")
+    monkeypatch.setattr(trades_mod, "record_closed_trade", _boom)
+    monkeypatch.setattr(handler, "_record_trade_history", lambda *a, **k: None)
+
+    decisions = {"reconcile": {}}
+    exits_to_record = [{"symbol": "XYZ", "entry": entry, "reason": "closed_at_broker"}]
+    for ex in exits_to_record:
+        trade = None
+        try:
+            trade = handler._finalize_closed_trade(
+                client, ex["entry"], ex["symbol"], "stop_fill", "2026-08-13")
+        except Exception as cte:  # noqa: BLE001
+            handler._record_closed_trade_write_failure(decisions, ex["symbol"], "stop_fill", cte)
+        handler._record_trade_history(
+            "2026-08-13", ex["symbol"], "sell", 100, status="closed_at_broker",
+            extra=handler._trade_history_extra(trade))
+
+    failures = decisions.get("closed_trade_write_failures")
+    assert failures is not None and len(failures) == 1
+    assert failures[0]["exit_reason"] == "stop_fill"
+
+
 # --- Path 2: scale_out (partial realization -- NOT a close) -----------------
 
 def test_scale_out_appends_fill_without_closing_position(blob_store, monkeypatch):

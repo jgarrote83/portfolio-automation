@@ -79,8 +79,9 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
         trade = None
         try:
             trade = _finalize_closed_trade(client, ex["entry"], ex["symbol"], "stop_fill", today)
-        except Exception:  # noqa: BLE001
+        except Exception as cte:  # noqa: BLE001
             logger.exception("closed-trade finalize failed for %s (broker-truth path)", ex["symbol"])
+            _record_closed_trade_write_failure(decisions, ex["symbol"], "stop_fill", cte)
         _record_trade_history(
             today, ex["symbol"], "sell", int(ex["entry"].get("qty_current") or 0),
             status="closed_at_broker", extra=_trade_history_extra(trade),
@@ -285,8 +286,9 @@ def _act_on_exit(client, ledger, sym, st, today, decisions, executions) -> None:
                 try:
                     trade = _finalize_closed_trade(
                         client, entry, sym, "time_stop", today, extra_fill=extra_fill)
-                except Exception:  # noqa: BLE001
+                except Exception as cte:  # noqa: BLE001
                     logger.exception("closed-trade finalize failed for %s (time_stop)", sym)
+                    _record_closed_trade_write_failure(decisions, sym, "time_stop", cte)
                 _record_trade_history(today, sym, "sell", qty, status="time_stop",
                                       extra=_trade_history_extra(trade))
             ledger.pop(sym, None)
@@ -475,6 +477,22 @@ def _order_fill_price(client, order_id) -> float | None:
     except Exception:  # noqa: BLE001
         logger.warning("fill-price lookup for order %s failed", order_id)
         return None
+
+
+def _record_closed_trade_write_failure(decisions, symbol, exit_reason, error) -> None:
+    """Surface a `_finalize_closed_trade` failure into the run's `decisions`
+    dict (PR #37 pre-merge correction, Task 2) — swallowing the exception at
+    the call site stays correct (bookkeeping must never block or corrupt an
+    order action), but a persistent write failure dropping closed trades
+    silently while the sleeve keeps trading would understate the performance
+    curve with nothing anywhere surfacing it. Lands in the persisted
+    flex-decisions blob (visible to the daily report), not just Azure logs.
+    Visibility only — no retry, no dead-letter queue; recovery is a separate
+    decision.
+    """
+    decisions.setdefault("closed_trade_write_failures", []).append({
+        "symbol": symbol, "exit_reason": exit_reason, "error": str(error),
+    })
 
 
 def _finalize_closed_trade(client, entry, symbol, exit_reason, today, extra_fill=None) -> dict | None:
