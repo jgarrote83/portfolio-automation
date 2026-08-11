@@ -256,7 +256,7 @@ Everything else is separate:
   originates from a flex position rather than a core weight change; everything
   else in this contract is unchanged.
 
-#### Your job on Flex: nominate + assert regime fit (the engine does the rest)
+#### Your job on Flex: nominate from a ranked pool (the engine does the rest)
 
 For each catalyst idea, emit one `flex_nominations[]` entry. A good nomination:
 
@@ -271,23 +271,28 @@ For each catalyst idea, emit one `flex_nominations[]` entry. A good nomination:
    wrong to nominate a name on an unresolved date as it is to correctly decline one
    on that same ground the next day. *(07-30 nominated ETN with "earnings date
    unknown"; 07-31 correctly declined INTC for the identical reason — the bar must
-   hold both times, not just the second.)*
-2. **Asserts regime fit against `flex_quadrant.resolved`** (NOT the raw axes). The
-   collector resolves the quadrant the flex engine treats as in force in the
-   `flex_quadrant` block: when both axes are pinned it is the active quadrant; when
-   the regime is **borderline** (a 2-quadrant `favored_bucket` like Q3/Q4) it resolves
-   to the member with the better trailing 5-day benchmark return (`basis:
-   "borderline_5d_tiebreak"`). State the candidate's `sector`, name
-   `flex_quadrant.resolved` as the quadrant it must fit, and **when the basis is a
-   tiebreak, say so** (e.g. "fits Q3, the borderline_5d_tiebreak winner over Q4"). If
-   `flex_quadrant.resolved` is `""` (`basis: "unresolved"` — no read, or missing
-   benchmark data) the engine enters nothing; do not nominate. The engine re-checks
-   fit deterministically against the SAME `flex_quadrant.resolved` and its
-   `_SECTOR_QUADRANTS` map (below), so do not nominate a name in the wrong quadrant.
+   hold both times, not just the second.)* **Exception (session 2026-08-10):** a
+   candidate with NO scheduled earnings print at all is not held to this bar for
+   the earnings leg specifically — cite whatever dated catalyst it does have
+   (contract milestone, legislative date, thematic inflection). Absence of an
+   earnings date must never be treated as a defect; see `catalyst_score` below.
+2. **States regime fit as CONTEXT, not a gate (demoted session 2026-08-10 —
+   regime_fit is no longer a hard veto in the engine, `src/flex/entry.py`).** A
+   monthly-vintage macro quadrant has no business vetoing a 5-day catalyst trade —
+   cadence mismatch. Still name the candidate's `sector` and `flex_quadrant.resolved`
+   (the collector's resolved quadrant: pinned axes → `active`; **borderline** 2-quadrant
+   `favored_bucket` → the member with the better trailing 5-day benchmark return,
+   `basis: "borderline_5d_tiebreak"`), and say whether it fits per the map below — but
+   a mismatch is a WEAKER thesis, not a disqualified one. Weigh it alongside the other
+   `catalyst_score` components (next item): a strong dated catalyst with weak regime
+   fit can still be a good nomination; a weak catalyst leaning entirely on regime fit
+   is not. `flex_quadrant.resolved == ""` (`basis: "unresolved"`) means no regime read
+   at all — treat regime fit as UNKNOWN for that name (neither a plus nor a minus),
+   never as a mismatch.
 
-   **The engine's sector→quadrant map is the source of truth (do not free-associate a
-   sector to a quadrant — the 2026-07-20 report wrongly put "NEE/XLU … better in
-   Q1/Q2 reflation"; utilities are Q3/Q4 defensives):**
+   **The engine's sector→quadrant map (unchanged; still the source of truth — do not
+   free-associate a sector to a quadrant — the 2026-07-20 report wrongly put
+   "NEE/XLU … better in Q1/Q2 reflation"; utilities are Q3/Q4 defensives):**
 
    | FMP `sector` | Fits quadrant(s) |
    |---|---|
@@ -307,13 +312,36 @@ For each catalyst idea, emit one `flex_nominations[]` entry. A good nomination:
    (thin names break the intraday VWAP read). If fundamentals/price are missing from
    the snapshot, say so — the engine cannot size a name it has no data for.
 
+**`catalyst_screen` — the deterministic discovery ranking (session 2026-08-10,
+catalyst-sleeve-funnel Task D).** Every run, the collector screens a DISCOVERY
+universe (genuinely new names — never held, never previously nominated — sourced
+from the market-wide earnings calendar `earnings_calendar_market` and market-wide
+congressional flow) and ranks it by a deterministic `catalyst_score`: the EQUAL-
+WEIGHTED mean of up to six components (`earnings_proximity`, `news_recency`,
+`news_tone`, `momentum`, `regime_fit_score`, `political_flow`), each independently
+computed — **you never compute this score, only read it.** A component with no
+underlying data is ABSENT and drops out of the mean rather than scoring 0 — this is
+why a no-earnings-date name is never handicapped for it (see item 1). A candidate
+needs at least 4 of the 6 components available to be `rankable`; the top-ranked
+rankable names are pre-merged into `flex_candidates` (`source: "screened"`,
+alongside the existing `"static"`/`"dynamic"` names) so they already carry a price
+and profile like any other candidate. Read `catalyst_screen.ledger` for the full
+scored pool (including screened-out and thin-coverage names, each with its
+`screen_reason` or `components_missing`) and `catalyst_screen.nominated` for the
+names that cleared the bar — treat a high-ranked `nominated` name as a legitimate,
+pre-vetted lead, not just another idea; you are still free to nominate from
+`ai_conviction`/`congressional`/`lobbying`/`contracts`/`thematic` as before, but
+should not ignore what the deterministic screen has already surfaced. If
+`catalyst_screen.available` is `false` (build failure — non-fatal, the funnel falls
+back to `flex_candidates`' static+dynamic names only), say so and proceed without it.
+
 You do **not** publish a stop, a size, or a take-profit for a flex name — those are
 computed intraday by the engine and reported back in `flex_state`. Source a
 nomination from any of `ai_conviction`, `congressional` (weak — needs a multi-member
-cluster), `lobbying` / `contracts`, or `thematic` (the capex cascade), cited as
-`flex_source`. Nominations carry the Phase C reasoning enums (`primary_trigger`,
-`thesis_type` — typically `catalyst` — `trigger_evidence`, `catalyst_date`) so the
-`track_record` loop can measure them.
+cluster), `lobbying` / `contracts`, `thematic` (the capex cascade), or the
+`catalyst_screen` ranking above, cited as `flex_source`. Nominations carry the Phase C
+reasoning enums (`primary_trigger`, `thesis_type` — typically `catalyst` —
+`trigger_evidence`, `catalyst_date`) so the `track_record` loop can measure them.
 
 #### Reading flex_state — echo when reconciled; the paper account is canonical
 
