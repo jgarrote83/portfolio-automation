@@ -19,6 +19,7 @@ from collector.handler import (  # noqa: E402
 )
 
 CFG = _load_divergence_config()
+_TODAY = "2026-07-23"
 
 
 # ---------------------------------------------------------------------------
@@ -219,34 +220,34 @@ def _lg(direction: str, score: float = 0.5, confidence: str = "full") -> dict:
 def test_div_growth_fires_when_leading_rising_vs_realized_falling():
     """Leading rising while realized falling → active, direction_implied 'rising'."""
     growth = {"direction": "falling"}
-    d = _div_leading_vs_lagging_growth(growth, _lg("rising"), CFG)
+    d = _div_leading_vs_lagging_growth(growth, _lg("rising"), CFG, _TODAY, 7)
     assert d["status"] == "active"
     assert d["direction_implied"] == "rising"
 
 
 def test_div_growth_fires_when_leading_falling_vs_realized_rising():
     growth = {"direction": "rising"}
-    d = _div_leading_vs_lagging_growth(growth, _lg("falling", score=-0.5), CFG)
+    d = _div_leading_vs_lagging_growth(growth, _lg("falling", score=-0.5), CFG, _TODAY, 7)
     assert d["status"] == "active"
     assert d["direction_implied"] == "falling"
 
 
 def test_div_growth_indeterminate_when_aligned():
     growth = {"direction": "rising"}
-    d = _div_leading_vs_lagging_growth(growth, _lg("rising"), CFG)
+    d = _div_leading_vs_lagging_growth(growth, _lg("rising"), CFG, _TODAY, 7)
     assert d["status"] == "indeterminate"
     assert d["direction_implied"] == "aligned"
 
 
 def test_div_growth_indeterminate_when_flat():
     growth = {"direction": "falling"}
-    d = _div_leading_vs_lagging_growth(growth, _lg("flat", score=0.0), CFG)
+    d = _div_leading_vs_lagging_growth(growth, _lg("flat", score=0.0), CFG, _TODAY, 7)
     assert d["status"] == "indeterminate"
 
 
 def test_div_growth_indeterminate_when_unavailable():
     growth = {"direction": "falling"}
-    d = _div_leading_vs_lagging_growth(growth, {"available": False}, CFG)
+    d = _div_leading_vs_lagging_growth(growth, {"available": False}, CFG, _TODAY, 7)
     assert d["status"] == "indeterminate"
     assert d["direction_implied"] == "unresolved"
 
@@ -254,14 +255,14 @@ def test_div_growth_indeterminate_when_unavailable():
 def test_div_growth_indeterminate_when_low_confidence():
     """Low-confidence composite → doesn't fire (house rule: low confidence = indeterminate)."""
     growth = {"direction": "falling"}
-    d = _div_leading_vs_lagging_growth(growth, _lg("rising", confidence="low"), CFG)
+    d = _div_leading_vs_lagging_growth(growth, _lg("rising", confidence="low"), CFG, _TODAY, 7)
     assert d["status"] == "indeterminate"
 
 
 def test_div_growth_id_and_schema():
     """Result has the required schema."""
     growth = {"direction": "falling"}
-    d = _div_leading_vs_lagging_growth(growth, _lg("rising"), CFG)
+    d = _div_leading_vs_lagging_growth(growth, _lg("rising"), CFG, _TODAY, 7)
     assert d["id"] == "leading_vs_lagging_growth"
     assert "description" in d
     assert "signals" in d
@@ -334,7 +335,7 @@ def test_inflation_and_growth_de_risk_takes_more_defensive():
         "direction_implied": "falling",  # inflation falling → Q4 projection (falling+falling)
         "signals": [
             {"name": "be_5y.delta_20d_bp", "value": -25.0},
-            {"name": "inflation_axis.oil_wti_20d_pct", "value": -15.0},
+            {"name": "inflation_axis.oil_20d_pct_governing", "value": -15.0},
             {"name": "inflation_axis.direction (realized)", "value": "rising"},
         ],
     }

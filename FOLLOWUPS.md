@@ -3,7 +3,57 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-08-10, later same day (Flex Sleeve Performance Ledger + SWA panel, branch `feat/20260810-flex-performance-ledger`).**
+**▶ START HERE — last session 2026-08-14 (08-11→08-14 report audit: report-to-broker fidelity, oil signal correctness, transition_watch hysteresis, thematic conviction overlay, branch `feat/20260814-thematic-conviction-oil-fidelity`).**
+Four-task PR triggered by a chain of defects the 08-11→08-14 reports exposed: a 6-order
+"Final trade plan" that collapsed to 1 submitted order with no warning anywhere (Task A);
+`transition_watch` activating for one session on a stale FRED oil leg the axis itself had
+already correctly bypassed in favor of a fresh USO proxy, blowing the Q2 reference block
+~45x and reversing it the next day (Task B); the transition_watch mechanism itself having
+no memory at all to prevent exactly that whipsaw (Task C); and four sessions of a live
+Hormuz energy-supply theme narrated in prose with zero path to an actual position size,
+pinning VDE at a 1-share 0.097% floor (Task D). **A0 blocking probe (done first, per
+instruction) found Case 1 — LLM self-inconsistency, not validator rejection or executor
+drop:** the 08-12 model's own `trades[]` JSON never contained the 6 narrated trades at all
+(only a single band-enforcement-synthesized COWZ buy); `daily-trades.json` and
+`daily-executions.json` matched each other exactly that day. This reclassifies which fix
+matters most — A2's `plan_vs_submitted` (JSON-vs-broker) structurally CANNOT catch a
+prose-vs-JSON divergence; A1's canonical addendum (rendered from `trades[]` itself, placed
+directly under the narrative) is what actually closes the observed incident. **A**:
+A1 canonical submitted-order addendum + a malformed-JSON debug-capture gap found during
+the probe itself (App Insights retention had already expired, blocking full root-cause
+certainty on WHY the JSON came up empty); A2 `plan_vs_submitted` (JSON-to-broker
+fidelity, a complementary but different guard); A3 prompt hardening (the exact 08-12→08-13
+false "executed as planned" reconciliation, closed with an anti-fabrication rule).
+**B**: B1 divergence detector now reads `inflation_axis.oil_20d_pct_governing` (whichever
+source the axis itself used) instead of the raw stale FRED leg directly — reconstructing
+the 08-12 inputs (stale FRED 17.8% vs fresh USO 6.2%) now correctly yields `indeterminate`,
+which is the whole fix; B2 real per-leg `as_of` + staleness gating on divergences 1/2/5
+(the realized-inflation leg uses the freshness block's 45d monthly threshold, not the flat
+7d daily one — a deliberate deviation from the literal 7d-everywhere reading, since core
+CPI/PCE genuinely only refreshes monthly); B3 prompt doctrine requiring one governing oil
+number, cited with source/as-of, every time. **C**: full confirm/release hysteresis (new
+`TransitionWatchState` table, mirrors the existing `AxisDirectionState` pattern) plus a
+per-session staged-fraction ramp — `confirm_sessions`/`release_sessions`=2,
+`max_session_delta_frac`=0.10. **D**: the thematic conviction overlay — new
+`thematic_conviction` snapshot block (collector-built scaffold: ladder, caps, eligibility,
+per-symbol hysteresis via a new `ThematicConvictionState` table), integrated into
+`_build_reference_weights` as a floor-lift (never a ceiling) carved from the
+non-active-quadrant remainder, with `ceiling_pressure` surfacing when it doesn't fit; a new
+`ThematicHistory` table + Brier-score/hit-rate calibration grading (`_stamp_thematic_outcomes`,
+mirrors `_stamp_switch_outcomes`'s per-horizon pattern) that mechanically damps the ladder
+when the model's own track record is poor. **Deviation from the literal spec, on record:**
+D5's "insert as step 3c, before step 4" doesn't fit this codebase's actual units
+(`raw_core`/`core_target` are %-of-CORE at that point; `thematic_conviction` targets are
+%-of-EQUITY by design, and the core→equity `scale` factor isn't known until step 5) — the
+floor-lift is applied immediately after step 5's equity-denominated `weights` dict instead,
+verified empirically to produce the intended behavior (floor lift never reduces a
+quadrant-driven weight; a large lift correctly trims the active quadrant and flags
+`ceiling_pressure`). Suite 1026→1126 green (100 new tests), ruff clean, every new/modified
+test confirmed failing on pre-fix source via `git stash` isolation on the specific changed
+file. **Two decision gates for Jorge, unresolved — see entries #63/#64 below.**
+**Auto-merge: NO, human review required.**
+
+**▶ Prior session 2026-08-10, later same day (Flex Sleeve Performance Ledger + SWA panel, branch `feat/20260810-flex-performance-ledger`).**
 Seven-task PR building the closed-trade record the sleeve never had — before this, all four close/realization paths (`time_stop`, `scale_out`, a broker stop fill via `reconcile_ledger`'s `exits_to_record`, and an entry that never actually filled) dropped the trade's outcome on the floor; `_record_trade_history` wrote a TradeHistory row with `extra={}` (no price, no P&L — an audit trail, not a performance record). **Task A**: new `src/flex/trades.py` (`closed-trade ledger + equity-series helpers, mirrors flex/ledger.py's I/O-plus-pure-builders pattern) + a single `_finalize_closed_trade` funnel in `flex/handler.py` every close path routes through. **Reconciliation is broker truth, not engine intent** — `merge_broker_fills` reconstructs the ACTUAL fill history from `AlpacaClient.get_activities("FILL", ...)` rather than trusting what the engine submitted; an entry with zero confirmed broker buy fills (the entry-side-failure case) writes NO closed-trade record at all — recording one would fabricate an entry price for shares never bought. `record_closed_trade` is idempotent on `trade_id` (generated once at open, carried through every fill — unlike `order_ids`, which DOES get overwritten on stop replacement). **A genuine bug caught by the empirical-verification doctrine, not by inspection:** an unpriced `extra_fill` (get_order hadn't confirmed a fill yet) was being folded into the "already accounted for" qty in `merge_broker_fills`, silently shadowing the broker's own later-confirmed price — `tests/test_flex_close_paths.py::test_time_stop_pnl_present_when_broker_confirms_both_fills` failed against the first cut of the fix and caught it before it shipped. **Task B**: `catalyst_score`/`score_components` stamped onto the ledger row at entry, read directly from the snapshot's `catalyst_screen.ledger` (catalyst-sleeve-funnel PR, entry **#57**) rather than trusting the model's nomination JSON to echo it back — the highest-value field in the schema for the eventual weight-tuning question (did `news_tone` actually predict anything?). **Task C**: `flex-ledger/equity-series.json`, upserted on every in-hours tick (decision gate 1: converges to "last successful tick" without needing to detect which tick is last). **Task D**: `/api/performance` gains `sleeve_contribution_pp`/`sleeve_trade_count` per point plus top-level `sleeve_available`/`sleeve_closed_trade_count_total` — cumulative from the WINDOW START, deliberately never normalized to a start=100 buy-and-hold index (the sleeve is intermittently deployed and flat much of the time; indexing it would render opening a position as a "return"). **Task E**: a second `<canvas>` on `web/performance.html` (never a 7th dataset — different units), sharing the x-axis/window selector/`regimeBands` plugin; color `#b8348f`, validated via the dataviz skill's `validate_palette.js` against the panel surface and all 6 existing series colors (contrast ≥3:1 on every pair, CVD ΔE clean-PASS ≥8 on every pair — worst is 9.5 vs Q1 green, short of the ≥13 stated target but a real PASS not a WARN; normal-vision ΔE ≥15 on every pair — full numbers in the PR body). Below N=30 closed trades the line renders dashed/greyed with a visible caption; no Sharpe/win-rate/skill stat anywhere on the panel at any N (decision gate 3: 30 is proposed, not confirmed). **Task F**: `_OUTCOME_HORIZONS=[30,60,90]`/`_HEADLINE_HORIZON=60` are wrong for a 5-day-time-stop sleeve (a catalyst trade is closed and gone before its first outcome stamp matures) — recorded as new entry **#61**, NOT redesigned this cycle; flex TradeHistory rows were already correctly `layer: "flex"` tagged (`_record_trade_history` hardcodes it) so no code change was needed there, just confirmation. Suite 983→1024 green (41 new tests across 4 new test files), ruff clean, every new test confirmed failing on pre-fix source (`git stash` isolation on `src/flex/handler.py`+`src/flex/ledger.py`+`web/api/function_app.py`; `src/flex/trades.py` via import-level failure). **Both counts are measured, not carried forward — see the CLAUDE.md baseline-measurement rule this correction added; the original 979/45 figures were copied from entry #57's own (also wrong) 979, propagating one bad number into a second.** **Three decision gates surfaced in the PR body, unresolved:** (1) daily mark timing — last-in-hours-tick chosen and implemented, not yet confirmed; (2) no backfill — the ledger starts empty at first write, an explicit inception date on the panel rather than reconstructing from incomplete `TradeHistory`; (3) N=30 sample-size floor, proposed not confirmed. **Auto-merge: NO, human review required.**
 
 **▶ Prior session 2026-08-10 (Catalyst Sleeve Funnel: candidate discovery + scoring, branch `feat/20260810-catalyst-sleeve-funnel`) — merged, PR #36.**
@@ -354,6 +404,62 @@ stamped) is measuring the wrong thing entirely, not just imprecisely.
   grading is UNTOUCHED (this is an additive sleeve-specific path, not a
   replacement); a human-reviewed PR per the Learning Loop's proposer≠approver
   invariant if the grading feeds any autonomous decision.
+
+### 63. Thematic-ladder numbers — pending Jorge's sanity check (HIGH — sizing decision, cross-refs #64)
+From the 2026-08-14 session (entry above). The `p_up_min` band edges and
+`target_pct_of_equity` values in `risk-limits.json → thematic_conviction.ladder`
+(0.52/0.58/0.65/0.75 → 0.50/1.25/2.5/4.0pp) and the `per_ticker_cap_pct_of_equity`
+(4.0)/`aggregate_cap_pct_of_equity` (8.0)/`max_session_delta_pp` (1.5) figures are a
+**starting proposal, not yet reviewed** — flagged explicitly in the PR description per
+instruction. They were chosen to mirror the shape of the existing
+`conviction_ladder_pct_of_core` ladder (coarse, monotonic bands) but the actual pp
+values are a judgment call about how much capital a thematic conviction call should
+be allowed to move, which is Jorge's to make, not inferred from precedent.
+
+### 64. D-6 decision gate — thematic lift on a non-selected pool member (HIGH — architecture decision, cross-refs #63)
+From the 2026-08-14 session. Task D4 rule 3 excludes a thematic nomination on a
+non-selected pool member (e.g. SOXX while `semis.selected = SMH`) with reason
+`non_selected_pool_member`, because `_build_reference_weights` step 4 zeroes every
+non-selected pool member by design (B1/decision D2, 2026-07-21) and a thematic lift
+would fight that loop, producing a permanently unfillable reference.
+- **Option A (implemented, current default):** the exclusion stands as specified — a
+  theme pointing at a non-selected pool member surfaces in `thematic_conviction.excluded`
+  with the reason, and the correct response is understood to be a sleeve-selection
+  switch (already autonomous per the 2026-07-27 blanket-switch doctrine), not a
+  thematic lift.
+- **Option B (not built):** let a thematic nomination on a non-selected pool member
+  *force* a sleeve-selection switch for that role, bypassing the existing hysteresis
+  streak/lead-margin gate that `sleeve_selection`/`SleeveSelectionState` already
+  enforces. This is a materially larger change — it would let the LLM's own
+  probability estimate override the deterministic momentum-blend selection scorecard
+  for a role, with real interaction effects against PR #31's auto-switch machinery
+  (which sleeve-selection state field wins, does a thematic-forced switch reset the
+  hysteresis streak, does it get its own OverrideHistory layer for grading). Deliberately
+  not built this cycle — present both options, let Jorge choose before ever considering
+  Option B.
+
+### 65. Post-merge watch — confirm `plan_vs_submitted` renders on the first live mismatch (LOW — verification only, cross-refs #62)
+From the 2026-08-14 session's Task A2. The mismatch/qty_mismatch/extra_in_submission
+classification logic is unit-tested against hand-built fixtures (`test_plan_vs_submitted.py`)
+but has never observed a REAL divergence in production — the 08-12 incident that
+motivated it turned out to be a Case-1 prose/JSON split that `plan_vs_submitted`
+structurally cannot see (see the A0 probe finding above). Watch the next several
+`execution_review.plan_vs_submitted` blocks in live snapshots; the first genuine
+`status: "mismatch"` (a real qty clamp mid-execution, a genuine executor drop) is the
+first real-world confirmation that the Data Integrity Warning surfacing (A3) actually
+fires as designed end-to-end, not just in unit tests.
+
+### 66. Post-merge watch — first thematic nomination reaching `confirm_sessions` (LOW — verification only, cross-refs #63/#64)
+From the 2026-08-14 session's Task D. The per-symbol hysteresis
+(`_confirm_thematic_entry`) and the reference_weights floor-lift integration are both
+unit-tested against hand-built fixtures, but the FULL round trip — a real LLM-emitted
+`thematic_conviction[]` nomination surviving one session's lag, confirming after
+`confirm_sessions`=2 consecutive matching nominations, and actually appearing as a
+floor-lift in a live `reference_weights.thematic_lean` — has never been observed
+end-to-end. Watch for the first live activation and verify: the applied percentage
+ramped in at `max_session_delta_pp`=1.5pp rather than jumping, the lifted symbol's
+`target_weights_pct` actually moved, and no unexpected `ceiling_pressure` fired on a
+modest single-name lift.
 
 ### 58. `catalyst_score` weight tuning — gated on graded outcome rows (LOW — data-gated, do not touch early)
 From the 2026-08-10 catalyst-sleeve-funnel session (entry **#57**). `src/collector/catalyst_screen.py`'s
@@ -1563,6 +1669,35 @@ fills (or explains a deviation).
 ---
 
 ## Done
+### 62. 2026-08-14 session: report-to-broker fidelity, oil signal correctness, transition_watch hysteresis, thematic conviction overlay — Done, branch `feat/20260814-thematic-conviction-oil-fidelity` (auto-merge: NO, human review required)
+See the START HERE entry at the top of this file for the full per-task design summary
+(A0 probe classification, B1's exact reconstruction of the 2026-08-12 stale-oil-leg
+whipsaw, C's hysteresis mechanics, D's thematic-conviction overlay and its D5 unit-mismatch
+deviation from the literal spec). Key numbers and artifacts for future reference:
+- **Baseline:** `PYTHONPATH=src pytest` on `master` (`326e0d9`) = **1026 passed**.
+- **Per-task test counts (all confirmed failing on pre-fix source via `git stash` isolation
+  on the specific changed file, per the empirical-verification doctrine):** Task A
+  1026→1045 (+19: 6 addendum + 3 malformed-debug-capture + 8 plan_vs_submitted + 2 prompt
+  sentinels); Task B 1045→1052 (+7: 1 governing-value + 5 staleness + 1 sentinel); Task C
+  1052→1063 (+11: 10 hysteresis + 1 sentinel); Task D 1063→1126 (+63, across
+  `test_thematic_conviction_pure.py`, `test_thematic_hysteresis.py`,
+  `test_build_thematic_conviction.py`, `test_thematic_reference_weights_integration.py`,
+  `test_thematic_grading.py`, `test_write_thematic_history.py`, + 2 prompt sentinels).
+  **Final: 1126 passed, ruff clean project-wide.**
+- **New tables:** `TransitionWatchState` (PK=`state`, RK=`transition_watch`, single row),
+  `ThematicConvictionState` (PK=`state`, RK=symbol, one row per nominated ticker),
+  `ThematicHistory` (PK=year-month, RK=`THM-YYYYMMDD-NNN`) — all three registered in
+  `shared/storage.py`'s `_TABLES` list (auto-created by `ensure_tables()`).
+- **Decision D-1 (rejected alternative, on record):** a mechanical oil-level trigger
+  (e.g. "Brent > $90 for N sessions") was explicitly rejected in favor of an LLM-emitted
+  probability-of-increase (`p_up`) driving a quantized conviction band — see Task D1's five
+  mandatory safety properties (quantized / evidence-bound / bounded / hysteretic / graded) in
+  `risk-limits.json → thematic_conviction._note` and `project-instructions.md`'s
+  "Thematic capex cascade" section.
+- **Two decision gates surfaced for Jorge, unresolved this cycle** — entries **#63**
+  (thematic-ladder numbers) and **#64** (D-6: thematic lift on a non-selected pool member).
+  Two post-merge watch items — entries **#65** and **#66**.
+
 ### 60. 2026-08-10 session (later same day): Flex Sleeve Performance Ledger + SWA panel — Done, branch `feat/20260810-flex-performance-ledger` (auto-merge: NO, human review required)
 The Flex Catalyst Engine had no performance record — `src/flex/ledger.py` was
 open-position-only (`entry_price`/`initial_stop`/`qty_current`/`current_stop`/

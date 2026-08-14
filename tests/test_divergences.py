@@ -34,44 +34,127 @@ def _by_id(divs, did):
 
 def test_inflation_leading_falling_vs_realized_flat_fires():
     """Breakevens + oil falling while realized core is flat -> active, 'falling'."""
-    infl = {"direction": "flat", "oil_wti_20d_pct": -21.0}
+    infl = {"direction": "flat", "oil_20d_pct_governing": -21.0}
     bonds = {"breakevens": {"be_5y": {"delta_20d_bp": -28.0}}}
-    d = _div_leading_vs_lagging_inflation(infl, bonds, CFG)
+    d = _div_leading_vs_lagging_inflation(infl, bonds, CFG, TODAY, 7)
     assert d["status"] == "active"
     assert d["direction_implied"] == "falling"
 
 
 def test_inflation_leading_rising_vs_realized_falling_fires():
-    infl = {"direction": "falling", "oil_wti_20d_pct": 18.0}
+    infl = {"direction": "falling", "oil_20d_pct_governing": 18.0}
     bonds = {"breakevens": {"be_5y": {"delta_20d_bp": 20.0}}}
-    d = _div_leading_vs_lagging_inflation(infl, bonds, CFG)
+    d = _div_leading_vs_lagging_inflation(infl, bonds, CFG, TODAY, 7)
     assert d["status"] == "active"
     assert d["direction_implied"] == "rising"
 
 
 def test_inflation_aligned_no_false_positive():
     """Leading and realized agree (both falling) -> not active."""
-    infl = {"direction": "falling", "oil_wti_20d_pct": -21.0}
+    infl = {"direction": "falling", "oil_20d_pct_governing": -21.0}
     bonds = {"breakevens": {"be_5y": {"delta_20d_bp": -28.0}}}
-    d = _div_leading_vs_lagging_inflation(infl, bonds, CFG)
+    d = _div_leading_vs_lagging_inflation(infl, bonds, CFG, TODAY, 7)
     assert d["status"] == "indeterminate"
     assert d["direction_implied"] == "aligned"
 
 
 def test_inflation_small_leading_move_does_not_fire():
     """Sub-threshold breakeven + oil move -> leading 'flat' -> no tension."""
-    infl = {"direction": "flat", "oil_wti_20d_pct": -3.0}
+    infl = {"direction": "flat", "oil_20d_pct_governing": -3.0}
     bonds = {"breakevens": {"be_5y": {"delta_20d_bp": -5.0}}}
-    d = _div_leading_vs_lagging_inflation(infl, bonds, CFG)
+    d = _div_leading_vs_lagging_inflation(infl, bonds, CFG, TODAY, 7)
     assert d["status"] == "indeterminate"
 
 
 def test_inflation_missing_realized_is_indeterminate():
-    infl = {"direction": None, "oil_wti_20d_pct": -21.0}
+    infl = {"direction": None, "oil_20d_pct_governing": -21.0}
     bonds = {"breakevens": {"be_5y": {"delta_20d_bp": -28.0}}}
-    d = _div_leading_vs_lagging_inflation(infl, bonds, CFG)
+    d = _div_leading_vs_lagging_inflation(infl, bonds, CFG, TODAY, 7)
     assert d["status"] == "indeterminate"
     assert d["direction_implied"] == "unresolved"
+
+
+# --- B1/B2 (2026-08-14 audit): governing-value selection + staleness gate ----
+
+def test_inflation_governing_value_used_not_stale_fred_leg():
+    """B1 regression, named after the 2026-08-12 incident: the axis correctly
+    preferred the fresh USO proxy (6.2%, below the 10.0 threshold) but the
+    pre-fix detector still read the stale FRED WTI leg (17.8%, above
+    threshold) directly and fired. Reconstructing those exact inputs must now
+    yield 'indeterminate' — the governing value governs, period."""
+    infl = {
+        "direction": "falling",
+        "oil_trend_source": "USO_proxy",
+        "oil_20d_pct_governing": 6.2,
+        "oil_wti_20d_pct": 17.8,  # stale FRED leg — must NOT drive the trigger
+    }
+    bonds = {"breakevens": {"be_5y": {"delta_20d_bp": 2.0}}}
+    d = _div_leading_vs_lagging_inflation(infl, bonds, CFG, TODAY, 7)
+    assert d["status"] == "indeterminate"
+    gov_sig = next(s for s in d["signals"] if s["name"] == "inflation_axis.oil_20d_pct_governing")
+    assert gov_sig["value"] == 6.2
+    non_gov_sig = next(s for s in d["signals"] if s["name"] == "inflation_axis.oil_20d_pct_non_governing")
+    assert non_gov_sig["value"] == 17.8
+
+
+def test_inflation_stale_oil_leg_dropped_but_breakeven_still_fires():
+    """A stale oil `as_of` must be dropped from the trigger (marked stale), not
+    silently used — but the breakeven leg alone can still fire."""
+    infl = {
+        "direction": "flat",
+        "oil_20d_pct_governing": -21.0,
+        "oil_20d_pct_governing_as_of": "2026-06-01",  # far older than TODAY
+    }
+    bonds = {"breakevens": {"be_5y": {"delta_20d_bp": -28.0, "as_of": "2026-06-29"}}}
+    d = _div_leading_vs_lagging_inflation(infl, bonds, CFG, TODAY, 7)
+    oil_sig = next(s for s in d["signals"] if s["name"] == "inflation_axis.oil_20d_pct_governing")
+    assert oil_sig["stale"] is True
+    assert d["status"] == "active"
+    assert d["direction_implied"] == "falling"
+
+
+def test_inflation_all_legs_stale_is_indeterminate():
+    infl = {
+        "direction": "flat",
+        "oil_20d_pct_governing": -21.0,
+        "oil_20d_pct_governing_as_of": "2026-06-01",
+    }
+    bonds = {"breakevens": {"be_5y": {"delta_20d_bp": -28.0, "as_of": "2026-05-01"}}}
+    d = _div_leading_vs_lagging_inflation(infl, bonds, CFG, TODAY, 7)
+    assert d["status"] == "indeterminate"
+    assert d["direction_implied"] == "unresolved"
+
+
+def test_inflation_realized_leg_stale_beyond_monthly_threshold_is_indeterminate():
+    """Realized core is monthly-cadence — gated on the 45d monthly threshold,
+    not the flat 7d `stale_days`. A read 50 days old (beyond 45d) must drop."""
+    infl = {
+        "direction": "falling",
+        "oil_20d_pct_governing": -21.0,
+        "realized_core_as_of": "2026-05-11",  # 50 days before TODAY (2026-06-30)
+    }
+    bonds = {"breakevens": {"be_5y": {"delta_20d_bp": -28.0}}}
+    d = _div_leading_vs_lagging_inflation(infl, bonds, CFG, TODAY, 7)
+    assert d["status"] == "indeterminate"
+    assert d["direction_implied"] == "unresolved"
+    realized_sig = next(
+        s for s in d["signals"] if s["name"] == "inflation_axis.direction (realized)"
+    )
+    assert realized_sig["stale"] is True
+
+
+def test_inflation_realized_leg_within_monthly_threshold_not_stale():
+    """A realized-core read well within the flat 7d window but beyond it is
+    STILL usable — the monthly 45d threshold governs this leg, not 7d."""
+    infl = {
+        "direction": "falling",
+        "oil_20d_pct_governing": -21.0,
+        "realized_core_as_of": "2026-06-10",  # 20 days before TODAY — >7d, <45d
+    }
+    bonds = {"breakevens": {"be_5y": {"delta_20d_bp": -28.0}}}
+    d = _div_leading_vs_lagging_inflation(infl, bonds, CFG, TODAY, 7)
+    assert d["status"] == "indeterminate"  # aligned (both falling), not unresolved
+    assert d["direction_implied"] == "aligned"
 
 
 # --- #2 credit complacency ---------------------------------------------------
@@ -82,7 +165,7 @@ def test_credit_complacency_fires_on_low_level_and_calm():
     the blind spot the old percentile gate had in a persistently tight-spread regime."""
     bonds = {"credit": {"hy_oas": {"latest": 2.83, "pct_rank_90d": 49},
                         "credit_stress": {"flag": False}}}
-    d = _div_credit_complacency(bonds, {"shock_level": 0}, CFG)
+    d = _div_credit_complacency(bonds, {"shock_level": 0}, CFG, TODAY, 7)
     assert d["status"] == "active"
     assert d["direction_implied"] == "fragility"
 
@@ -91,14 +174,14 @@ def test_credit_low_level_but_shock_does_not_fire():
     """Level < 3.5 but shock >= 2 -> not latent complacency (stress is corroborating)."""
     bonds = {"credit": {"hy_oas": {"latest": 2.83, "pct_rank_90d": 5},
                         "credit_stress": {"flag": False}}}
-    d = _div_credit_complacency(bonds, {"shock_level": 2}, CFG)
+    d = _div_credit_complacency(bonds, {"shock_level": 2}, CFG, TODAY, 7)
     assert d["status"] == "indeterminate"
 
 
 def test_credit_low_level_but_stress_flag_does_not_fire():
     bonds = {"credit": {"hy_oas": {"latest": 2.8, "pct_rank_90d": 5},
                         "credit_stress": {"flag": True}}}
-    d = _div_credit_complacency(bonds, {"shock_level": 0}, CFG)
+    d = _div_credit_complacency(bonds, {"shock_level": 0}, CFG, TODAY, 7)
     assert d["status"] == "indeterminate"
 
 
@@ -106,15 +189,25 @@ def test_credit_level_at_or_above_band_does_not_fire():
     """Level >= 3.5% is not complacent (normal/stress zone) -> indeterminate."""
     bonds = {"credit": {"hy_oas": {"latest": 3.5, "pct_rank_90d": 5},
                         "credit_stress": {"flag": False}}}
-    d = _div_credit_complacency(bonds, {"shock_level": 0}, CFG)
+    d = _div_credit_complacency(bonds, {"shock_level": 0}, CFG, TODAY, 7)
     assert d["status"] == "indeterminate"
 
 
 def test_credit_missing_level_indeterminate():
     bonds = {"credit": {"hy_oas": {"latest": None, "pct_rank_90d": 5}}}
-    d = _div_credit_complacency(bonds, {}, CFG)
+    d = _div_credit_complacency(bonds, {}, CFG, TODAY, 7)
     assert d["status"] == "indeterminate"
     assert d["direction_implied"] == "unresolved"
+
+
+def test_credit_stale_hy_oas_is_indeterminate():
+    """B2: HY OAS older than stale_days is dropped from the trigger, not used."""
+    bonds = {"credit": {"hy_oas": {"latest": 2.83, "pct_rank_90d": 49, "as_of": "2026-06-01"},
+                        "credit_stress": {"flag": False}}}
+    d = _div_credit_complacency(bonds, {"shock_level": 0}, CFG, TODAY, 7)
+    assert d["status"] == "indeterminate"
+    hy_sig = next(s for s in d["signals"] if s["name"] == "hy_oas.latest")
+    assert hy_sig["stale"] is True
 
 
 # --- #3 price vs regime ------------------------------------------------------
@@ -225,7 +318,7 @@ def test_sma_computes_and_flags_above():
 
 def test_build_divergences_returns_all_four_with_schema():
     divs = _build_divergences(
-        _paper_intl(10.0), {"direction": "falling"}, {"direction": "flat", "oil_wti_20d_pct": -21.0},
+        _paper_intl(10.0), {"direction": "falling"}, {"direction": "flat", "oil_20d_pct_governing": -21.0},
         {"breakevens": {"be_5y": {"delta_20d_bp": -28.0}}, "credit": {"hy_oas": {"latest": 2.8, "pct_rank_90d": 49}}},
         _rr_dxy("neutral"), {"active_quadrant": None}, {"shock_level": 0},
         {"available": False}, TODAY, CFG,

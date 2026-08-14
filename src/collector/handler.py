@@ -118,6 +118,30 @@ _RISK_LIMITS_DEFAULTS = {
         "ballast_names": ["GLD", "TLT"],
         "ballast_target_pct_of_core": 55.0,
     },
+    "thematic_conviction": {
+        "enabled": True,
+        "ladder": [
+            {"p_up_min": 0.75, "conviction": "very_high", "target_pct_of_equity": 4.0},
+            {"p_up_min": 0.65, "conviction": "high", "target_pct_of_equity": 2.5},
+            {"p_up_min": 0.58, "conviction": "moderate", "target_pct_of_equity": 1.25},
+            {"p_up_min": 0.52, "conviction": "low", "target_pct_of_equity": 0.50},
+            {"p_up_min": 0.0, "conviction": "none", "target_pct_of_equity": 0.0},
+        ],
+        "per_ticker_cap_pct_of_equity": 4.0,
+        "aggregate_cap_pct_of_equity": 8.0,
+        "max_session_delta_pp": 1.5,
+        "confirm_sessions": 2,
+        "release_sessions": 2,
+        "min_evidence_items": 2,
+        "horizon_days": [30, 60, 90],
+        "brier_min_sample": 10,
+        "brier_damping": [
+            {"brier_max": 0.20, "factor": 1.0},
+            {"brier_max": 0.25, "factor": 0.75},
+            {"brier_max": 0.30, "factor": 0.50},
+            {"brier_max": 1.0, "factor": 0.0},
+        ],
+    },
     "borderline_blend": {
         "intersection_target_pct_of_core": 60.0,
         "divergent_staged_pct_of_core": 20.0,
@@ -126,6 +150,9 @@ _RISK_LIMITS_DEFAULTS = {
         "staged_fraction_de_risk": 0.30,
         "staged_fraction_re_risk": 0.15,
         "re_risk_min_confirmations": 2,
+        "confirm_sessions": 2,
+        "release_sessions": 2,
+        "max_session_delta_frac": 0.10,
     },
     "policy_axis": {
         "dgs2_delta_20d_bp_hawkish": 20.0,
@@ -1620,6 +1647,124 @@ def _stamp_switch_outcomes(fmp: FMPClient) -> None:
     logger.info("Switch stamping: %d row(s) stamped (of %d pending)", stamped, len(pending))
 
 
+def _grade_thematic_horizon(
+    entry_price: float | None, horizon_price: float | None,
+    spy_entry: float | None, spy_horizon: float | None,
+) -> dict | None:
+    """D6 (2026-08-14 audit): pure grading for ONE matured thematic-conviction
+    horizon. ``actual_up`` resolves the SAME contract `p_up` was defined
+    against in the prompt (D7): the ticker's total return over the horizon is
+    positive. `None` on any unpriced input — never a guessed outcome."""
+    if entry_price is None or horizon_price is None or entry_price <= 0:
+        return None
+    ret = (horizon_price / entry_price - 1.0) * 100.0
+    out = {"ret_pct": round(ret, 4), "actual_up": 1.0 if ret > 0 else 0.0}
+    if spy_entry and spy_horizon and spy_entry > 0:
+        spy_ret = (spy_horizon / spy_entry - 1.0) * 100.0
+        out["excess_vs_spy_pp"] = round(ret - spy_ret, 4)
+    return out
+
+
+def _stamp_thematic_outcomes(fmp: FMPClient) -> None:
+    """D6: grade matured `ThematicHistory` rows at each horizon (30/60/90d) —
+    reuses the SAME perf-series-closes-first / FMP-fallback price resolution
+    as `_stamp_override_outcomes`/`_stamp_switch_outcomes` (never a parallel
+    pricing path). `actual_up_{h}d` / `excess_{h}d_pp` stamp independently as
+    each horizon matures (mirrors `_stamp_switch_outcomes`'s per-horizon
+    loop exactly); `outcome_status`/`resolved_correct` (the 60d headline) is
+    set once that horizon resolves, after which the row is no longer
+    reprocessed. Unpriced maturity -> `indeterminate_data`, never guessed.
+    Caller wraps in try/except — never breaks the collector.
+    """
+    today = date.today()
+    rows = query_entities("ThematicHistory")
+    pending = [r for r in rows if not r.get("outcome_status")]
+    if not pending:
+        return
+
+    perf_points = sorted(
+        ((p.get("date"), p.get("closes") or {}) for p in read_perf_series() if p.get("date")),
+    )
+    fmp_cache: dict[str, dict[str, float]] = {}
+
+    def _px(sym: str, d: str) -> float | None:
+        best = None
+        for pd, closes in perf_points:
+            if pd > d:
+                break
+            c = closes.get(sym)
+            if c is not None:
+                best = float(c)
+        if best is not None:
+            return best
+        if sym not in fmp_cache:
+            fmp_cache[sym] = _close_by_date(fmp, sym)
+        return _close_on_or_before(fmp_cache[sym], d)
+
+    stamped = 0
+    for r in pending:
+        sym = str(r.get("symbol") or "").upper()
+        filed = str(r.get("filed_date") or "")[:10]
+        if not sym or not filed or _max_matured_horizon(filed, today) < 30:
+            continue
+        base = _px(sym, filed)
+        base_spy = _px("SPY", filed)
+        entity = {"PartitionKey": r["PartitionKey"], "RowKey": r["RowKey"],
+                  "resolved_at": today.isoformat()}
+        headline = None
+        any_graded = False
+        for h in _OUTCOME_HORIZONS:
+            if date.fromisoformat(filed) + timedelta(days=h) > today:
+                continue
+            tgt = (date.fromisoformat(filed) + timedelta(days=h)).isoformat()
+            grade = _grade_thematic_horizon(base, _px(sym, tgt), base_spy, _px("SPY", tgt))
+            if grade:
+                any_graded = True
+                entity[f"actual_up_{h}d"] = grade["actual_up"]
+                if "excess_vs_spy_pp" in grade:
+                    entity[f"excess_{h}d_pp"] = grade["excess_vs_spy_pp"]
+                if h == _HEADLINE_HORIZON:
+                    headline = grade
+        if headline is not None:
+            entity["outcome_status"] = "resolved"
+            entity["p_up"] = float(r.get("p_up") or 0.0)
+        elif _max_matured_horizon(filed, today) >= _HEADLINE_HORIZON and not any_graded:
+            entity["outcome_status"] = "indeterminate_data"
+        if len(entity) > 3:
+            try:
+                upsert_entity("ThematicHistory", entity)
+                stamped += 1
+            except Exception:  # noqa: BLE001
+                logger.exception("Thematic stamping upsert failed for %s", r.get("RowKey"))
+    logger.info("Thematic stamping: %d row(s) stamped (of %d pending)", stamped, len(pending))
+
+
+def _build_thematic_calibration(risk_limits: dict) -> dict:
+    """D6: aggregate resolved `ThematicHistory` rows (the 60d-headline
+    `p_up`/`actual_up_60d` pairs) into `{sample_size, brier_score, hit_rate,
+    damping_factor}` for the `thematic_conviction.calibration` snapshot field.
+    Reuses the pure `_thematic_brier`/`_thematic_damping_factor` — this
+    function only queries + shapes the pairs."""
+    tc_cfg = risk_limits.get("thematic_conviction") or _RISK_LIMITS_DEFAULTS["thematic_conviction"]
+    rows = query_entities("ThematicHistory", "outcome_status eq 'resolved'")
+    pairs: list[tuple[float, float]] = []
+    for r in rows:
+        p_up = r.get("p_up")
+        actual = r.get(f"actual_up_{_HEADLINE_HORIZON}d")
+        if p_up is None or actual is None:
+            continue
+        try:
+            pairs.append((float(p_up), float(actual)))
+        except (TypeError, ValueError):
+            continue
+    brier = _thematic_brier(pairs)
+    damping = _thematic_damping_factor(
+        brier["brier_score"], brier["sample_size"],
+        tc_cfg.get("brier_damping") or [], int(tc_cfg.get("brier_min_sample", 10)),
+    )
+    return {**brier, "damping_factor": damping}
+
+
 def _aggregate_override_record(rows: list[dict]) -> dict:
     """Brief Phase 5 §2 — roll stamped OverrideHistory rows into the compact
     `override_record` snapshot block (sibling of track_record: capture-fine /
@@ -2463,16 +2608,28 @@ def run() -> None:
     # --- Transition watch (Phase 3: bounded pre-staging on leading inflation) ---
     # Reuses the Phase-2 leading_vs_lagging_inflation divergence; emits a partial lean for
     # reference_weights toward the projected quadrant WITHOUT moving the binding quad/gate/axis.
+    # Task C (2026-08-14 audit): the raw per-session evaluation is now wrapped with
+    # confirm/release hysteresis + a fraction ramp (`_confirm_transition_watch`) —
+    # response to the 2026-08-12 VDE whipsaw (a single session's stateless activation
+    # blew a reference weight ~45x and reversed it the very next day).
     transition_watch: dict = {"active": False, "status": "indeterminate"}
     try:
-        transition_watch = _build_transition_watch(
+        _tw_cfg = (_load_risk_limits().get("transition_watch") or _RISK_LIMITS_DEFAULTS["transition_watch"])
+        _tw_raw = _build_transition_watch(
             divergences, growth_axis, inflation_axis, _load_risk_limits(),
         )
+        _tw_prev = _load_transition_watch_state()
+        transition_watch = _confirm_transition_watch(_tw_raw, _tw_prev, _tw_cfg)
+        _tw_new_state = transition_watch.pop("_state", None)
+        if _tw_new_state is not None:
+            _save_transition_watch_state(_tw_new_state)
         logger.info(
-            "Transition watch: active=%s projected=%s direction=%s frac=%s status=%s",
+            "Transition watch: active=%s projected=%s direction=%s target=%s applied=%s "
+            "status=%s confirm_streak=%s release_streak=%s",
             transition_watch.get("active"), transition_watch.get("projected_quadrant"),
-            transition_watch.get("direction"), transition_watch.get("staged_fraction"),
-            transition_watch.get("status"),
+            transition_watch.get("direction"), transition_watch.get("target_fraction"),
+            transition_watch.get("staged_fraction"), transition_watch.get("status"),
+            transition_watch.get("confirm_streak"), transition_watch.get("release_streak"),
         )
     except Exception:  # noqa: BLE001
         logger.exception("Transition watch build failed (non-fatal)")
@@ -2504,6 +2661,34 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Intl governance build failed (non-fatal)")
 
+    # --- Thematic conviction overlay (2026-08-14 audit, D-4/D-5) --------------
+    # Built BEFORE reference_weights (which applies the confirmed active[] entries
+    # as a floor lift). One-session lag: reads the PRIOR day's LLM-emitted
+    # nominations, applies eligibility/caps/hysteresis. Non-fatal.
+    thematic_conviction: dict = {"available": False}
+    try:
+        _tc_prev_noms = _load_prior_thematic_nominations(today)
+        _tc_prev_states = _load_thematic_state()
+        _tc_quarantined = {
+            str(p.get("symbol") or "").upper()
+            for p in flex_candidate_profiles if p.get("price_quarantined")
+        }
+        _tc_calibration = _build_thematic_calibration(_load_risk_limits())
+        thematic_conviction, _tc_new_states = _build_thematic_conviction(
+            _load_risk_limits(), _tc_prev_noms, _tc_prev_states,
+            _tc_quarantined, effective_selected, _tc_calibration,
+        )
+        for _tc_sym, _tc_state in _tc_new_states.items():
+            _save_thematic_state(_tc_sym, _tc_state)
+        logger.info(
+            "Thematic conviction: enabled=%s active=%d pending=%d excluded=%d calibration=%s",
+            thematic_conviction.get("enabled"), len(thematic_conviction.get("active", [])),
+            len(thematic_conviction.get("pending", [])), len(thematic_conviction.get("excluded", [])),
+            _tc_calibration,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Thematic conviction build failed (non-fatal)")
+
     # --- Reference weights (strategy-spec §10: precomputed target weights the ----
     # analyzer executes toward, NOT a mandate). Consumes transition_watch (Phase 3) as a
     # bounded lean. Deterministic + echoed; non-fatal.
@@ -2513,7 +2698,7 @@ def run() -> None:
             paper_account, growth_axis, inflation_axis, regime_gate,
             regional_rotation, bond_signals, labor_signals, market_shock,
             _load_risk_limits(), transition_watch, intl_governance,
-            effective_selected,
+            effective_selected, thematic_conviction,
         )
         logger.info(
             "Reference weights: quad=%s conviction=%s(%s) active_target=%s%%core tilt=%s lean=%s binding=%s",
@@ -2943,6 +3128,7 @@ def run() -> None:
         "sleeve_selection": sleeve_selection,
         "role_selection": role_selection,
         "transition_watch": transition_watch,
+        "thematic_conviction": thematic_conviction,
         "divergences": divergences,
         "flex_quadrant": flex_quadrant,
         "flex_state": flex_state,
@@ -2998,6 +3184,12 @@ def run() -> None:
         _stamp_switch_outcomes(fmp)
     except Exception:  # noqa: BLE001
         logger.exception("Switch stamping failed (non-fatal)")
+
+    # --- D6 (2026-08-14 audit): grade matured thematic-conviction nominations ---
+    try:
+        _stamp_thematic_outcomes(fmp)
+    except Exception:  # noqa: BLE001
+        logger.exception("Thematic stamping failed (non-fatal)")
 
     logger.info("=== Collector completed for %s ===", today)
 
@@ -3228,6 +3420,14 @@ def _build_execution_review(secrets: dict, today: str) -> dict:
                     "filled_qty": order.get("filled_qty"),
                 })
 
+        try:
+            plan_vs_submitted = _build_plan_vs_submitted(prev_date, executions)
+        except Exception as e:  # noqa: BLE001
+            logger.error("plan_vs_submitted build failed (non-fatal): %s", e)
+            plan_vs_submitted = {
+                "available": False, "reason": str(e), "status": "indeterminate",
+            }
+
         return {
             "date": prev_date,
             "submitted": len(executions),
@@ -3235,10 +3435,136 @@ def _build_execution_review(secrets: dict, today: str) -> dict:
             "failed": failed,
             "unfilled": unfilled,
             "available": True,
+            "plan_vs_submitted": plan_vs_submitted,
         }
     except Exception as e:  # noqa: BLE001
         logger.exception("Execution review build failed (non-fatal)")
         return {"available": False, "reason": str(e)}
+
+
+def _load_prior_thematic_nominations(today: str) -> list[dict] | None:
+    """D2's deliberate one-session lag: the PRIOR trading day's `thematic_
+    conviction[]` nominations from `daily-trades/{prev}.json` (`read_trades`
+    is best-effort — returns `None` on a missing/malformed blob, unlike
+    `read_snapshot`'s raising contract, so a plain 7-day scan is safe here,
+    no try/except-per-date needed unlike the `read_snapshot`-based walkbacks).
+    """
+    d0 = date.fromisoformat(today)
+    for back in range(1, 8):
+        d = (d0 - timedelta(days=back)).isoformat()
+        doc = read_trades(d)
+        if isinstance(doc, dict) and doc.get("thematic_conviction") is not None:
+            return doc.get("thematic_conviction") or []
+        if isinstance(doc, dict):
+            # A trades file existed for that date but carried no thematic
+            # nominations that session — that IS the answer (empty), not a
+            # reason to keep walking back further.
+            return []
+    return None
+
+
+def _pvs_num(x) -> float | int:
+    """Render a quantity as an int when whole, else a float — matches the
+    integer-share quantities this system's trades always carry."""
+    try:
+        f = float(x)
+    except (TypeError, ValueError):
+        return 0
+    return int(f) if f.is_integer() else f
+
+
+def _build_plan_vs_submitted(prev_date: str, executions: list[dict]) -> dict:
+    """Task A2 (2026-08-14, decision D-1) — reconcile the analyzer's DETERMINISTIC
+    intended order array (`daily-trades/{prev_date}.json`'s final, post-validation
+    `trades[]` — never the model's markdown prose, which `_build_execution_review`
+    has no visibility into and never will) against what actually reached the
+    broker (`daily-executions/{prev_date}.json`'s `executions[]`, already resolved
+    by the caller's 7-day walkback).
+
+    Motivating gap (2026-08-14 A0 audit): `_build_execution_review` reconciled
+    submitted -> Alpaca terminal state, but had no knowledge of what the analyzer
+    INTENDED, so a submitted-and-filled order could still be a tiny fraction of
+    what was actually planned with zero visibility. NOTE (A0 finding): this block
+    is JSON-to-broker fidelity only — it structurally cannot catch a divergence
+    between the report's markdown narrative and the model's own `trades[]` JSON
+    (the 2026-08-12 incident: 6 orders narrated in prose, 1 in `trades[]`, that 1
+    matched execution exactly) — Task A1's canonical addendum is what makes THAT
+    divergence visible. This block guards a different, real failure mode: a
+    genuine JSON -> broker drop (a future executor bug) or a quantity mismatch at
+    submission time.
+
+    Matches on (symbol, side) per spec. `extra_in_submission` entries carry an
+    `origin` tag (from the execution's own `source` field when present, else
+    "unknown") — an `origin == "enforced"` entry is legitimate (reconcile's
+    synthesized trades are already merged into `trades[]` before it's written, so
+    this should not occur in practice, but the check is defensive) and does NOT
+    flip `status` to "mismatch" on its own.
+
+    Missing `daily-trades` blob (or a malformed one) -> `{"available": False,
+    "reason": ..., "status": "indeterminate"}` — never a fabricated "ok".
+    """
+    trades_doc = read_trades(prev_date)
+    if not isinstance(trades_doc, dict) or "trades" not in trades_doc:
+        return {
+            "available": False,
+            "reason": f"no daily-trades blob for {prev_date}",
+            "status": "indeterminate",
+        }
+
+    planned = trades_doc.get("trades") or []
+
+    def _key(side, symbol) -> tuple[str, str]:
+        return (str(symbol or "").upper(), str(side or "").lower())
+
+    planned_by_key: dict[tuple[str, str], dict] = {}
+    for t in planned:
+        planned_by_key[_key(t.get("side"), t.get("symbol"))] = t
+
+    submitted_by_key: dict[tuple[str, str], dict] = {}
+    for e in executions:
+        submitted_by_key[_key(e.get("side"), e.get("symbol"))] = e
+
+    missing_from_submission: list[dict] = []
+    qty_mismatch: list[dict] = []
+    for key, t in planned_by_key.items():
+        symbol, side = key
+        planned_qty = _pvs_num(t.get("quantity"))
+        e = submitted_by_key.get(key)
+        if e is None:
+            missing_from_submission.append({"symbol": symbol, "side": side, "qty": planned_qty})
+            continue
+        submitted_qty = _pvs_num(e.get("qty"))
+        if planned_qty != submitted_qty:
+            qty_mismatch.append({
+                "symbol": symbol, "side": side,
+                "planned_qty": planned_qty, "submitted_qty": submitted_qty,
+            })
+
+    extra_in_submission: list[dict] = []
+    non_enforced_extra = False
+    for key, e in submitted_by_key.items():
+        if key in planned_by_key:
+            continue
+        symbol, side = key
+        origin = "enforced" if e.get("source") == "band_enforcement" else "unknown"
+        extra_in_submission.append({
+            "symbol": symbol, "side": side, "qty": _pvs_num(e.get("qty")), "origin": origin,
+        })
+        if origin != "enforced":
+            non_enforced_extra = True
+
+    status = "mismatch" if (missing_from_submission or qty_mismatch or non_enforced_extra) else "ok"
+
+    return {
+        "available": True,
+        "date": prev_date,
+        "planned_count": len(planned),
+        "submitted_count": len(executions),
+        "missing_from_submission": missing_from_submission,
+        "qty_mismatch": qty_mismatch,
+        "extra_in_submission": extra_in_submission,
+        "status": status,
+    }
 
 
 # D-D1 default (session 2026-07-28, Task D): a held position's total P/L must have
@@ -4036,6 +4362,16 @@ def _build_bond_signals(macro_data: dict) -> dict:
     def _latest(vals: list[float]) -> float | None:
         return round(vals[0], 4) if vals else None
 
+    def _latest_date(sid: str) -> str | None:
+        """B2 (2026-08-14 audit): the observation date of a series' newest usable
+        row — populates a real `as_of` for the divergence detectors' staleness
+        gate, which previously hardcoded `as_of: None` on every bond-signal leg."""
+        rows = macro_data.get(sid) or []
+        for r in rows:
+            if r.get("value") not in (None, ".", ""):
+                return r.get("date")
+        return None
+
     # --- 1. Yield curve ----------------------------------------------------
     dgs2  = _vals("DGS2")
     dgs10 = _vals("DGS10")
@@ -4148,6 +4484,7 @@ def _build_bond_signals(macro_data: dict) -> dict:
             "delta_20d_bp": hy_d20,
             "pct_rank_90d": hy_pct,
             "trend_4w": hy_trend_4w,
+            "as_of": _latest_date("BAMLH0A0HYM2"),
         },
         "ig_oas": {
             "latest": ig_latest,
@@ -4171,9 +4508,12 @@ def _build_bond_signals(macro_data: dict) -> dict:
     t5y5y = _vals("T5YIFR")
 
     out["breakevens"] = {
-        "be_5y":  {"latest": _latest(t5y),   "delta_20d_bp": _delta_bp(t5y, 20)},
-        "be_10y": {"latest": _latest(t10y),  "delta_20d_bp": _delta_bp(t10y, 20)},
-        "be_5y5y": {"latest": _latest(t5y5y), "delta_20d_bp": _delta_bp(t5y5y, 20)},
+        "be_5y":  {"latest": _latest(t5y),   "delta_20d_bp": _delta_bp(t5y, 20),
+                   "as_of": _latest_date("T5YIE")},
+        "be_10y": {"latest": _latest(t10y),  "delta_20d_bp": _delta_bp(t10y, 20),
+                   "as_of": _latest_date("T10YIE")},
+        "be_5y5y": {"latest": _latest(t5y5y), "delta_20d_bp": _delta_bp(t5y5y, 20),
+                    "as_of": _latest_date("T5YIFR")},
     }
 
     # --- 4. Systemic stress proxies ----------------------------------------
@@ -4970,6 +5310,13 @@ def _build_inflation_axis(macro_data: dict, oil_proxy_close_cache: dict[str, flo
         v = _macro_vals(macro_data, sid)   # newest-first, in percentage points
         return round((v[0] - v[20]) * 100.0, 1) if len(v) > 20 else None
 
+    def _newest_date(sid: str) -> str | None:
+        rows = macro_data.get(sid) or []
+        for r in rows:
+            if r.get("value") not in (None, ".", ""):
+                return r.get("date")
+        return None
+
     head_yoy = _yoy("CPIAUCSL")
     head_yoy_prev = _yoy("CPIAUCSL", base=1)
     core_cpi_yoy = _yoy("CPILFESL")
@@ -4993,11 +5340,30 @@ def _build_inflation_axis(macro_data: dict, oil_proxy_close_cache: dict[str, flo
     oil_rising = bool(oil_chgs) and max(oil_chgs) >= 10.0      # genuine energy push
     oil_falling = bool(oil_chgs) and min(oil_chgs) <= -10.0    # spike reversing
 
+    # B1 (2026-08-14 audit): the SINGLE governing oil reading — whichever source
+    # this axis actually used above — under a source-neutral name so downstream
+    # consumers (the leading_vs_lagging_inflation divergence) echo the axis's own
+    # resolution instead of re-deriving it and independently reading the stale
+    # FRED leg directly (the 2026-08-12 whipsaw: the axis itself correctly
+    # preferred the fresh USO proxy at 6.2%, but the divergence detector still
+    # read raw `oil_wti_20d_pct` — stale FRED WTI at 17.8% — and fired on it).
+    if oil_trend_source == "USO_proxy":
+        oil_20d_pct_governing = oil_proxy_20d
+        oil_20d_pct_governing_as_of = oil_proxy_as_of
+    else:
+        oil_20d_pct_governing = oil_wti_20d
+        oil_20d_pct_governing_as_of = _newest_date("DCOILWTICO")
+
     headline_hot = head_yoy is not None and head_yoy >= 3.5 and head_rising
 
     # classify by realized core trend (3m annualized vs YoY); PCE-first
     ref_ann3 = core_pce_ann3 if core_pce_ann3 is not None else core_cpi_ann3
     ref_yoy = core_pce_yoy if core_pce_yoy is not None else core_cpi_yoy
+    # B2: the realized leg's as_of tracks whichever series actually governed
+    # (PCEPILFE preferred, CPILFESL fallback) — a monthly-cadence print, so
+    # downstream staleness gating must use the freshness block's monthly
+    # threshold, never the flat daily `staleness_days`.
+    realized_core_as_of = _newest_date("PCEPILFE") if core_pce_ann3 is not None else _newest_date("CPILFESL")
 
     if headline_hot and oil_rising:
         direction = "rising"
@@ -5074,6 +5440,9 @@ def _build_inflation_axis(macro_data: dict, oil_proxy_close_cache: dict[str, flo
         "oil_trend_source": oil_trend_source,
         "oil_proxy_20d_pct": oil_proxy_20d,
         "oil_proxy_as_of": oil_proxy_as_of,
+        "oil_20d_pct_governing": oil_20d_pct_governing,
+        "oil_20d_pct_governing_as_of": oil_20d_pct_governing_as_of,
+        "realized_core_as_of": realized_core_as_of,
         "breakeven_5y5y": be_5y5y[0] if be_5y5y else None,
         "bridge_direction": bridge_direction,
         "bridge_basis": bridge_basis,
@@ -5375,6 +5744,410 @@ def _ladder_target_pct(ladder: list[dict], proxy_score: float) -> tuple[float, s
     return float(last.get("active_quadrant_target", 50.0)), last.get("conviction", "")
 
 
+# ---------------------------------------------------------------------------
+# Thematic conviction overlay (2026-08-14 audit, decisions D-4/D-5). An
+# LLM-emitted probability directly sizing a position is an unbounded
+# self-grading loop unless constrained (Task D1's five mandatory properties:
+# quantized, evidence-bound, bounded, hysteretic, graded). This section
+# implements the pure pieces; `_build_thematic_conviction` (collector
+# orchestration) and the `_build_reference_weights` step-3c integration wire
+# them together. Motivating incident: a sustained Hormuz oil disruption
+# (see B1/B3) left VDE pinned at a 1-share 0.097% floor for four consecutive
+# sessions with no path from a live named theme to a position size — the
+# prompt's prior instruction was to "note the linkage in the rebalancing
+# rationale" and nothing more.
+# ---------------------------------------------------------------------------
+
+def _thematic_ladder_lookup(ladder: list[dict], p_up: float) -> tuple[float, str]:
+    """D1 property 1 (quantized): map a continuous probability to a coarse
+    conviction band via the config ladder (sorted descending by `p_up_min` in
+    config) — the mirror of `_ladder_target_pct`'s ascending-threshold lookup.
+    Picks the FIRST rung whose `p_up_min` <= p_up (i.e. the highest band the
+    probability clears). A 0.63 and a 0.66 landing in different bands is
+    intentional; two values landing in the SAME band must produce the exact
+    same target — that is the point of quantizing."""
+    for rung in ladder:
+        if p_up >= float(rung.get("p_up_min", 0.0)):
+            return float(rung.get("target_pct_of_equity", 0.0)), rung.get("conviction", "")
+    last = ladder[-1] if ladder else {"target_pct_of_equity": 0.0, "conviction": "none"}
+    return float(last.get("target_pct_of_equity", 0.0)), last.get("conviction", "none")
+
+
+def _thematic_classify_symbol(
+    symbol: str,
+    quarantined_symbols: set[str] | None,
+    effective_selected: dict[str, str] | None,
+) -> dict:
+    """D4 eligibility rules (strict guardrails) — one symbol at a time. Returns
+    ``{"status": "core_eligible" | "flex_route" | "excluded", "reason": str | None}``.
+
+    1. A `LEGACY_EXITS` name is always excluded — reference stays 0, never
+       floored; this PR does not relax that doctrine.
+    2. A price-quarantined name is excluded — a thematic lift on a name whose
+       price feed is already flagged untrustworthy would size a position off
+       a number nobody trusts.
+    3. A `CORE_ROSTER` name must be its role's EFFECTIVE selected incumbent
+       (`role_of` + `effective_selected`, the SAME live map every other
+       roster consumer resolves through — session 2026-07-27 doctrine). A
+       non-selected pool member is excluded: `_build_reference_weights` step 4
+       zeroes every non-selected pool member by design, and a thematic lift
+       would fight that loop, producing a permanently unfillable reference.
+       The correct response to a theme pointing at a non-selected pool member
+       is a sleeve-selection switch, not a thematic lift (decision gate D-6).
+    4. A ticker NOT in `CORE_ROSTER` at all is never excluded here — it is
+       simply not core-eligible, and routes to the flex pipeline instead
+       (`flex_source: "thematic"`, D4 rule 3). New tickers enter only via
+       flex; this PR does not relax that doctrine either.
+
+    Evidence-count sufficiency (D4 rule 4, `min_evidence_items`) is a
+    NOMINATION-level check, not a universe-membership check — it depends on
+    the LLM's own emitted `evidence[]` for that specific nomination, so it is
+    evaluated separately by the caller once a nomination exists.
+    """
+    sym = (symbol or "").upper()
+    if sym in LEGACY_EXITS:
+        return {"status": "excluded", "reason": "legacy_exit"}
+    if sym in (quarantined_symbols or set()):
+        return {"status": "excluded", "reason": "price_quarantined"}
+    if sym not in CORE_ROSTER:
+        return {"status": "flex_route", "reason": None}
+    role_id = role_of(sym)
+    if role_id is not None:
+        selected = (effective_selected or {}).get(role_id)
+        if selected and sym != str(selected).upper():
+            return {"status": "excluded", "reason": "non_selected_pool_member"}
+    return {"status": "core_eligible", "reason": None}
+
+
+def _thematic_scale_to_caps(
+    targets: dict[str, float], per_ticker_cap: float, aggregate_cap: float,
+) -> dict[str, float]:
+    """D5 cap application: clamp each entry to `per_ticker_cap`, then — if the
+    SUM still exceeds `aggregate_cap` — scale ALL entries down pro-rata (never
+    truncate by rank, which would create an arbitrary ordering dependency
+    between economically-equivalent nominations)."""
+    clamped = {t: min(max(0.0, v), per_ticker_cap) for t, v in targets.items()}
+    total = sum(clamped.values())
+    if total <= aggregate_cap or total <= 0:
+        return clamped
+    scale = aggregate_cap / total
+    return {t: v * scale for t, v in clamped.items()}
+
+
+def _thematic_brier(pairs: list[tuple[float, float]]) -> dict:
+    """D6: Brier score (mean squared error of probability vs binary outcome)
+    + hit rate over a list of ``(p_up, actual_up)`` resolved pairs (`actual_up`
+    is 1.0/0.0). Brier alone is opaque to read in a daily report, hence
+    `hit_rate` alongside it. Empty input -> `sample_size: 0`, both scores
+    `None` (never a fabricated 0.0, which would misleadingly read as
+    "perfect")."""
+    n = len(pairs)
+    if n == 0:
+        return {"sample_size": 0, "brier_score": None, "hit_rate": None}
+    brier = sum((p - a) ** 2 for p, a in pairs) / n
+    hits = sum(1 for p, a in pairs if (p >= 0.5) == (a >= 0.5))
+    return {"sample_size": n, "brier_score": round(brier, 4), "hit_rate": round(hits / n, 4)}
+
+
+def _thematic_damping_factor(
+    brier_score: float | None, sample_size: int, damping_ladder: list[dict], brier_min_sample: int,
+) -> float:
+    """D6: below `brier_min_sample`, no damping (`1.0`) — a thin sample proves
+    nothing about calibration either way; report the sample size prominently
+    instead of damping on noise. Otherwise the first rung whose `brier_max` >=
+    the score governs (ladder sorted ascending by `brier_max` in config)."""
+    if sample_size < brier_min_sample or brier_score is None:
+        return 1.0
+    for rung in damping_ladder:
+        if brier_score <= float(rung.get("brier_max", 1.0)):
+            return float(rung.get("factor", 1.0))
+    return damping_ladder[-1].get("factor", 1.0) if damping_ladder else 1.0
+
+
+_THEMATIC_STATE_TABLE = "ThematicConvictionState"
+
+
+def _load_thematic_state() -> dict[str, dict]:
+    """Per-symbol hysteresis state (PK='state', RK=symbol) — mirrors
+    `SleeveSelectionState`'s per-row-per-entity shape (one row per role there,
+    one row per nominated symbol here)."""
+    state: dict[str, dict] = {}
+    for e in query_entities(_THEMATIC_STATE_TABLE):
+        sym = e.get("RowKey")
+        if sym:
+            state[sym] = {
+                "active": bool(e.get("active", False)),
+                "active_conviction": (e.get("active_conviction") or None) or None,
+                "active_target_pct": float(e.get("active_target_pct") or 0.0),
+                "confirm_streak": int(e.get("confirm_streak") or 0),
+                "candidate_conviction": (e.get("candidate_conviction") or None) or None,
+                "release_streak": int(e.get("release_streak") or 0),
+                "applied_pct": float(e.get("applied_pct") or 0.0),
+            }
+    return state
+
+
+def _save_thematic_state(symbol: str, state: dict) -> None:
+    upsert_entity(_THEMATIC_STATE_TABLE, {
+        "PartitionKey": "state",
+        "RowKey": symbol,
+        "active": bool(state.get("active", False)),
+        "active_conviction": state.get("active_conviction") or "",
+        "active_target_pct": float(state.get("active_target_pct") or 0.0),
+        "confirm_streak": int(state.get("confirm_streak") or 0),
+        "candidate_conviction": state.get("candidate_conviction") or "",
+        "release_streak": int(state.get("release_streak") or 0),
+        "applied_pct": float(state.get("applied_pct") or 0.0),
+    })
+
+
+def _confirm_thematic_entry(candidate: dict | None, prev: dict | None, tw_cfg: dict) -> dict:
+    """D5 hysteresis, per symbol — "exactly as Task C": `confirm_sessions`
+    consecutive sessions with the same conviction band before a FRESH
+    activation applies; once active, `release_sessions` consecutive sessions
+    of absence OR a DIFFERENT band (the spec calls out "a lower band"
+    specifically; here any band change is symmetric — a symbol whose
+    nomination merely fluctuates day to day must not update every session
+    either) before the active state steps to the new reading. A band change
+    that does apply ramps via `max_session_delta_pp`, never a jump — the SAME
+    ramp helper shape as `_confirm_transition_watch`.
+
+    ``candidate`` is ``None`` (no nomination this session) or
+    ``{"conviction": str, "target_pct_of_equity": float, ...}`` — the ladder-
+    resolved reading from today's (i.e. the PRIOR trading day's, one-session
+    lag) nomination. Extra keys on ``candidate`` (symbol/theme/evidence/etc.)
+    pass through into the result verbatim for the snapshot block to render.
+    """
+    confirm_n = int(tw_cfg.get("confirm_sessions", 2))
+    release_n = int(tw_cfg.get("release_sessions", 2))
+    max_delta = float(tw_cfg.get("max_session_delta_pp", 1.5))
+    prev = prev or {}
+
+    was_active = bool(prev.get("active"))
+    active_conviction = prev.get("active_conviction")
+    active_target = float(prev.get("active_target_pct") or 0.0)
+    prior_applied = float(prev.get("applied_pct") or 0.0)
+    prior_confirm_streak = int(prev.get("confirm_streak") or 0)
+    prior_candidate_conviction = prev.get("candidate_conviction")
+    prior_release_streak = int(prev.get("release_streak") or 0)
+
+    def _ramp(target: float, prior: float) -> float:
+        return min(target, prior + max_delta) if target >= prior else max(target, prior - max_delta)
+
+    def _result(*, active: bool, status: str, conviction, target: float, applied: float,
+                confirm_streak: int, cand_conviction, release_streak: int,
+                pending_streak, release_pending: bool, meta: dict) -> dict:
+        out = {
+            "active": active, "status": status, "conviction": conviction,
+            "target_pct_of_equity": round(target, 4), "applied_pct_of_equity": round(applied, 4),
+            "confirm_streak": confirm_streak, "candidate_conviction": cand_conviction,
+            "release_streak": release_streak, "pending_streak": pending_streak,
+            "release_pending": release_pending,
+            "_state": {
+                "active": active,
+                "active_conviction": conviction if active else None,
+                "active_target_pct": target if active else 0.0,
+                "confirm_streak": confirm_streak,
+                "candidate_conviction": cand_conviction,
+                "release_streak": release_streak,
+                "applied_pct": applied,
+            },
+        }
+        out.update(meta)
+        return out
+
+    meta = {k: v for k, v in (candidate or {}).items()
+            if k not in ("conviction", "target_pct_of_equity")}
+
+    if candidate is None:
+        if not was_active:
+            return _result(active=False, status="indeterminate", conviction=None, target=0.0,
+                            applied=0.0, confirm_streak=0, cand_conviction=None, release_streak=0,
+                            pending_streak=None, release_pending=False, meta={})
+        release_streak = prior_release_streak + 1
+        if release_streak >= release_n:
+            return _result(active=False, status="indeterminate", conviction=None, target=0.0,
+                            applied=0.0, confirm_streak=0, cand_conviction=None, release_streak=0,
+                            pending_streak=None, release_pending=False, meta={})
+        return _result(active=True, status="active", conviction=active_conviction,
+                        target=active_target, applied=prior_applied, confirm_streak=0,
+                        cand_conviction=None, release_streak=release_streak,
+                        pending_streak=None, release_pending=True, meta={})
+
+    cand_conviction = candidate["conviction"]
+    cand_target = float(candidate["target_pct_of_equity"])
+
+    if not was_active:
+        same = cand_conviction == prior_candidate_conviction
+        streak = prior_confirm_streak + 1 if same else 1
+        if streak >= confirm_n:
+            applied = _ramp(cand_target, 0.0)
+            return _result(active=True, status="active", conviction=cand_conviction,
+                            target=cand_target, applied=applied, confirm_streak=0,
+                            cand_conviction=None, release_streak=0, pending_streak=None,
+                            release_pending=False, meta=meta)
+        return _result(active=False, status="pending", conviction=None, target=0.0, applied=0.0,
+                        confirm_streak=streak, cand_conviction=cand_conviction, release_streak=0,
+                        pending_streak=streak, release_pending=False, meta=meta)
+
+    if cand_conviction == active_conviction:
+        applied = _ramp(cand_target, prior_applied)
+        return _result(active=True, status="active", conviction=active_conviction,
+                        target=cand_target, applied=applied, confirm_streak=0,
+                        cand_conviction=None, release_streak=0, pending_streak=None,
+                        release_pending=False, meta=meta)
+
+    # A different band while active — treat like a release candidate: needs
+    # release_sessions consecutive occurrences of this SAME different band
+    # before the active state steps to it. Old stays in force meanwhile.
+    same_cand = cand_conviction == prior_candidate_conviction
+    release_streak = prior_release_streak + 1 if same_cand else 1
+    if release_streak >= release_n:
+        applied = _ramp(cand_target, prior_applied)
+        return _result(active=True, status="active", conviction=cand_conviction,
+                        target=cand_target, applied=applied, confirm_streak=0,
+                        cand_conviction=None, release_streak=0, pending_streak=None,
+                        release_pending=False, meta=meta)
+    applied = _ramp(active_target, prior_applied)
+    return _result(active=True, status="active", conviction=active_conviction,
+                    target=active_target, applied=applied, confirm_streak=0,
+                    cand_conviction=cand_conviction, release_streak=release_streak,
+                    pending_streak=release_streak, release_pending=True, meta=meta)
+
+def _build_thematic_conviction(
+    risk_limits: dict,
+    prev_nominations: list[dict] | None,
+    prev_states: dict[str, dict],
+    quarantined_symbols: set[str],
+    effective_selected: dict[str, str],
+    calibration: dict,
+) -> tuple[dict, dict[str, dict]]:
+    """D2 (2026-08-14 audit) — the `thematic_conviction` snapshot block.
+
+    The COLLECTOR emits the scaffold (eligible universe, caps, ladder, current
+    state, calibration); the LLM fills in probabilities via `trades_obj
+    ["thematic_conviction"]`; the collector applies them on the FOLLOWING run
+    (`prev_nominations` — the PRIOR day's emission, one-session lag, resolved
+    by the SAME 7-day walkback pattern `_build_execution_review` already
+    uses). This lag is deliberate: it keeps `reference_weights` deterministic
+    and auditable, and it is itself the hysteresis substrate (D1 property 4)
+    — a probability must survive to the next session before it can move
+    capital at all.
+
+    `enabled: False` (or a crash) -> a complete no-op: no eligible universe,
+    no active/pending entries, nothing partially applied (D5 fail-closed
+    doctrine) — returns `{"available": True, "enabled": False}` and an
+    EMPTY new-state dict (any existing per-symbol hysteresis state is left
+    untouched on disk, not wiped, so re-enabling resumes rather than
+    restarting).
+
+    Returns ``(snapshot_block, new_states_by_symbol)`` — the caller persists
+    ``new_states_by_symbol`` via `_save_thematic_state` per symbol.
+    """
+    tc_cfg = risk_limits.get("thematic_conviction") or _RISK_LIMITS_DEFAULTS["thematic_conviction"]
+    if not tc_cfg.get("enabled", True):
+        return {"available": True, "enabled": False}, {}
+
+    ladder = tc_cfg.get("ladder") or []
+    per_ticker_cap = float(tc_cfg.get("per_ticker_cap_pct_of_equity", 4.0))
+    aggregate_cap = float(tc_cfg.get("aggregate_cap_pct_of_equity", 8.0))
+    min_evidence = int(tc_cfg.get("min_evidence_items", 2))
+
+    # Eligible universe / excluded — every CORE_ROSTER member classified once,
+    # independent of whether any nomination targets it (a describe-only map
+    # of "what COULD be lifted right now").
+    eligible_universe: list[str] = []
+    excluded: list[dict] = []
+    for sym in sorted(CORE_ROSTER):
+        cls = _thematic_classify_symbol(sym, quarantined_symbols, effective_selected)
+        if cls["status"] == "core_eligible":
+            eligible_universe.append(sym)
+        elif cls["status"] == "excluded":
+            excluded.append({"symbol": sym, "reason": cls["reason"]})
+
+    # Resolve each nomination from the prior session: eligibility, evidence
+    # sufficiency, then the ladder lookup. Rejected nominations are logged in
+    # `excluded` too (never silently downsized — D4 rule 4) but do NOT enter
+    # the hysteresis machinery at all (a rejection carries no state).
+    candidates_by_symbol: dict[str, dict] = {}
+    for nom in prev_nominations or []:
+        sym = str(nom.get("symbol") or "").upper()
+        if not sym:
+            continue
+        cls = _thematic_classify_symbol(sym, quarantined_symbols, effective_selected)
+        if cls["status"] == "excluded":
+            excluded.append({"symbol": sym, "reason": cls["reason"]})
+            continue
+        evidence = nom.get("evidence") or []
+        if len(evidence) < min_evidence:
+            excluded.append({"symbol": sym, "reason": "insufficient_evidence"})
+            continue
+        try:
+            p_up = float(nom.get("p_up"))
+        except (TypeError, ValueError):
+            excluded.append({"symbol": sym, "reason": "invalid_p_up"})
+            continue
+        target, conviction = _thematic_ladder_lookup(ladder, p_up)
+        # D5: thematic_target = ladder_lookup(p_up) x calibration.damping_factor —
+        # applied ONCE here (echo-not-re-derive) so reference_weights never
+        # independently recomputes the same formula.
+        damping = float((calibration or {}).get("damping_factor", 1.0))
+        target = target * damping
+        if cls["status"] == "flex_route":
+            # D4 rule 3: a non-roster ticker never receives a core reference —
+            # it is routed to flex instead. Recorded for visibility; no core
+            # hysteresis/target applies to it.
+            excluded.append({
+                "symbol": sym, "reason": "routed_to_flex",
+                "flex_source": "thematic", "theme": nom.get("theme"),
+            })
+            continue
+        candidates_by_symbol[sym] = {
+            "conviction": conviction, "target_pct_of_equity": target,
+            "symbol": sym, "p_up": p_up, "theme": nom.get("theme"),
+            "evidence": evidence, "review_date": nom.get("review_date"),
+        }
+
+    # Aggregate/per-ticker cap BEFORE hysteresis, so the ramp converges to the
+    # already-capped target rather than a since-scaled-down one (D5 pro-rata,
+    # never truncation by rank).
+    raw_targets = {sym: c["target_pct_of_equity"] for sym, c in candidates_by_symbol.items()}
+    capped_targets = _thematic_scale_to_caps(raw_targets, per_ticker_cap, aggregate_cap)
+    for sym, capped in capped_targets.items():
+        candidates_by_symbol[sym]["target_pct_of_equity"] = capped
+
+    # Confirm/release hysteresis, per symbol — union of today's candidates and
+    # any symbol with live persisted state (so an absent-today symbol that was
+    # previously active still walks its release path instead of vanishing).
+    active: list[dict] = []
+    pending: list[dict] = []
+    new_states: dict[str, dict] = {}
+    all_symbols = set(candidates_by_symbol) | set(prev_states)
+    for sym in sorted(all_symbols):
+        result = _confirm_thematic_entry(
+            candidates_by_symbol.get(sym), prev_states.get(sym), tc_cfg,
+        )
+        new_states[sym] = result.pop("_state")
+        result["symbol"] = sym
+        if result["active"]:
+            active.append(result)
+        elif result["status"] == "pending":
+            pending.append(result)
+
+    return {
+        "available": True,
+        "enabled": True,
+        "ladder": ladder,
+        "aggregate_cap_pct_of_equity": aggregate_cap,
+        "per_ticker_cap_pct_of_equity": per_ticker_cap,
+        "eligible_universe": eligible_universe,
+        "excluded": excluded,
+        "active": active,
+        "pending": pending,
+        "calibration": calibration,
+    }, new_states
+
+
 # Quadrant defensiveness rank (Q1 most offensive → Q4 most defensive). A transition to a
 # HIGHER-ranked quadrant is de-risk; to a LOWER-ranked one is re-risk (spec §6 asymmetry).
 _QUADRANT_DEFENSIVENESS = {"Q1": 0, "Q2": 1, "Q3": 2, "Q4": 3}
@@ -5467,14 +6240,15 @@ def _build_transition_watch(
             return None
         direction = "de_risk" if r_proj > r_real else "re_risk"
         basis = [f"{s['name']}={s['value']}" for s in div.get("signals", [])
-                 if s.get("name") in ("be_5y.delta_20d_bp", "inflation_axis.oil_wti_20d_pct")
+                 if s.get("name") in ("be_5y.delta_20d_bp", "inflation_axis.oil_20d_pct_governing")
                  and s.get("value") is not None]
         if direction == "re_risk":
             div_cfg_thr = _load_divergence_config().get("leading_vs_lagging_inflation", {})
             thr = float(div_cfg_thr.get("breakeven_delta_20d_bp", 15.0))
             oil_thr = float(div_cfg_thr.get("oil_20d_pct", 10.0))
             be = next((s["value"] for s in div.get("signals", []) if s.get("name") == "be_5y.delta_20d_bp"), None)
-            oil = next((s["value"] for s in div.get("signals", []) if s.get("name") == "inflation_axis.oil_wti_20d_pct"), None)
+            oil = next((s["value"] for s in div.get("signals", [])
+                        if s.get("name") == "inflation_axis.oil_20d_pct_governing"), None)
             want_up = leading_dir == "rising"
             confs = sum([
                 1 if (be is not None and ((be >= thr) if want_up else (be <= -thr))) else 0,
@@ -5568,6 +6342,195 @@ def _build_transition_watch(
             "divergences symmetrically (FOLLOWUPS #17 generalisation)."
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Task C (2026-08-14 audit) — transition_watch confirm/release hysteresis +
+# staged-fraction ramp. `_build_transition_watch` above stays PURE and
+# STATELESS (unchanged, still directly unit-tested) — it is now treated as the
+# per-session CANDIDATE evaluation. `_confirm_transition_watch` wraps it with
+# persisted state, mirroring the existing axis-direction confirmation pattern
+# (`_confirm_axis_direction` / `AxisDirectionState`) rather than inventing a
+# new storage mechanism, per instruction.
+#
+# Motivating incident: a single session's stateless activation blew the Q2
+# reference block from 0.091% to 4.118% and back to 0.091% the very next day
+# (2026-08-12 VDE whipsaw, itself downstream of the B1 stale-oil-leg bug) —
+# transition_watch had no memory at all, so one session's noise could
+# generate a ~45x round trip in a reference weight and a same-day reversal of
+# ~$10k of proposed trades.
+# ---------------------------------------------------------------------------
+_TRANSITION_WATCH_STATE_TABLE = "TransitionWatchState"
+
+
+def _load_transition_watch_state() -> dict | None:
+    """Persisted hysteresis state (single row, PK='state' RK='transition_watch'
+    — mirrors `_load_axis_direction_state`'s table-per-row shape). None on the
+    first run / an empty table, which `_confirm_transition_watch` treats as
+    "nothing active, nothing pending" (never a crash)."""
+    for e in query_entities(_TRANSITION_WATCH_STATE_TABLE):
+        if e.get("RowKey") == "transition_watch":
+            return {
+                "active": bool(e.get("active", False)),
+                "active_projected_quadrant": (e.get("active_projected_quadrant") or None) or None,
+                "active_direction": (e.get("active_direction") or None) or None,
+                "confirm_streak": int(e.get("confirm_streak") or 0),
+                "candidate_projected_quadrant": (e.get("candidate_projected_quadrant") or None) or None,
+                "candidate_direction": (e.get("candidate_direction") or None) or None,
+                "release_streak": int(e.get("release_streak") or 0),
+                "applied_fraction": float(e.get("applied_fraction") or 0.0),
+            }
+    return None
+
+
+def _save_transition_watch_state(state: dict) -> None:
+    upsert_entity(_TRANSITION_WATCH_STATE_TABLE, {
+        "PartitionKey": "state",
+        "RowKey": "transition_watch",
+        "active": bool(state.get("active", False)),
+        "active_projected_quadrant": state.get("active_projected_quadrant") or "",
+        "active_direction": state.get("active_direction") or "",
+        "confirm_streak": int(state.get("confirm_streak") or 0),
+        "candidate_projected_quadrant": state.get("candidate_projected_quadrant") or "",
+        "candidate_direction": state.get("candidate_direction") or "",
+        "release_streak": int(state.get("release_streak") or 0),
+        "applied_fraction": float(state.get("applied_fraction") or 0.0),
+    })
+
+
+def _confirm_transition_watch(raw: dict, prev: dict | None, tw_cfg: dict) -> dict:
+    """C1/C2 hysteresis + fraction ramp around the stateless `raw` candidate
+    evaluation (this session's `_build_transition_watch` output).
+
+    C1 — confirm/release:
+    - Not yet active: the SAME (projected_quadrant, direction) must recur for
+      `confirm_sessions` consecutive sessions before `active` flips true.
+      Below that: `active: False, status: "pending"`, with `pending_streak`/
+      `pending_projected_quadrant` visible.
+    - Active and reproduced: streaks reset, ramp continues toward target.
+    - Active and a DIFFERENT candidate appears: the OLD projection stays in
+      force UNCHANGED (never a no-projection limbo) while the new candidate
+      builds its OWN independent confirm streak; once that streak reaches
+      `confirm_sessions` the active projection SWAPS to it directly (no
+      intermediate deactivation). This is not a release miss.
+    - Active and NOTHING reproduces (raw fully inactive): a genuine release
+      miss — `release_streak` increments; below `release_sessions`, stay
+      active unchanged (`release_pending: True`); at/above it, deactivate.
+
+    C2 — fraction ramp: `staged_fraction` (the field every existing consumer
+    already reads) becomes the RAMPED/APPLIED value — capped to move at most
+    `max_session_delta_frac` per session toward `target_fraction` (the new,
+    additive field carrying the un-ramped target) in EITHER direction. A
+    fresh activation ramps in from 0; a target-fraction change while
+    continuously active (e.g. a de-risk/re-risk swap) ramps between the two
+    rather than stepping. No ramp during the release-grace window itself
+    ("stay active" = unchanged) — the grace period is its own gradual
+    mechanism; deactivation is a discrete cutover to 0.
+    """
+    prev = prev or {}
+    confirm_n = int(tw_cfg.get("confirm_sessions", 2))
+    release_n = int(tw_cfg.get("release_sessions", 2))
+    max_delta = float(tw_cfg.get("max_session_delta_frac", 0.10))
+
+    raw_active = bool(raw.get("active"))
+    raw_proj = raw.get("projected_quadrant") if raw_active else None
+    raw_dir = raw.get("direction") if raw_active else None
+    raw_target = float(raw.get("staged_fraction") or 0.0) if raw_active else 0.0
+
+    was_active = bool(prev.get("active"))
+    active_proj = prev.get("active_projected_quadrant")
+    active_dir = prev.get("active_direction")
+    prior_applied = float(prev.get("applied_fraction") or 0.0)
+    prior_confirm_streak = int(prev.get("confirm_streak") or 0)
+    prior_candidate_proj = prev.get("candidate_projected_quadrant")
+    prior_candidate_dir = prev.get("candidate_direction")
+    prior_release_streak = int(prev.get("release_streak") or 0)
+
+    def _ramp(target: float, prior: float) -> float:
+        return min(target, prior + max_delta) if target >= prior else max(target, prior - max_delta)
+
+    def _result(*, active: bool, status: str, proj, direction, target: float, applied: float,
+                confirm_streak: int, cand_proj, cand_dir, release_streak: int,
+                pending_streak, pending_proj, release_pending: bool) -> dict:
+        return {
+            "active": active, "status": status,
+            "projected_quadrant": proj, "direction": direction,
+            "realized_quadrant": raw.get("realized_quadrant"),
+            "target_fraction": round(target, 4), "staged_fraction": round(applied, 4),
+            "confirm_streak": confirm_streak,
+            "candidate_projected_quadrant": cand_proj, "candidate_direction": cand_dir,
+            "release_streak": release_streak,
+            "basis": raw.get("basis", []), "sides": raw.get("sides", []),
+            "pending_streak": pending_streak, "pending_projected_quadrant": pending_proj,
+            "release_pending": release_pending,
+            "rule": raw.get("rule"),
+            "_state": {
+                "active": active,
+                "active_projected_quadrant": proj if active else None,
+                "active_direction": direction if active else None,
+                "confirm_streak": confirm_streak,
+                "candidate_projected_quadrant": cand_proj,
+                "candidate_direction": cand_dir,
+                "release_streak": release_streak,
+                "applied_fraction": applied,
+            },
+        }
+
+    if not was_active:
+        if not (raw_active and raw_proj is not None):
+            return _result(active=False, status="indeterminate", proj=None, direction=None,
+                            target=0.0, applied=0.0, confirm_streak=0, cand_proj=None,
+                            cand_dir=None, release_streak=0, pending_streak=None,
+                            pending_proj=None, release_pending=False)
+        same = raw_proj == prior_candidate_proj and raw_dir == prior_candidate_dir
+        streak = prior_confirm_streak + 1 if same else 1
+        if streak >= confirm_n:
+            applied = _ramp(raw_target, 0.0)
+            return _result(active=True, status="active", proj=raw_proj, direction=raw_dir,
+                            target=raw_target, applied=applied, confirm_streak=0,
+                            cand_proj=None, cand_dir=None, release_streak=0,
+                            pending_streak=None, pending_proj=None, release_pending=False)
+        return _result(active=False, status="pending", proj=None, direction=None,
+                        target=0.0, applied=0.0, confirm_streak=streak,
+                        cand_proj=raw_proj, cand_dir=raw_dir, release_streak=0,
+                        pending_streak=streak, pending_proj=raw_proj, release_pending=False)
+
+    # was_active == True
+    if raw_active and raw_proj == active_proj and raw_dir == active_dir:
+        applied = _ramp(raw_target, prior_applied)
+        return _result(active=True, status="active", proj=active_proj, direction=active_dir,
+                        target=raw_target, applied=applied, confirm_streak=0,
+                        cand_proj=None, cand_dir=None, release_streak=0,
+                        pending_streak=None, pending_proj=None, release_pending=False)
+
+    if raw_active and raw_proj is not None:
+        same = raw_proj == prior_candidate_proj and raw_dir == prior_candidate_dir
+        streak = prior_confirm_streak + 1 if same else 1
+        old_target = float(tw_cfg.get(f"staged_fraction_{active_dir}", 0.0)) if active_dir else 0.0
+        if streak >= confirm_n:
+            applied = _ramp(raw_target, prior_applied)
+            return _result(active=True, status="active", proj=raw_proj, direction=raw_dir,
+                            target=raw_target, applied=applied, confirm_streak=0,
+                            cand_proj=None, cand_dir=None, release_streak=0,
+                            pending_streak=None, pending_proj=None, release_pending=False)
+        applied = _ramp(old_target, prior_applied)
+        return _result(active=True, status="active", proj=active_proj, direction=active_dir,
+                        target=old_target, applied=applied, confirm_streak=streak,
+                        cand_proj=raw_proj, cand_dir=raw_dir, release_streak=0,
+                        pending_streak=streak, pending_proj=raw_proj, release_pending=False)
+
+    # raw fully inactive — a genuine release miss.
+    release_streak = prior_release_streak + 1
+    old_target = float(tw_cfg.get(f"staged_fraction_{active_dir}", 0.0)) if active_dir else 0.0
+    if release_streak >= release_n:
+        return _result(active=False, status="indeterminate", proj=None, direction=None,
+                        target=0.0, applied=0.0, confirm_streak=0, cand_proj=None,
+                        cand_dir=None, release_streak=0, pending_streak=None,
+                        pending_proj=None, release_pending=False)
+    return _result(active=True, status="active", proj=active_proj, direction=active_dir,
+                    target=old_target, applied=prior_applied, confirm_streak=0,
+                    cand_proj=None, cand_dir=None, release_streak=release_streak,
+                    pending_streak=None, pending_proj=None, release_pending=True)
 
 
 # ---------------------------------------------------------------------------
@@ -6157,6 +7120,7 @@ def _build_reference_weights(
     transition_watch: dict | None = None,
     intl_governance: dict | None = None,
     effective_selected: dict[str, str] | None = None,
+    thematic_conviction: dict | None = None,
 ) -> dict:
     """Deterministic per-ticker REFERENCE allocation the analyzer executes toward.
 
@@ -6445,6 +7409,53 @@ def _build_reference_weights(
         if v > 0:
             weights[t] = round(float(v), 3)
 
+    # --- 5b. thematic conviction floor-lift (2026-08-14 audit, decision D-5) ----
+    # The D5 spec calls this "step 3c" (before step 4's floor assembly) — but
+    # `raw_core`/`core_target` at that point are in %-of-CORE units, while
+    # `thematic_conviction.active[].applied_pct_of_equity` is %-of-EQUITY by
+    # design (D2). The %-of-core -> %-of-equity conversion factor (`scale`,
+    # derived from `core_room`) is not known until THIS point (step 5), so the
+    # lift is applied here instead, against the now-equity-denominated
+    # `weights` dict — functionally identical (still strictly a floor, still
+    # never touches anything before the quadrant math has settled) but at the
+    # only point in the pipeline where the units actually line up.
+    ceiling_pressure = False
+    ceiling_pressure_pp = 0.0
+    thematic_applied: dict[str, float] = {}
+    tc = thematic_conviction or {}
+    if tc.get("available") and tc.get("enabled"):
+        for entry in tc.get("active", []):
+            sym = str(entry.get("symbol") or "").upper()
+            lift = float(entry.get("applied_pct_of_equity") or 0.0)
+            if not sym or lift <= 0:
+                continue
+            prior = weights.get(sym, 0.0)
+            if lift > prior:
+                weights[sym] = round(lift, 3)
+                thematic_applied[sym] = round(lift - prior, 3)
+
+        thematic_added_pp = sum(thematic_applied.values())
+        if thematic_added_pp > 0:
+            # Budget interaction: carve the lift from the non-active-quadrant
+            # remainder (the "living hedge" `active_quadrant_ceiling_pct_of_core`
+            # leaves inside the core block), never let it silently breach the
+            # 90%-of-core ceiling unnoticed.
+            active_names = set(concentrate_names(quad, effective_selected)) if quad else set()
+            active_quadrant_equity_pct = sum(
+                w for t, w in weights.items() if t in active_names
+            )
+            non_active_room_pct = max(
+                0.0, core_room * (100.0 - active_target_core) / 100.0,
+            )
+            if thematic_added_pp > non_active_room_pct and active_quadrant_equity_pct > 0:
+                excess = thematic_added_pp - non_active_room_pct
+                trim_scale = max(0.0, 1.0 - excess / active_quadrant_equity_pct)
+                for t in active_names:
+                    if t in weights and t not in thematic_applied:
+                        weights[t] = round(weights[t] * trim_scale, 3)
+                ceiling_pressure = True
+                ceiling_pressure_pp = round(excess, 3)
+
     # Deterministic per-quadrant aggregation (Task 5) — the analyzer echoes this
     # verbatim in the Quadrant Allocation table's Reference column instead of summing
     # the per-name references freehand (the 2026-07-09 report claimed Q3 ~42.9% while
@@ -6485,6 +7496,12 @@ def _build_reference_weights(
              "direction": tw.get("direction"), "staged_fraction": tw.get("staged_fraction")}
             if tw_applied else {"applied": False}
         ),
+        "thematic_lean": {
+            "applied": bool(thematic_applied),
+            "lifted": thematic_applied,
+            "ceiling_pressure": ceiling_pressure,
+            "ceiling_pressure_pp": ceiling_pressure_pp,
+        },
         "cash_sleeve_target_pct": round(cash_sleeve_target, 2),
         "literal_cash_target_pct": literal_cash_pct,
         "target_weights_pct": target_pct,
@@ -7407,10 +8424,10 @@ def _build_divergences(
     stale_days = int(cfg.get("staleness_days", 7))
 
     # --- 1. leading vs lagging inflation -------------------------------------
-    out.append(_div_leading_vs_lagging_inflation(inflation_axis, bond_signals, cfg))
+    out.append(_div_leading_vs_lagging_inflation(inflation_axis, bond_signals, cfg, today, stale_days))
 
     # --- 2. credit complacency vs calm ---------------------------------------
-    out.append(_div_credit_complacency(bond_signals, market_shock, cfg))
+    out.append(_div_credit_complacency(bond_signals, market_shock, cfg, today, stale_days))
 
     # --- 3. price action vs regime call --------------------------------------
     out.append(_div_price_vs_regime(spy_sma, reference_weights, regional_rotation, today, stale_days))
@@ -7419,7 +8436,7 @@ def _build_divergences(
     out.append(_div_dollar_vs_intl(paper_account, regional_rotation, today, stale_days, cfg))
 
     # --- 5. leading vs lagging growth (#17) ----------------------------------
-    out.append(_div_leading_vs_lagging_growth(growth_axis, leading_growth, cfg))
+    out.append(_div_leading_vs_lagging_growth(growth_axis, leading_growth, cfg, today, stale_days))
 
     # --- 6. market-implied vs macro quadrant (#18) ---------------------------
     out.append(_div_market_vs_macro_quadrant(
@@ -7429,23 +8446,41 @@ def _build_divergences(
 
 
 def _div_leading_vs_lagging_growth(
-    growth_axis: dict, leading_growth: dict | None, cfg: dict
+    growth_axis: dict, leading_growth: dict | None, cfg: dict,
+    today: str, stale_days: int,
 ) -> dict:
     """Leading-growth composite vs realized growth_axis direction (FOLLOWUPS #17).
 
     Fires when the leading composite score is >= cfg threshold in a direction that
     disagrees with the realized axis. Stale or unavailable composite → indeterminate,
     never a false active. Confidence from `leading_growth.confidence` propagates.
+
+    B2 (2026-08-14 audit): the realized leg is gated on `growth_axis.as_of`
+    (vintage-recency-based per the 2026-07-21 B4 fix — GDPNow revises far more
+    often than a monthly print, so the flat daily `stale_days` is appropriate
+    here, unlike inflation's monthly-cadence realized leg). The composite leg
+    is NOT separately staleness-gated here — `_build_leading_growth` already
+    drops each stale per-series input from its own vote internally (mixed
+    weekly/monthly/daily cadences make a single top-level `as_of` for the
+    composite meaningless); its existing `available`/`confidence` gate already
+    reflects that.
     """
     base = {
         "id": "leading_vs_lagging_growth",
         "description": "Leading-growth composite vs realized growth_axis direction.",
     }
     realized = (growth_axis or {}).get("direction")
+    realized_as_of = (growth_axis or {}).get("as_of")
+    realized_age = _days_stale(realized_as_of, today)
+    realized_stale = realized_age is not None and realized_age > stale_days
+    realized_eff = None if realized_stale else realized
     lg = leading_growth or {}
 
     if not lg.get("available"):
-        return {**base, "signals": [], "direction_implied": "unresolved", "status": "indeterminate",
+        return {**base, "signals": [
+            {"name": "growth_axis.direction (realized)", "value": realized,
+             "as_of": realized_as_of, "stale": realized_stale},
+        ], "direction_implied": "unresolved", "status": "indeterminate",
                 "note": "leading_growth block unavailable"}
 
     composite_dir = lg.get("direction")  # "rising"/"falling"/"flat"
@@ -7455,22 +8490,23 @@ def _div_leading_vs_lagging_growth(
     sig = [
         {"name": "leading_growth.direction", "value": composite_dir},
         {"name": "leading_growth.score", "value": score},
-        {"name": "growth_axis.direction (realized)", "value": realized},
+        {"name": "growth_axis.direction (realized)", "value": realized,
+         "as_of": realized_as_of, "stale": realized_stale},
         {"name": "leading_growth.confidence", "value": confidence},
     ]
     base["signals"] = sig
 
-    if realized is None or composite_dir is None or confidence in ("none", "low"):
+    if realized_eff is None or composite_dir is None or confidence in ("none", "low"):
         return {**base, "direction_implied": "unresolved", "status": "indeterminate"}
 
-    if composite_dir == "flat" or composite_dir == realized:
+    if composite_dir == "flat" or composite_dir == realized_eff:
         return {**base, "direction_implied": "aligned", "status": "indeterminate"}
 
     # Leading disagrees with realized — active tension.
     return {
         **base,
         "description": (f"Leading growth composite points {composite_dir} "
-                        f"while realized growth_axis is {realized} "
+                        f"while realized growth_axis is {realized_eff} "
                         f"(score={score:+.2f}, {confidence} confidence)."),
         "direction_implied": composite_dir,
         "status": "active",
@@ -7552,41 +8588,92 @@ def _div_market_vs_macro_quadrant(
     return {**base, "direction_implied": "aligned", "status": "indeterminate"}
 
 
-def _div_leading_vs_lagging_inflation(inflation_axis: dict, bond_signals: dict, cfg: dict) -> dict:
+def _div_leading_vs_lagging_inflation(
+    inflation_axis: dict, bond_signals: dict, cfg: dict, today: str, stale_days: int,
+) -> dict:
+    """B1/B2 (2026-08-14 audit). Two fixes over the pre-audit version:
+
+    B1 — consume the SAME governing oil value the inflation axis itself used
+    (`oil_20d_pct_governing`), never the raw FRED leg directly. The 2026-08-12
+    whipsaw: `_build_inflation_axis` correctly preferred the fresh USO proxy
+    (6.2%, below the 10.0 threshold) but this detector still read
+    `oil_wti_20d_pct` (stale FRED WTI, 17.8%, above threshold) and fired,
+    activating `transition_watch` for one session on a stale print. The
+    non-governing reading is still echoed as a secondary signal for
+    transparency — it never drives the trigger.
+
+    B2 — a real `as_of` per leg, staleness-gated and dropped (not merely
+    reported) when too old. The realized-core leg is monthly-cadence
+    (CPILFESL/PCEPILFE) and is gated on `_FRESHNESS_MONTHLY_THRESHOLD_D` (45d
+    — the SAME threshold the Data-Freshness table already uses for these exact
+    series), never the flat daily `stale_days` — that would make the leg
+    permanently "stale" between monthly prints and this divergence
+    permanently indeterminate, which is not what staleness-gating is for.
+    Breakeven and oil are daily series and use the flat `stale_days` like
+    every other divergence detector.
+    """
     c = cfg["leading_vs_lagging_inflation"]
     be = ((bond_signals or {}).get("breakevens") or {}).get("be_5y") or {}
     be_delta = be.get("delta_20d_bp")
-    oil_20d = (inflation_axis or {}).get("oil_wti_20d_pct")
-    realized = (inflation_axis or {}).get("direction")
+    be_as_of = be.get("as_of")
+
+    ia = inflation_axis or {}
+    oil_20d = ia.get("oil_20d_pct_governing")
+    oil_as_of = ia.get("oil_20d_pct_governing_as_of")
+    oil_source = ia.get("oil_trend_source")
+    # Secondary, non-governing reading — transparency only, never drives the trigger.
+    non_governing_oil = (
+        ia.get("oil_wti_20d_pct") if oil_source == "USO_proxy" else ia.get("oil_proxy_20d_pct")
+    )
+
+    realized = ia.get("direction")
+    realized_as_of = ia.get("realized_core_as_of")
+
+    be_age = _days_stale(be_as_of, today)
+    oil_age = _days_stale(oil_as_of, today)
+    realized_age = _days_stale(realized_as_of, today)
+
+    be_stale = be_age is not None and be_age > stale_days
+    oil_stale = oil_age is not None and oil_age > stale_days
+    realized_stale = realized_age is not None and realized_age > _FRESHNESS_MONTHLY_THRESHOLD_D
+
+    be_eff = None if be_stale else be_delta
+    oil_eff = None if oil_stale else oil_20d
+    realized_eff = None if realized_stale else realized
 
     sig = [
-        {"name": "be_5y.delta_20d_bp", "value": be_delta, "as_of": None},
-        {"name": "inflation_axis.oil_wti_20d_pct", "value": oil_20d, "as_of": None},
-        {"name": "inflation_axis.direction (realized)", "value": realized, "as_of": None},
+        {"name": "be_5y.delta_20d_bp", "value": be_delta, "as_of": be_as_of, "stale": be_stale},
+        {"name": "inflation_axis.oil_20d_pct_governing", "value": oil_20d, "as_of": oil_as_of,
+         "source": oil_source, "stale": oil_stale},
+        {"name": "inflation_axis.oil_20d_pct_non_governing", "value": non_governing_oil},
+        {"name": "inflation_axis.direction (realized)", "value": realized,
+         "as_of": realized_as_of, "stale": realized_stale},
     ]
     base = {"id": "leading_vs_lagging_inflation",
             "description": "Leading inflation (breakevens + oil) vs realized core direction.",
             "signals": sig}
 
-    if be_delta is None and oil_20d is None or realized is None:
+    if realized_eff is None or (be_eff is None and oil_eff is None):
         return {**base, "direction_implied": "unresolved", "status": "indeterminate"}
 
     # Leading direction: down if breakevens fall enough OR oil falls enough; up if either rises.
     be_thr = float(c["breakeven_delta_20d_bp"])
     oil_thr = float(c["oil_20d_pct"])
-    leading_down = (be_delta is not None and be_delta <= -be_thr) or (oil_20d is not None and oil_20d <= -oil_thr)
-    leading_up = (be_delta is not None and be_delta >= be_thr) or (oil_20d is not None and oil_20d >= oil_thr)
+    leading_down = (be_eff is not None and be_eff <= -be_thr) or (oil_eff is not None and oil_eff <= -oil_thr)
+    leading_up = (be_eff is not None and be_eff >= be_thr) or (oil_eff is not None and oil_eff >= oil_thr)
     leading = "falling" if leading_down and not leading_up else ("rising" if leading_up and not leading_down else "flat")
 
     # Tension when the leading direction disagrees with realized (and leading is not flat).
-    if leading != "flat" and leading != realized:
+    if leading != "flat" and leading != realized_eff:
         return {**base,
-                "description": f"Leading inflation points {leading} while realized core is {realized}.",
+                "description": f"Leading inflation points {leading} while realized core is {realized_eff}.",
                 "direction_implied": leading, "status": "active"}
     return {**base, "direction_implied": "aligned", "status": "indeterminate"}
 
 
-def _div_credit_complacency(bond_signals: dict, market_shock: dict, cfg: dict) -> dict:
+def _div_credit_complacency(
+    bond_signals: dict, market_shock: dict, cfg: dict, today: str, stale_days: int,
+) -> dict:
     """HY OAS at an absolute complacency LEVEL while nothing else flags stress.
 
     Gates on the LEVEL band (HY OAS < hy_oas_complacency_level_pct), not the 90-day
@@ -7594,33 +8681,44 @@ def _div_credit_complacency(bond_signals: dict, market_shock: dict, cfg: dict) -
     purely relative and sits mid-range by construction in a persistently tight-spread
     regime — i.e. blind in exactly the calm-low-spread state this detector must catch.
     The 90d percentile is retained as a reported *secondary* signal, not the trigger.
+
+    B2 (2026-08-14 audit): HY OAS is a daily series — gated on the flat
+    `stale_days` (mechanical, identical in shape to divergences 3/4/6).
+    `market_shock.shock_level` is computed fresh every run (same-session, no
+    external lag), so its `as_of` is always `today` — never stale by
+    construction.
     """
     c = cfg["credit_complacency"]
     credit = (bond_signals or {}).get("credit") or {}
     hy = credit.get("hy_oas") or {}
     level = hy.get("latest")
+    hy_as_of = hy.get("as_of")
     pct_rank = hy.get("pct_rank_90d")  # secondary/context only
     stress_flag = (credit.get("credit_stress") or {}).get("flag")
     shock = (market_shock or {}).get("shock_level")
 
+    hy_age = _days_stale(hy_as_of, today)
+    hy_stale = hy_age is not None and hy_age > stale_days
+    level_eff = None if hy_stale else level
+
     sig = [
-        {"name": "hy_oas.latest", "value": level, "as_of": None},
-        {"name": "hy_oas.pct_rank_90d", "value": pct_rank, "as_of": None},
-        {"name": "credit_stress.flag", "value": stress_flag, "as_of": None},
-        {"name": "market_shock.shock_level", "value": shock, "as_of": None},
+        {"name": "hy_oas.latest", "value": level, "as_of": hy_as_of, "stale": hy_stale},
+        {"name": "hy_oas.pct_rank_90d", "value": pct_rank, "as_of": hy_as_of},
+        {"name": "credit_stress.flag", "value": stress_flag, "as_of": hy_as_of, "stale": hy_stale},
+        {"name": "market_shock.shock_level", "value": shock, "as_of": today},
     ]
     base = {"id": "credit_complacency",
             "description": "HY credit spread at a complacency level with no corroborating stress.",
             "signals": sig}
 
-    if level is None:
+    if level_eff is None:
         return {**base, "direction_implied": "unresolved", "status": "indeterminate"}
 
     calm = (not stress_flag) and (shock is None or shock <= 1)
-    complacent = level < float(c["hy_oas_complacency_level_pct"])
+    complacent = level_eff < float(c["hy_oas_complacency_level_pct"])
     if complacent and calm:
         return {**base,
-                "description": (f"HY OAS {level}% is in the complacency band "
+                "description": (f"HY OAS {level_eff}% is in the complacency band "
                                 f"(<{c['hy_oas_complacency_level_pct']}%) with no stress flag and "
                                 f"shock<=1 — little spread cushion, repricing-fragile."),
                 "direction_implied": "fragility", "status": "active"}
