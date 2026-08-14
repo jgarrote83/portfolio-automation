@@ -1697,6 +1697,27 @@ deviation from the literal spec). Key numbers and artifacts for future reference
 - **Two decision gates surfaced for Jorge, unresolved this cycle** — entries **#63**
   (thematic-ladder numbers) and **#64** (D-6: thematic lift on a non-selected pool member).
   Two post-merge watch items — entries **#65** and **#66**.
+- **PR #38 pre-merge remediation (same day, four findings, three blocking — all in Task D,
+  none in A/B/C).** An inline-Python re-audit of the merged PR found: **M1** the D5
+  floor-lift was purely additive against an already-normalized `weights` dict — at the
+  configured `aggregate_cap_pct_of_equity` (8.0) the reference asked the book to hold
+  ~107.9% of equity, with `ceiling_pressure` (M2) gated on a theoretical "living hedge"
+  size that ignored floor protection and so never fired in-cap; **M3** `_thematic_
+  classify_symbol`'s non-selected-pool-member check read `(effective_selected or
+  {}).get(role_id)` directly instead of `shared.quadrants.selected_for_role` — falsy on
+  the ordinary day (no auto-switch live), leaking 18 of 18 probed non-selected pool
+  members through as `core_eligible`; **M4** step 5b applied `thematic_conviction.active[]`
+  with no re-validation, so a legacy exit or any other ineligible symbol injected directly
+  reached a non-zero reference weight if it ever got past M3's now-fixed gate. Fixed:
+  the lift is now budget-conserving (reduces non-active-quadrant core names first,
+  spills into the active quadrant only as a genuine, now-reachable `ceiling_pressure`,
+  clamps the thematic lifts themselves — `budget_clamped`/`budget_dropped_pp` — if even
+  that's exhausted, always floor-protected); the classifier resolves through
+  `selected_for_role`; step 5b re-runs the classifier on every entry before it can reach
+  a reference weight (`rejected_at_apply[]`, logged at WARNING). Suite 1126→1170 (44 new/
+  rewritten tests), every one confirmed failing against the PR-as-submitted commit via
+  `git stash` isolation. Full per-task probe before/after output is in the PR #38
+  description.
 
 ### 60. 2026-08-10 session (later same day): Flex Sleeve Performance Ledger + SWA panel — Done, branch `feat/20260810-flex-performance-ledger` (auto-merge: NO, human review required)
 The Flex Catalyst Engine had no performance record — `src/flex/ledger.py` was

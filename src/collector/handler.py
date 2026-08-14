@@ -45,6 +45,7 @@ from shared.quadrants import (
     role_of,
     roles_config,
     selected_core_members,
+    selected_for_role,
     selection_config,
 )
 from flex.config import load_flex_config
@@ -2666,6 +2667,7 @@ def run() -> None:
     # as a floor lift). One-session lag: reads the PRIOR day's LLM-emitted
     # nominations, applies eligibility/caps/hysteresis. Non-fatal.
     thematic_conviction: dict = {"available": False}
+    _tc_quarantined: set[str] = set()
     try:
         _tc_prev_noms = _load_prior_thematic_nominations(today)
         _tc_prev_states = _load_thematic_state()
@@ -2698,7 +2700,7 @@ def run() -> None:
             paper_account, growth_axis, inflation_axis, regime_gate,
             regional_rotation, bond_signals, labor_signals, market_shock,
             _load_risk_limits(), transition_watch, intl_governance,
-            effective_selected, thematic_conviction,
+            effective_selected, thematic_conviction, _tc_quarantined,
         )
         logger.info(
             "Reference weights: quad=%s conviction=%s(%s) active_target=%s%%core tilt=%s lean=%s binding=%s",
@@ -5786,9 +5788,18 @@ def _thematic_classify_symbol(
     2. A price-quarantined name is excluded — a thematic lift on a name whose
        price feed is already flagged untrustworthy would size a position off
        a number nobody trusts.
-    3. A `CORE_ROSTER` name must be its role's EFFECTIVE selected incumbent
-       (`role_of` + `effective_selected`, the SAME live map every other
-       roster consumer resolves through — session 2026-07-27 doctrine). A
+    3. A `CORE_ROSTER` name must be its role's EFFECTIVE selected incumbent —
+       resolved via `shared.quadrants.selected_for_role(role_id,
+       effective_selected)`, the SAME resolution helper every other roster
+       consumer goes through (`_resolved_selected` internally: the live
+       `effective_selected` override when present, else the STATIC
+       `sleeve-roles.json` `selected` fallback). **Fixed 2026-08-14 remediation
+       (M3):** this previously hand-rolled `(effective_selected or
+       {}).get(role_id)` directly, which is falsy on the ordinary day (no
+       auto-switch live, `effective_selected` empty/None) and let EVERY
+       non-selected pool member leak through as `core_eligible` — 11 of 12
+       probed pool members (SOXX/PAVE/XLB/XLE/GLDM/IAU/IHE/STIP/DBMF/CTA/SPLV,
+       plus every intl pool member) classified wrongly on a normal day. A
        non-selected pool member is excluded: `_build_reference_weights` step 4
        zeroes every non-selected pool member by design, and a thematic lift
        would fight that loop, producing a permanently unfillable reference.
@@ -5813,7 +5824,7 @@ def _thematic_classify_symbol(
         return {"status": "flex_route", "reason": None}
     role_id = role_of(sym)
     if role_id is not None:
-        selected = (effective_selected or {}).get(role_id)
+        selected = selected_for_role(role_id, effective_selected)
         if selected and sym != str(selected).upper():
             return {"status": "excluded", "reason": "non_selected_pool_member"}
     return {"status": "core_eligible", "reason": None}
@@ -7121,6 +7132,7 @@ def _build_reference_weights(
     intl_governance: dict | None = None,
     effective_selected: dict[str, str] | None = None,
     thematic_conviction: dict | None = None,
+    quarantined_symbols: set[str] | None = None,
 ) -> dict:
     """Deterministic per-ticker REFERENCE allocation the analyzer executes toward.
 
@@ -7409,7 +7421,8 @@ def _build_reference_weights(
         if v > 0:
             weights[t] = round(float(v), 3)
 
-    # --- 5b. thematic conviction floor-lift (2026-08-14 audit, decision D-5) ----
+    # --- 5b. thematic conviction floor-lift (2026-08-14 audit, decision D-5; ---
+    # M1/M2/M3/M4 remediation, same-day re-audit of PR #38).
     # The D5 spec calls this "step 3c" (before step 4's floor assembly) — but
     # `raw_core`/`core_target` at that point are in %-of-CORE units, while
     # `thematic_conviction.active[].applied_pct_of_equity` is %-of-EQUITY by
@@ -7419,42 +7432,115 @@ def _build_reference_weights(
     # `weights` dict — functionally identical (still strictly a floor, still
     # never touches anything before the quadrant math has settled) but at the
     # only point in the pipeline where the units actually line up.
+    #
+    # M1 fix: the original cut applied the lift as a bare `max()` against an
+    # already-normalized `weights` dict with NO compensating reduction — purely
+    # additive to a book that already summed to ~100%. At the configured
+    # `aggregate_cap_pct_of_equity` (8.0) this asked the reference to hold
+    # ~106-108% of equity. The lift must now be BUDGET-CONSERVING: every pp
+    # added is drawn from elsewhere in the core block (never the cash sleeve —
+    # separately banded 5-15% — and never intl — separately governed by
+    # `intl_governance`), reducing non-active-quadrant names FIRST (the
+    # "living hedge" is the PRIMARY mechanism, not an edge branch), spilling
+    # into active-quadrant names only beyond that room, and never reducing any
+    # name below its own equity-equivalent sleeve floor (`sleeve_floor_pct_of_core
+    # * scale`). If even that is exhausted, the thematic lifts THEMSELVES are
+    # scaled down pro-rata to fit — `thematic_budget_clamped: true` with the pp
+    # dropped — fail toward a smaller thematic position, never a broken total.
     ceiling_pressure = False
     ceiling_pressure_pp = 0.0
     thematic_applied: dict[str, float] = {}
+    thematic_budget_clamped = False
+    thematic_budget_dropped_pp = 0.0
+    rejected_at_apply: list[dict] = []
     tc = thematic_conviction or {}
     if tc.get("available") and tc.get("enabled"):
+        # M4 fix: re-validate eligibility HERE, at the last gate before capital
+        # — never trust tc["active"] blindly (a corrupted/hand-edited thematic
+        # state row, or a future upstream bug, must not reach a reference
+        # weight). Re-running the SAME classifier the collector used to build
+        # tc["active"] in the first place costs nothing and closes the gap.
+        candidate_targets: dict[str, float] = {}
         for entry in tc.get("active", []):
             sym = str(entry.get("symbol") or "").upper()
             lift = float(entry.get("applied_pct_of_equity") or 0.0)
             if not sym or lift <= 0:
                 continue
-            prior = weights.get(sym, 0.0)
-            if lift > prior:
-                weights[sym] = round(lift, 3)
-                thematic_applied[sym] = round(lift - prior, 3)
+            cls = _thematic_classify_symbol(sym, quarantined_symbols, effective_selected)
+            if cls["status"] != "core_eligible":
+                reason = cls["reason"] or cls["status"]
+                rejected_at_apply.append({"symbol": sym, "reason": reason})
+                logger.warning(
+                    "Thematic apply-gate rejected %s (reason=%s) — never reached "
+                    "a reference weight", sym, reason,
+                )
+                continue
+            candidate_targets[sym] = lift
 
-        thematic_added_pp = sum(thematic_applied.values())
-        if thematic_added_pp > 0:
-            # Budget interaction: carve the lift from the non-active-quadrant
-            # remainder (the "living hedge" `active_quadrant_ceiling_pct_of_core`
-            # leaves inside the core block), never let it silently breach the
-            # 90%-of-core ceiling unnoticed.
+        if candidate_targets:
             active_names = set(concentrate_names(quad, effective_selected)) if quad else set()
-            active_quadrant_equity_pct = sum(
-                w for t, w in weights.items() if t in active_names
-            )
-            non_active_room_pct = max(
-                0.0, core_room * (100.0 - active_target_core) / 100.0,
-            )
-            if thematic_added_pp > non_active_room_pct and active_quadrant_equity_pct > 0:
-                excess = thematic_added_pp - non_active_room_pct
-                trim_scale = max(0.0, 1.0 - excess / active_quadrant_equity_pct)
-                for t in active_names:
-                    if t in weights and t not in thematic_applied:
-                        weights[t] = round(weights[t] * trim_scale, 3)
+            lifted_names = set(candidate_targets)
+            floor_equity = float(cfg.get("sleeve_floor_pct_of_core", 0.1)) * scale
+
+            def _headroom(t: str) -> float:
+                return max(0.0, weights.get(t, 0.0) - floor_equity)
+
+            reducible_names = [
+                t for t in weights
+                if t not in lifted_names and t != "SGOV" and t not in exempt_held
+                and t not in intl_targets
+            ]
+            pool1 = [t for t in reducible_names if t not in active_names]   # non-active first
+            pool2 = [t for t in reducible_names if t in active_names]       # spillover only
+            pool1_capacity = sum(_headroom(t) for t in pool1)
+            pool2_capacity = sum(_headroom(t) for t in pool2)
+            total_capacity = pool1_capacity + pool2_capacity
+
+            deltas = {t: max(0.0, lift - weights.get(t, 0.0)) for t, lift in candidate_targets.items()}
+            thematic_added_pp = sum(deltas.values())
+
+            if thematic_added_pp > total_capacity:
+                # Reduction pool exhausted before the full lift is absorbed —
+                # scale the LIFTS themselves down pro-rata to what the book can
+                # actually fund, never leave the total broken.
+                clamp_scale = (total_capacity / thematic_added_pp) if thematic_added_pp > 0 else 0.0
+                thematic_budget_dropped_pp = round(thematic_added_pp - total_capacity, 3)
+                for t in list(candidate_targets):
+                    cur = weights.get(t, 0.0)
+                    candidate_targets[t] = cur + (candidate_targets[t] - cur) * clamp_scale
+                deltas = {t: max(0.0, lift - weights.get(t, 0.0)) for t, lift in candidate_targets.items()}
+                thematic_added_pp = sum(deltas.values())
+                thematic_budget_clamped = True
+
+            # Apply the (possibly clamped) lifts.
+            for t, lift in candidate_targets.items():
+                prior = weights.get(t, 0.0)
+                if lift > prior:
+                    weights[t] = round(lift, 3)
+                    thematic_applied[t] = round(lift - prior, 3)
+
+            # Fund it: pool 1 (non-active-quadrant) first, pro-rata to each
+            # name's own headroom; spill into pool 2 (active-quadrant) only
+            # for whatever pool 1 couldn't cover.
+            remaining = thematic_added_pp
+            if pool1_capacity > 0 and remaining > 0:
+                take = min(remaining, pool1_capacity)
+                f = take / pool1_capacity
+                for t in pool1:
+                    h = _headroom(t)
+                    if h > 0:
+                        weights[t] = round(weights[t] - h * f, 3)
+                remaining -= take
+            if remaining > 1e-9 and pool2_capacity > 0:
+                take = min(remaining, pool2_capacity)
+                f = take / pool2_capacity
+                for t in pool2:
+                    h = _headroom(t)
+                    if h > 0:
+                        weights[t] = round(weights[t] - h * f, 3)
+                remaining -= take
                 ceiling_pressure = True
-                ceiling_pressure_pp = round(excess, 3)
+                ceiling_pressure_pp = round(take, 3)
 
     # Deterministic per-quadrant aggregation (Task 5) — the analyzer echoes this
     # verbatim in the Quadrant Allocation table's Reference column instead of summing
@@ -7501,6 +7587,9 @@ def _build_reference_weights(
             "lifted": thematic_applied,
             "ceiling_pressure": ceiling_pressure,
             "ceiling_pressure_pp": ceiling_pressure_pp,
+            "budget_clamped": thematic_budget_clamped,
+            "budget_dropped_pp": thematic_budget_dropped_pp,
+            "rejected_at_apply": rejected_at_apply,
         },
         "cash_sleeve_target_pct": round(cash_sleeve_target, 2),
         "literal_cash_target_pct": literal_cash_pct,

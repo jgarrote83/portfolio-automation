@@ -9,6 +9,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import pytest  # noqa: E402
+
 from collector.handler import (  # noqa: E402
     _thematic_brier,
     _thematic_classify_symbol,
@@ -17,6 +19,7 @@ from collector.handler import (  # noqa: E402
     _thematic_scale_to_caps,
     _RISK_LIMITS_DEFAULTS,
 )
+from shared.quadrants import roles_config, selected_for_role  # noqa: E402
 
 LADDER = _RISK_LIMITS_DEFAULTS["thematic_conviction"]["ladder"]
 DAMPING = _RISK_LIMITS_DEFAULTS["thematic_conviction"]["brier_damping"]
@@ -103,6 +106,60 @@ def test_non_roster_ticker_routes_to_flex_not_excluded():
     out = _thematic_classify_symbol("MU", set(), {})
     assert out["status"] == "flex_route"
     assert out["reason"] is None
+
+
+# --- M3 remediation (2026-08-14, PR #38 re-audit): the classifier must ------
+# resolve through selected_for_role (the SAME static-config fallback every
+# other roster consumer uses), never a hand-rolled `.get(role_id)` that is
+# simply falsy whenever no auto-switch override is live -- the ordinary case.
+# Parametrized across EVERY non-selected pool member in the live roster, at
+# effective_selected=None AND {} (both the "no override at all" shape), plus
+# a live-switch case confirming the OLD incumbent becomes ineligible and the
+# NEW one becomes eligible.
+
+def _non_selected_pool_members() -> list[tuple[str, str]]:
+    """(symbol, role_id) for every pool member that is NOT its role's static
+    config `selected` -- i.e. every symbol that must classify `excluded` /
+    `non_selected_pool_member` on an ordinary day (no live override)."""
+    from shared.quadrants import LEGACY_EXITS
+    pairs = []
+    for r in roles_config():
+        role_id = r.get("role_id")
+        selected = selected_for_role(role_id, None)
+        for m in r.get("pool", ()):
+            sym = str(m).upper()
+            if sym != selected and sym not in LEGACY_EXITS:
+                pairs.append((sym, role_id))
+    return pairs
+
+
+@pytest.mark.parametrize("effective_selected", [None, {}])
+@pytest.mark.parametrize("sym,role_id", _non_selected_pool_members())
+def test_every_non_selected_pool_member_rejected_with_no_live_override(
+    sym, role_id, effective_selected,
+):
+    """The exact leak the M3 finding reproduced: 11+ pool members classified
+    core_eligible when effective_selected was falsy (None/{}), because the
+    pre-fix classifier read `(effective_selected or {}).get(role_id)` directly
+    instead of falling back to the static config `selected` via
+    `selected_for_role`."""
+    out = _thematic_classify_symbol(sym, set(), effective_selected)
+    assert out == {"status": "excluded", "reason": "non_selected_pool_member"}, (
+        f"{sym} (role {role_id}) leaked through as {out} with "
+        f"effective_selected={effective_selected!r}"
+    )
+
+
+def test_live_override_switch_flips_eligibility_both_ways():
+    """A live auto-switch override (effective_selected={'semis': 'SOXX'})
+    must make the OLD incumbent (SMH) ineligible and the NEW one (SOXX)
+    eligible -- the classifier tracks the LIVE effective incumbent, not a
+    frozen snapshot of the static config."""
+    switched = {"semis": "SOXX"}
+    old_incumbent = _thematic_classify_symbol("SMH", set(), switched)
+    new_incumbent = _thematic_classify_symbol("SOXX", set(), switched)
+    assert old_incumbent == {"status": "excluded", "reason": "non_selected_pool_member"}
+    assert new_incumbent == {"status": "core_eligible", "reason": None}
 
 
 def test_quarantine_checked_before_roster_membership():
