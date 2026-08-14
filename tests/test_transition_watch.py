@@ -30,7 +30,7 @@ def _div(direction, be=-28.0, oil=-21.0, status="active"):
         "status": status,
         "signals": [
             {"name": "be_5y.delta_20d_bp", "value": be, "as_of": None},
-            {"name": "inflation_axis.oil_wti_20d_pct", "value": oil, "as_of": None},
+            {"name": "inflation_axis.oil_20d_pct_governing", "value": oil, "as_of": None},
             {"name": "inflation_axis.direction (realized)", "value": "flat", "as_of": None},
         ],
     }]

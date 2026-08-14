@@ -75,6 +75,50 @@ _OIL_OVERLAY_SENTINELS = (
     "never a cause of it",
 )
 
+# Task A3 (2026-08-14 audit, decision D-1): plan_vs_submitted doctrine + the
+# anti-fabrication rule found by the A0 probe (the 08-12->08-13 false
+# "executed as planned" reconciliation).
+_PLAN_VS_SUBMITTED_SENTINELS = (
+    "plan_vs_submitted",
+    "missing_from_submission",
+    "qty_mismatch",
+)
+_ANTI_FABRICATION_SENTINELS = (
+    'may NOT write that a prior proposal "executed as planned"',
+    "never infer execution from position deltas alone",
+    "Do not invent a mapping between filled orders and proposals",
+)
+
+# Task B3 (2026-08-14 audit): one governing oil reading, cited with source/as-of,
+# closing the 08-12 seam where the same 20-day oil trend printed two different
+# numbers (17.8% vs 6.2%) in two sections of the same report.
+_OIL_GOVERNING_SENTINELS = (
+    "oil_20d_pct_governing",
+    "One number, cited once",
+    "Never cite a bare percentage with no source/as-of",
+)
+
+# Task C (2026-08-14 audit): transition_watch confirm/release hysteresis
+# doctrine, closing the 2026-08-12 VDE whipsaw seam.
+_TRANSITION_WATCH_HYSTERESIS_SENTINELS = (
+    "Confirm/release hysteresis",
+    "status: \"pending\"",
+    "release_pending: true",
+    "Always cite `staged_fraction`, never `target_fraction`",
+)
+
+# Task D7 (2026-08-14 audit, decisions D-4/D-5): thematic conviction overlay —
+# replaces the old "note the linkage in the rebalancing rationale" instruction
+# that produced four sessions of decorative theme narration with zero size.
+_THEMATIC_CONVICTION_SENTINELS = (
+    "thematic_conviction[]",
+    "min_evidence_items",
+    "Prose from a prior report does not count as evidence",
+    "Anti-inflation guard",
+    "Two independent conviction mechanisms",
+)
+_THEMATIC_OLD_INSTRUCTION_RETIRED_PHRASE = "note the linkage in the rebalancing rationale"
+
 
 def _text() -> str:
     return _PROMPT.read_text(encoding="utf-8")
@@ -136,3 +180,43 @@ def test_oil_overlay_symmetric_wording_present():
     text = _text()
     for s in _OIL_OVERLAY_SENTINELS:
         assert s in text, f"missing oil-overlay sentinel: {s!r}"
+
+
+def test_plan_vs_submitted_doctrine_present():
+    text = _text()
+    for s in _PLAN_VS_SUBMITTED_SENTINELS:
+        assert s in text, f"missing plan_vs_submitted sentinel: {s!r}"
+
+
+def test_anti_fabrication_reconciliation_rule_present():
+    """Pins the doctrine that closes the 08-12->08-13 false 'executed as
+    planned' reconciliation so a future prompt edit can't silently drop it."""
+    text = _text()
+    for s in _ANTI_FABRICATION_SENTINELS:
+        assert s in text, f"missing anti-fabrication sentinel: {s!r}"
+
+
+def test_oil_governing_value_doctrine_present():
+    text = _text()
+    for s in _OIL_GOVERNING_SENTINELS:
+        assert s in text, f"missing oil-governing sentinel: {s!r}"
+
+
+def test_transition_watch_hysteresis_doctrine_present():
+    text = _text()
+    for s in _TRANSITION_WATCH_HYSTERESIS_SENTINELS:
+        assert s in text, f"missing transition_watch hysteresis sentinel: {s!r}"
+
+
+def test_thematic_conviction_doctrine_present():
+    text = _text()
+    for s in _THEMATIC_CONVICTION_SENTINELS:
+        assert s in text, f"missing thematic_conviction sentinel: {s!r}"
+
+
+def test_old_decorative_theme_narration_instruction_retired():
+    """Pins the retirement of the exact instruction that produced four
+    sessions of theme narration with zero sized expression (the VDE
+    four-session floor-pin incident)."""
+    text = _text()
+    assert _THEMATIC_OLD_INSTRUCTION_RETIRED_PHRASE not in text

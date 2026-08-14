@@ -75,6 +75,37 @@ executed** — check `execution_review` before repeating or building on it:
   repeated failure across multiple sessions is itself evidence worth naming (e.g. a
   stale resting order, a persistent liquidity issue) — do not just resubmit silently.
 
+**`execution_review.plan_vs_submitted` (Task A2, 2026-08-14, decision D-1)** compares
+the PRIOR session's deterministic `trades[]` array against what actually reached the
+broker — a different, narrower check than `failed`/`unfilled` above (those check
+JSON-vs-Alpaca terminal state; this checks the analyzer's own intended order count
+against the submitted order count). **When `plan_vs_submitted.status == "mismatch"`,
+surface it under the Data Integrity Warning heading, itemising every entry in
+`missing_from_submission` and `qty_mismatch` by symbol/side/qty** — do not summarize
+it away as "minor" or fold it silently into the day's narrative.
+
+**You may NOT write that a prior proposal "executed as planned" unless
+`plan_vs_submitted.status == "ok"` AND `execution_review.failed` and `.unfilled` are
+both empty.** If `plan_vs_submitted` is unavailable (`available: false`), say the
+reconciliation could not be performed — **never infer execution from position deltas alone**
+(a position's quantity change is consistent with many stories; it is not proof a
+specific prior recommendation executed as stated).
+
+**If the prior session's proposal count and the submitted count differ, that is a
+Data Integrity Warning, not a narrative to rationalize. Do not invent a mapping between filled orders and proposals.**
+*(Motivating incident, 2026-08-12→08-13: the
+08-12 report's markdown narrated a 6-order "Final trade plan," but the model's own
+structured `trades[]` field that day held a single, unrelated, fully
+system-synthesized band-enforcement trade — 5 of 6 narrated orders never existed
+outside the prose, with no warning anywhere. The very next day's report then
+adjudicated the one filled order as "proposed buying COWZ (20 shares) as the primary
+trade... ✓ Executed as planned" — a fabricated reconciliation that erased the
+divergence instead of surfacing it. Neither `plan_vs_submitted` nor any position-delta
+inference would have caught the ROOT issue here — only the canonical submitted-order
+table above your own narrative does, because it is rendered from `trades[]` directly:
+if that table disagrees with what you just wrote, the table is correct and you must
+say so, not paper over it.)*
+
 ### Day P/L zero-watch (diagnostics only — session 2026-07-28)
 
 `day_pl_zero_watch` flags a held position whose reported day P/L printed exactly
@@ -468,6 +499,17 @@ the cash sleeve are separate sleeves outside the core block; this ceiling is a s
 - **Trim out-of-favor quadrants toward the floor, never to zero** — that is exactly
   what lets you re-expand them in one move when the cadence flips the call.
 
+**Two independent conviction mechanisms (2026-08-14 audit, decisions D-4/D-5) — do not
+conflate them.** Sleeve conviction (above, via the Risk Score) scales the **active
+quadrant as a whole** — it decides how hard the favored quadrant is concentrated versus
+the rest of the core. Thematic conviction (`thematic_conviction[]`, see "Thematic capex
+cascade") lifts **one specific ticker** above its own quadrant floor, independent of
+which quadrant is favored — a Q1-regime book can still carry a thematic lift on a Q2/Q3
+name (e.g. VDE during an energy-supply shock) without that implying a quadrant call
+change. Both are capped (the Risk Score ladder at 90% of core; thematic conviction at
+`per_ticker_cap_pct_of_equity`/`aggregate_cap_pct_of_equity`) and both are floors/tilts on
+top of the deterministic reference, never a mandate to override Tier-1 validation.
+
 ### Cash sleeve — cash + SGOV held to a 5–15% band
 
 Treat **literal cash (`paper_account.cash`) plus SGOV** as one **cash sleeve**, and
@@ -638,6 +680,23 @@ the datum the block cites, and its as-of date.
   news-keyword `market_shock` level:
   a high shock_level on falling oil is a news false-positive, not stagflation. Watch
   for any genuine pass-through in PPI (`PPIACO`).
+  **One number, cited once (2026-08-14 audit B3):** `inflation_axis.oil_20d_pct_governing`
+  is THE oil reading for every purpose in this report — the transition-watch basis, the
+  geopolitical overlay, the divergence adjudication, all of it. **Every time you cite a
+  20-day oil trend, state it in one line as:** governing value, its source
+  (`oil_trend_source`), its as-of date (`oil_20d_pct_governing_as_of`), and the
+  non-governing reading for transparency — e.g. *"oil 20d +6.2% (USO proxy, as-of
+  2026-08-13; FRED WTI reads +17.8%, 9d stale — the proxy governs)."*
+  **Never cite a bare percentage with no source/as-of, and never cite the FRED leg while
+  the proxy is available** — those two omissions are exactly how the SAME concept got
+  quoted at two different values in two different sections of one report with neither
+  side noticing.
+  *(Motivating incident, 2026-08-12: the report printed 17.8% in the transition-watch
+  basis and 6.2% in the geopolitical section — the same 20-day oil trend, two different
+  numbers, because the transition-watch path had read the stale FRED leg directly while
+  the geopolitical section correctly used the fresh USO proxy. That divergence alone
+  activated `transition_watch` for one session on a print that should never have
+  qualified.)*
 
 **Place the call on the grid, then state the change explicitly:** `Prior call: {Qx}.
 Corrected call: {Qy}. What changed: {the specific data that moved it}.` If the call
@@ -1028,8 +1087,19 @@ you are watching for it. Update each status every report; retire faded themes.
 - Cyclicality check: state where the candidate sits in its own industry cycle,
   not just in the theme (memory is a commodity with brutal down-cycles; buying
   a cyclical at its peak inside a strong theme still loses).
-- Core weights may also reflect themes (e.g. XLI for reshoring, VDE for energy
-  capex) — note the linkage in the rebalancing rationale.
+- **Core weights CAN reflect a theme directly (2026-08-14 audit, decisions D-4/D-5)
+  — via an explicit `thematic_conviction[]` nomination, never a "note the linkage"
+  narrative aside.** The prior instruction here — "note the linkage in the
+  rebalancing rationale" — is exactly what let a sustained Hormuz oil disruption
+  leave VDE pinned at a 1-share 0.097% floor for four consecutive sessions with
+  zero path to a larger position: the theme was narrated every day and never once
+  translated into size. For each active theme with a real, sized expression, nominate
+  a ticker for a thematic conviction weight by emitting a `thematic_conviction[]`
+  entry in the trades JSON (schema below) — this is a SEPARATE mechanism from the
+  flex-nomination path above (flex is for a NEW, not-yet-core ticker; thematic
+  conviction lifts a ticker already inside the core roster above its quadrant floor).
+  See `thematic_conviction` in the snapshot-blocks reference and "Conviction-scaled
+  concentration" for how the two conviction mechanisms relate.
 
 ### Calculated Risk Score (0–10)
 
@@ -1329,7 +1399,51 @@ A single JSON snapshot for one trading day containing:
 - `sleeve_selection` — the **role member scorecard** (Task E; blanket auto-switch, session 2026-07-27): per scorecard role `{incumbent, config_selected, effective_selected, scores, ineligible, challenger, lead, streak, switch_signal, auto_switched, pinned}`. A `switch_signal` on an UNPINNED role has ALREADY auto-advanced `effective_selected` via `SleeveSelectionState` (logged `sleeve_switch`, graded by Phase C) — `auto_switched: true` means it fired THIS run; `pinned: true` means the role never auto-switches (config wins). Echo it; when `auto_switched` is true, add ONE adjudication line stating the switch already happened (see "Sleeve selection" below) — do NOT call it "proposed" or "awaiting config commit" unless `pinned` is also true. Never trade a non-selected (non-effective) pool member. **Only covers `selection: "scorecard"` roles — see `role_selection` for the `intl_leader` (rotation) role too.**
 - `role_selection` — the **selection echo** (session 2026-07-17 Task C; extended 2026-07-27), EVERY role's `{role_id, selected, effective_selected, selection}` — including `intl_leader` (`{..., leader_pick}` + a note), which `sleeve_selection` never covers. `selected` is the config baseline/pin (changes only via a committed edit); `effective_selected` is the LIVE incumbent you must trade toward and whose floor you must protect — they can differ once a scorecard role has auto-switched. Check `effective_selected` before ever proposing to reduce a role's member below its floor: the floor follows `effective_selected`, not runtime modulation (`leader_pick` null, `leader_pp` 0, a scorecard `switch_signal` that hasn't crossed the hysteresis bar). See "Config `selected` vs effective `selected` vs runtime `leader_pick`" below.
 - `intl_governance` — the **rotation/DXY-governed intl sleeve** (Task F): `{status, rotation_composite, leader_pick, leader_picks, broad_pp, leader_pp, sleeve_target_pp, intl_targets_pct, modifiers, de_rotation}`. **Already baked into `reference_weights`** (the intl roles' targets) — echo it; execute toward the intl targets; the `intl_leader` slot follows `leader_pick` as a within-role substitution. Do NOT re-size the intl tilt yourself.
-- `transition_watch` — the deterministic **pre-staging** signal (`active`, `projected_quadrant`, `direction`, `staged_fraction`, `basis`, `status`). **Already baked into `reference_weights`** (see its `transition_lean`) — surface it as context, do **not** apply it a second time.
+- `transition_watch` — the deterministic **pre-staging** signal (`active`, `projected_quadrant`, `direction`, `staged_fraction`, `target_fraction`, `basis`, `status`). **Already baked into `reference_weights`** (see its `transition_lean`) — surface it as context, do **not** apply it a second time.
+  **Confirm/release hysteresis + fraction ramp (Task C, 2026-08-14 audit).**
+  Motivating incident: on 2026-08-12 a single session's stateless activation blew the
+  Q2 reference block from 0.091% to 4.118% and reversed it the very next day — a
+  ~45x round trip that proposed ~$10k of Q2 damper buys one day after selling those
+  same dampers, driven by a stale-oil-leg misread (see B1) that a single session's
+  data was never enough to justify acting on. `transition_watch` is no longer
+  stateless: the SAME `(projected_quadrant, direction)` must recur for
+  `confirm_sessions` (2) consecutive sessions before it activates, and must fail to
+  reproduce for `release_sessions` (2) consecutive sessions before it deactivates.
+  `staged_fraction` is now the RAMPED/APPLIED value (capped to move at most
+  `max_session_delta_frac` per session toward `target_fraction`).
+  **Always cite `staged_fraction`, never `target_fraction`, when describing what is
+  actually being applied to the book.**
+  - **`status: "pending"`** (not yet confirmed): `active` is `false`, nothing is
+    applied. State the build-up: *"transition_watch building toward {projected_quadrant}
+    {direction} ({pending_streak} of {confirm_sessions} sessions) — not yet applied."*
+  - **`release_pending: true`** (was active, this session failed to reproduce it):
+    the OLD projection stays fully in force (unchanged) for now. State: *"transition_watch
+    {projected_quadrant} {direction} did not reproduce this session ({release_streak} of
+    {release_sessions}) — still applied, pending release."*
+  - **A `candidate_projected_quadrant` differing from the active `projected_quadrant`**
+    while `active` is `true` means a new target is building its own confirmation streak
+    WHILE the old one stays in force — narrate both: what's currently applied, and what's
+    building to replace it.
+  - Never narrate `target_fraction` as if it were already the position size, and never
+    describe a `"pending"` transition_watch as if it were already shaping the reference —
+    it isn't, by construction, until confirmed.
+- `thematic_conviction` — **the thematic conviction overlay** (Task D, 2026-08-14 audit,
+  decisions D-4/D-5): `enabled`, `ladder` (p_up_min → conviction/target band, echoed from
+  config), `per_ticker_cap_pct_of_equity`, `aggregate_cap_pct_of_equity`, `eligible_universe`
+  (CORE_ROSTER names currently eligible for a lift), `excluded` (`{symbol, reason}` —
+  `legacy_exit` / `price_quarantined` / `non_selected_pool_member` / `insufficient_evidence`
+  / `routed_to_flex`), `active[]` (confirmed, currently-applied entries — each
+  `{symbol, p_up, conviction, target_pct_of_equity, applied_pct_of_equity, theme, evidence,
+  confirm_streak, review_date}`), `pending[]` (building toward confirmation, not yet applied),
+  and `calibration` (`sample_size`, `brier_score`, `hit_rate`, `damping_factor`). **Already
+  baked into `reference_weights`** as a FLOOR LIFT (see its `thematic_lean` —
+  `{applied, lifted, ceiling_pressure, ceiling_pressure_pp}`) — surface it as context, do
+  **not** apply it a second time. A lift never reduces a quadrant-driven weight; when it
+  exceeds the room left by the non-active-quadrant remainder, `ceiling_pressure: true`
+  surfaces with the pp trimmed from the active quadrant — **state this explicitly whenever
+  it fires**, never let a thematic lift quietly de-risk the favored quadrant unremarked. See
+  "Thematic capex cascade" above for how a nomination is emitted, and "Conviction-scaled
+  concentration" for how this differs from sleeve conviction.
 - `flex_state` — **the intraday Flex engine's computed state** (it owns the flex sleeve end-to-end). Per held flex name: the **exit** decision (`next_action` ∈ hold/scale_out/trail/time_stop/stopped, `r_multiple`, `trail_stop`). Per nomination evaluated: the **entry** decision (`entry_trigger` pass/fail, `skip_reason`, `binding`, `size_shares`). Also `quadrant` (the deterministic quadrant the engine used), `as_of`, and **`reconciliation`** (`{status, engine_held, broker_held}` — the deterministic engine-vs-broker check). **When `reconciliation.status` is `ok`, echo the engine's numbers; never recompute or override a flex price/stop/size. When it is `mismatch`, the PAPER ACCOUNT is canonical** — count `broker_held` names as real flex holdings (🔴), run kill-criteria against the broker position using the last recorded kill price from flex/`TradeHistory`, and open no new flex entry in the affected symbol until resolved (see "Reading flex_state" above). Absent ⟹ engine disabled or not yet run that day — say so, don't invent flex levels.
 - `performance` — the scoreboard (Phase C): account equity vs fully-invested SPY since `inception_date` (`return_since_inception_pct`, `spy_return_since_inception_pct`, `excess_vs_spy_pp`), `rolling` 30/60/90d windows (null until that much history exists), `max_drawdown_pct`, `account.cash_pct`, and **`excess_attribution`** (per `inception`/`30d` window: `excess_pp`, `cash_contribution_pp`, `invested_contribution_pp`, `avg_cash_pct`, `method`). This is the mission metric — beating SPY. **Any sentence attributing the vs-SPY excess to "cash drag" or "selection" MUST cite `excess_attribution`** — the sign is routinely backwards freehand (when SPY is negative, flat cash ADDS excess and the lag lives in the invested book). If `available` is false (pre-funding / Alpaca fallback day), say so and skip the scoreboard line.
 - `quadrant_performance` — regime-call accountability (FOLLOWUPS #12, describe-only): per Q1-Q4 bucket, `ret_30d_pct`/`ret_60d_pct`/`ret_90d_pct` + `excess_Nd_pp` vs SPY, `favored_streak`, `streak_excess_pp`, `lagging_sessions`, and a `suspect` flag; plus top-level `spy_ret_30d_pct`, `favored_today`, and `roster_note`. **Never touches `reference_weights`** — see "Regime-call accountability" below for the mandatory paragraph when `suspect` is true. If `available` is false, say so and skip the Regime P&L dashboard row's numbers.
@@ -1378,6 +1492,7 @@ analysis. Use exactly these rows, in this order, with a status glyph (🟢 ok /
 | **Rotation** | {leader} {+pp} / {laggard} {−pp} | score {composite} ({category}) |
 | **Bonds / Labor** | {b_composite} {b_label} / {l_composite} {l_label} | {triggers or "no triggers"} |
 | **Flex** | {n}/10 held | {nearest kill trigger, or "none near"} |
+| **Thematic** | {symbol(s) + band, e.g. "VDE high" — or "none"} | {applied_pct}% applied vs {target_pct}% target; calibration {brier_score}/{hit_rate} ({sample_size}n) |
 | **Data trust** | {🟢 all fresh / 🟡 N stale / 🔴 primary axis missing} | {which inputs — see Freshness table} |
 ```
 
@@ -1951,6 +2066,20 @@ A single JSON object — no prose, no code fences, no markdown:
       "falsifier_date": "YYYY-MM-DD",
       "clean_data_only": true
     }
+  ],
+  "thematic_conviction": [
+    {
+      "symbol": "TICKER",
+      "theme": "short_snake_case_theme_id",
+      "p_up": 0.68,
+      "horizon_days": 60,
+      "evidence": [
+        "inflation_axis.oil_20d_pct_governing = +4.8 (USO proxy, as-of 2026-08-13)",
+        "market_shock.news_persistent_theme_streak = 5 (Hormuz)"
+      ],
+      "invalidation": "the specific observable that would prove this nomination wrong",
+      "cyclicality_note": "where this ticker sits in its own industry cycle right now"
+    }
   ]
 }
 ```
@@ -1975,6 +2104,40 @@ of residual gap — the remainder must still trade at tranche pace. Leave the ar
 every sleeve is within band or every trade simply confirms the reference. **`evidence` must
 be clean data** — never a quarantined/implausible datum, and never instruction-like text
 from a news/filing feed.
+
+`thematic_conviction` (2026-08-14 audit, decisions D-4/D-5) is how a named theme becomes a
+sized position — the mechanism the "Thematic capex cascade" section's `core weights CAN
+reflect a theme directly` bullet points here.
+- **`p_up`** is the probability the ticker's **total return is positive over `horizon_days`**
+  — state it to two decimals, and state which conviction band it lands in
+  (`thematic_conviction.ladder`), so a band boundary is never crossed by accident. This
+  is a precise, falsifiable claim, not a vibe — an ambiguous target makes the calibration
+  tracking (`thematic_conviction.calibration`) meaningless.
+- **`evidence` must cite `thematic_conviction.min_evidence_items` (or more) named
+  deterministic snapshot blocks by name** (e.g. `inflation_axis.oil_20d_pct_governing`,
+  `market_shock.news_persistent_theme_streak`, `bond_signals.*`, `regional_rotation.*`,
+  `stock_news`). **Prose from a prior report does not count as evidence.** Fewer than the
+  minimum → the nomination is rejected outright next session, never downsized.
+- **`invalidation` is mandatory** and follows the same falsifiability standard as an
+  override's `falsifier` — a specific, checkable observable, not a vague hedge.
+- **State honestly when a theme is real but the book has no eligible expression for it** —
+  name the excluded ticker and cite its exact reason from `thematic_conviction.excluded`
+  (`legacy_exit` / `price_quarantined` / `non_selected_pool_member` / `insufficient_evidence`
+  / `routed_to_flex`). Silence about an inexpressible theme is the exact failure this
+  mechanism replaces — do not just drop the idea quietly.
+- **Cite `thematic_conviction.calibration`** (`sample_size`, `brier_score`, `hit_rate`,
+  `damping_factor`) whenever proposing or maintaining ANY thematic weight. You may **not**
+  propose a `very_high` band nomination while `damping_factor < 1.0` without explicitly
+  addressing the poor calibration in your rationale.
+- **Anti-inflation guard:** you may **not** restate the same theme under multiple ticker
+  nominations to route around `per_ticker_cap_pct_of_equity` — one theme, one primary
+  expression, unless the tiers are genuinely distinct (Tier 2 vs Tier 3, per the capex-cascade
+  doctrine above) and stated as such.
+- Applying a nomination is a ONE-SESSION-LAGGED, HYSTERESIS-GATED collector process (see
+  `thematic_conviction` in the snapshot-blocks reference) — do not narrate a nomination you
+  just emitted as if it is already sized in `reference_weights` this same session; it isn't.
+- Leave the array `[]` when you have no thematic nomination this session — it is not
+  required every day, only when a theme genuinely has a sized, falsifiable expression.
 
 Rules for the JSON block:
 

@@ -200,7 +200,7 @@ not convention).
 - **LearningProposals**: PK=year-month (of its cycle), RK=proposal id (`AMD-YYYY-MM-DD[-N]`) — one row per proposal: `class`, `title`, `change_summary`, `data_summary`, `target_file`, `diff`, `evidence`, `evidence_n`, `expected_effect`, `falsifier`, `review_by`, `spec_draft`/`implementation_brief` (class 3), `re_review_of`/`is_revert`, `diff_base_sha`, and the decision lifecycle: `status` (pending → approved/rejected/stale → applied), `decision`/`decision_reason`/`decided_at`/`decided_by`, `pr_url`/`pr_number`/`pr_last_checked`, `applied_at`.
 
 ## Snapshot analytics blocks (collector pre-computes; analyzer consumes)
-Beyond raw API data, the collector injects pre-computed analysis blocks into each `daily-snapshots/{date}.json` so the analyzer reads conclusions, not raw series: `regional_rotation`, `bond_signals`, `labor_signals`, `market_shock`, `growth_axis`/`inflation_axis`/`regime_gate` (the deterministic quadrant axes + deployment gate, echoed not re-derived), `sleeve_selection` (role-member scorecard, Task E), `role_selection` (session 2026-07-15/17, Task C — see below), `intl_governance` (rotation/DXY-governed intl sleeve, Task F), and (Phase C) `performance` (account equity vs fully-invested SPY since inception + rolling 30/60/90d + `cash_pct`), `quadrant_performance` (FOLLOWUPS #12 — regime-call accountability, describe-only), `quadrant_allocation` (session 2026-07-17, Task D — see below), `functional_coverage` (session 2026-07-21, B3 — Table B, see below), `flex_quadrant` (session 2026-07-21, A1 — the flex engine's borderline-resolved quadrant, see below), `freshness` (session 2026-07-21, B4 — deterministic Data-Freshness table, see below) and `track_record` (hit-rate by layer/trigger/thesis at the 60d headline + confidence calibration, aggregated from stamped TradeHistory rows). Phase C 7a also maintains a compact `performance/equity-series.json` blob (collector-owned cache: backfilled once from snapshots, then append-only). The `performance` block also carries `excess_attribution` (session 2026-07-21, B5 — cash-vs-invested decomposition of the vs-SPY excess). New blocks added 2026-07-23 (FOLLOWUPS #17/#18 + Task C): `leading_growth` (9-signal leading-growth composite, describe-only — feeds `leading_vs_lagging_growth` divergence + growth-side `transition_watch`), `market_implied_quadrant` (cross-asset tape-implied quadrant + per-vote table, describe-only — works at borderline regimes, feeds `market_vs_macro_quadrant` divergence), `dollar_proxy` (FX-pairs-derived daily USD direction when DTWEXBGS >5d stale), `pnl_decomposition` (FIFO realized + current unrealized P&L split by `core_current`/`legacy_exits`/`off_roster_flex` — answers the inception-shortfall attribution question).
+Beyond raw API data, the collector injects pre-computed analysis blocks into each `daily-snapshots/{date}.json` so the analyzer reads conclusions, not raw series: `regional_rotation`, `bond_signals`, `labor_signals`, `market_shock`, `growth_axis`/`inflation_axis`/`regime_gate` (the deterministic quadrant axes + deployment gate, echoed not re-derived), `sleeve_selection` (role-member scorecard, Task E), `role_selection` (session 2026-07-15/17, Task C — see below), `intl_governance` (rotation/DXY-governed intl sleeve, Task F), and (Phase C) `performance` (account equity vs fully-invested SPY since inception + rolling 30/60/90d + `cash_pct`), `quadrant_performance` (FOLLOWUPS #12 — regime-call accountability, describe-only), `quadrant_allocation` (session 2026-07-17, Task D — see below), `functional_coverage` (session 2026-07-21, B3 — Table B, see below), `flex_quadrant` (session 2026-07-21, A1 — the flex engine's borderline-resolved quadrant, see below), `freshness` (session 2026-07-21, B4 — deterministic Data-Freshness table, see below) and `track_record` (hit-rate by layer/trigger/thesis at the 60d headline + confidence calibration, aggregated from stamped TradeHistory rows). Phase C 7a also maintains a compact `performance/equity-series.json` blob (collector-owned cache: backfilled once from snapshots, then append-only). The `performance` block also carries `excess_attribution` (session 2026-07-21, B5 — cash-vs-invested decomposition of the vs-SPY excess). New blocks added 2026-07-23 (FOLLOWUPS #17/#18 + Task C): `leading_growth` (9-signal leading-growth composite, describe-only — feeds `leading_vs_lagging_growth` divergence + growth-side `transition_watch`), `market_implied_quadrant` (cross-asset tape-implied quadrant + per-vote table, describe-only — works at borderline regimes, feeds `market_vs_macro_quadrant` divergence), `dollar_proxy` (FX-pairs-derived daily USD direction when DTWEXBGS >5d stale), `pnl_decomposition` (FIFO realized + current unrealized P&L split by `core_current`/`legacy_exits`/`off_roster_flex` — answers the inception-shortfall attribution question). New block added 2026-08-14 (Task D, decisions D-4/D-5): `thematic_conviction` (the LLM-probability-driven thematic overlay — ladder/caps/eligible-universe scaffold + confirm/release-hysteresis `active[]`/`pending[]` entries + Brier calibration, baked into `reference_weights` as a floor lift; see below).
 
 **`execution_review`** (session 2026-07-15, Task A1 — a response to the 2026-07-14/15 MU incident, where a validated, submitted sell 403'd against a stale flex-engine GTC stop order and was silently re-proposed the next day with no visible failure anywhere) reads back the PRIOR trading day's `daily-executions/{date}.json` (looking back up to 7 days for the most recent one, so a weekend/holiday gap doesn't stall it) and reconciles each submitted order's ACTUAL terminal Alpaca state via `AlpacaClient.get_order`. Alpaca-only (FMP budget untouched), non-fatal (`{"available": False, "reason": ...}` on any failure — never loses the snapshot). Emits `{date, submitted, filled, failed[], unfilled[], available}` — `failed` covers both an order that never reached Alpaca (submission itself errored, e.g. the MU 403) and one that Alpaca terminally rejected/canceled/expired; `unfilled` covers an order still resting (not yet terminal) at the next day's collector run. The analyzer's prompt (Task A1 companion edit) surfaces any `failed`/`unfilled` entries under the Data Integrity Warning heading and must never assume a prior day's proposal executed — re-proposing a symbol that appears in `execution_review.failed`/`.unfilled` must say so explicitly.
 
@@ -252,6 +252,125 @@ Beyond raw API data, the collector injects pre-computed analysis blocks into eac
 - **`/api/performance`** (Task D, `web/api/function_app.py::_sleeve_series`/`_attach_sleeve_series`) emits per-point `sleeve_contribution_pp`/`sleeve_trade_count` **cumulative from the WINDOW START — deliberately NEVER normalized to a start=100 buy-and-hold index** like `portfolio_norm`/`spy_norm`/`quadrants`: the sleeve is intermittently deployed and flat much of the time, so indexing it the same way would render simply opening a position as a "return." Top-level `sleeve_closed_trade_count_total` is the ALL-TIME count (drives the N=30 sample-size gate regardless of window). An absent/malformed blob degrades to `sleeve_available: false` with the rest of the response byte-identical to before this feature existed.
 - **`web/performance.html`/`.js`** (Task E) render it on a SEPARATE `#sleeveChart` canvas below the main chart (never a 7th dataset — different units), sharing the x-axis/window selector/`regimeBands` plugin. Color `#b8348f`, validated via the `dataviz` skill's `scripts/validate_palette.js` against every existing series color and the panel surface (contrast ≥3:1 and CVD ΔE clean-PASS ≥8 on every pair — worst case 9.5 vs Q1 green; normal-vision ΔE ≥15 on every pair). Below **N=30 closed trades** the line renders dashed+grey with a visible caption; no Sharpe/win-rate/skill statistic anywhere on this panel at any N (an intentional, permanent constraint — this system doesn't have the sample size to support one yet, and pretending otherwise would be worse than the noise itself).
 - **Phase C horizon mismatch (Task F, FOLLOWUPS #61) — recorded, not fixed this cycle.** `_OUTCOME_HORIZONS=[30,60,90]`/`_HEADLINE_HORIZON=60` (`collector/handler.py`) grade a recommendation's outcome at fixed calendar horizons built for the core book's monthly cadence — wrong for a sleeve with a 5-day time stop, since a flex trade is closed and gone before its first outcome stamp even matures. Sleeve-appropriate grading (realized `r_multiple` at `closed_date`, not calendar drift) is FOLLOWUPS #61, gated on #23 + #58. Flex TradeHistory rows are already correctly `layer: "flex"` tagged (`_record_trade_history` hardcodes it) — audited this session, not changed.
+
+**2026-08-14 audit (branch `feat/20260814-thematic-conviction-oil-fidelity`, decisions D-1
+through D-5) — report-to-broker fidelity, oil signal correctness, transition_watch
+hysteresis, thematic conviction overlay.** Triggered by the 08-11→08-14 reports: a
+six-order "Final trade plan" collapsing to one submitted order with no Data Integrity
+Warning; `transition_watch` activating on a stale FRED oil leg the axis itself had
+already bypassed; the whipsaw that produced; and four sessions narrating a live Hormuz
+energy-supply theme with zero path to a sized position. Every fix below shipped with a
+test confirmed FAILING on pre-fix source (`git stash` isolation). Suite 1026→1126,
+ruff clean.
+- **The VDE whipsaw (motivating incident for Tasks B/C):**
+
+  | Date | VDE reference % | Current | Action |
+  |---|---|---|---|
+  | 08-11 | 0.091% | 4.22% (25 sh) | Sold 24 shares @ $169.95 → 1-share floor |
+  | 08-12 | **4.118%** | 0.17% | Report proposed **buy 18 shares** @ $171.55 |
+  | 08-13 | 0.091% | 0.17% | In-band, no action |
+  | 08-14 | 0.097% | 0.169% | `de_risk` override filed to shelter +0.072pp |
+
+  The 08-12 spike was `transition_watch` activating for exactly one session on a stale
+  FRED WTI reading while `inflation_axis` itself had already correctly preferred a fresh
+  USO-proxy read (6.2%, below the 10.0pp trigger threshold) over the stale FRED leg
+  (17.8%, above it) — the divergence detector (`_div_leading_vs_lagging_inflation`) was
+  simply reading the wrong field (**decision D-2/Task B1**).
+- **Decision D-1 (Task A, report-to-broker fidelity).** An A0 empirical probe (real blob
+  reads from `stpfautoprod`, not inspection) found **Case 1 — LLM self-inconsistency, not
+  validator rejection or executor drop:** the 08-12 model's own structured `trades[]` JSON
+  never contained the 6 orders its markdown narrated — only a single, entirely
+  band-enforcement-synthesized COWZ buy — and `daily-trades.json`/`daily-executions.json`
+  matched each other exactly that day. This matters architecturally: `plan_vs_submitted`
+  (A2, JSON-vs-broker fidelity) structurally CANNOT catch a prose-vs-JSON divergence,
+  since it never reads the markdown; `analyzer._submitted_order_addendum` (A1, rendered
+  directly from the final validated `trades[]`, placed immediately under the narrative)
+  is what actually makes the divergence visually undeniable. Both are still valuable —
+  A2 guards a genuine, different failure mode (a real executor bug or clamp) — but A1 is
+  the fix that closes the OBSERVED incident. A3 hardens the prompt against the resulting
+  08-13 false "executed as planned" reconciliation with an explicit anti-fabrication rule.
+  A gap found DURING the A0 probe itself: `_split_response`'s "malformed JSON" branch
+  never persisted a debug-raw copy (unlike its sibling "marker missing" branch) — App
+  Insights retention had already expired by the time this incident needed forensic
+  reconstruction, blocking a definitive parse-failure-vs-model-omission determination.
+  Fixed alongside A1.
+- **Decision D-2 (Task B, oil signal correctness).** `inflation_axis.oil_20d_pct_governing`
+  (new field) is now the ONE oil reading for every purpose — `_div_leading_vs_lagging_inflation`
+  reads it instead of the raw FRED leg directly, echoing whichever source
+  (`oil_trend_source`) the axis itself already resolved. B2 adds real per-leg `as_of` +
+  staleness gating to divergences 1/2/5 — the realized-core leg deliberately uses the
+  freshness block's 45-day MONTHLY threshold (`_FRESHNESS_MONTHLY_THRESHOLD_D`), not the
+  flat 7-day daily threshold the other legs use, since core CPI/PCE genuinely only
+  refreshes monthly and a flat 7-day gate would make that leg permanently stale between
+  prints — a deliberate deviation from a literal single-threshold reading, documented in
+  the divergence function's own docstring. B3 requires the prompt to cite one governing
+  oil number with source + as-of + the non-governing reading, every time.
+- **Decision D-3 (Task C, transition_watch hysteresis).** Mirrors the existing
+  axis-direction confirmation pattern (`_confirm_axis_direction`/`AxisDirectionState`) but
+  needs two independent thresholds (confirm vs release, not just one) plus a fraction
+  ramp, so it is its own function (`_confirm_transition_watch`) atop the UNCHANGED
+  stateless `_build_transition_watch` evaluation, persisted via a new `TransitionWatchState`
+  table (single row). A different candidate emerging while active does NOT count as a
+  release miss — the old projection stays in force, unaffected, while the new one builds
+  its own confirmation streak (never a no-projection limbo mid-transition); only a
+  genuine absence (the stateless evaluation produces nothing at all) counts toward
+  release. `staged_fraction` (the field every existing consumer already reads) becomes
+  the RAMPED/applied value; a new `target_fraction` field carries the un-ramped target.
+- **Decision D-4/D-5 (Task D, thematic conviction overlay) — the substantive architecture
+  addition.** Jorge's decision: the LLM advises via an explicit probability-of-increase
+  (`p_up`, "total return positive over `horizon_days`") rather than a mechanical
+  oil-level trigger, and position size scales by confidence via a coarse ladder rather
+  than being fixed. **Rejected alternative, on record: a mechanical trigger (e.g. "Brent
+  > $90 for N sessions")** — rejected because a level-and-duration rule is exactly the
+  kind of brittle, single-metric gate this whole audit cycle was fixing elsewhere (B1's
+  stale-oil-leg bug, the 07-21 audit's mechanical-veto retirement for `regime_fit`); an
+  LLM probability estimate, properly constrained, generalizes across themes the way a
+  hard-coded price level never could.
+  **Task D1's five mandatory safety properties** (an LLM-emitted probability directly
+  sizing a position is an unbounded self-grading loop unless ALL five hold): (1)
+  **quantized** — `_thematic_ladder_lookup` maps a continuous `p_up` to one of 5 coarse
+  bands (`risk-limits.json → thematic_conviction.ladder`); a 0.63 and a 0.66 in the same
+  band must produce the identical target — false precision jitters session to session.
+  (2) **evidence-bound** — `min_evidence_items` (2) named deterministic snapshot-block
+  citations; below the bar the nomination is REJECTED, never downsized (`insufficient_evidence`
+  in `thematic_conviction.excluded`). (3) **bounded** — `per_ticker_cap_pct_of_equity`
+  (4.0) + `aggregate_cap_pct_of_equity` (8.0), the latter scaled pro-rata across
+  nominations, never truncated by rank. (4) **hysteretic** — per-symbol confirm/release
+  (`_confirm_thematic_entry`, new `ThematicConvictionState` table, one row per nominated
+  symbol) + a `max_session_delta_pp` (1.5) ramp, mirroring Task C's discipline exactly —
+  without this the same VDE whipsaw would just move to a new lever. (5) **graded** — a
+  new `ThematicHistory` table (PK=year-month) + `_stamp_thematic_outcomes` (mirrors
+  `_stamp_switch_outcomes`'s per-horizon-independent pattern, reusing the SAME
+  perf-series-closes-first/FMP-fallback price resolution) resolve `actual_up_{30,60,90}d`
+  + excess vs SPY; `_build_thematic_calibration` computes Brier score + hit rate, feeding
+  a `brier_damping` ladder that mechanically zeroes the lever (`damping_factor`) when the
+  model's own track record is poor — below `brier_min_sample` (10), no damping (a thin
+  sample proves nothing either way).
+  **Eligibility (D4, `_thematic_classify_symbol`):** a `LEGACY_EXITS` name or a
+  price-quarantined name is always excluded; a `CORE_ROSTER` name must be its role's
+  EFFECTIVE selected incumbent (a non-selected pool member fights the existing D2
+  non-selected-zeroing loop, producing a permanently unfillable reference — excluded with
+  reason `non_selected_pool_member`, the correct remedy is a sleeve-selection switch, not
+  a thematic lift, per **decision gate D-6**, FOLLOWUPS #64); a ticker not in
+  `CORE_ROSTER` at all is never excluded — it routes to flex (`flex_source: "thematic"`,
+  D4 rule 3, unchanged doctrine: new tickers enter only via flex).
+  **Integration (`_build_reference_weights`) — a floor lift, never a ceiling:**
+  `core_target[t] = max(core_target[t], thematic_target)`, budgeted from the
+  non-active-quadrant remainder (the "living hedge" `active_quadrant_ceiling_pct_of_core`
+  leaves inside the core block); when the lift exceeds that room, the active quadrant's
+  own names are trimmed pro-rata and `thematic_lean.ceiling_pressure: true` surfaces with
+  the exact pp taken — never a silent breach of the 90%-of-core ceiling.
+  **Deliberate deviation from the literal D5 spec, verified empirically:** the spec frames
+  this as inserted "before step 4's floor assembly" (i.e. against `raw_core`/`core_target`,
+  which are %-of-CORE at that point) — but `thematic_conviction`'s targets are %-of-EQUITY
+  by design (D2), and the %-of-core→%-of-equity conversion factor (`scale`, derived from
+  `core_room`) is not computed until step 5. The lift is applied immediately after step
+  5's equity-denominated `weights` dict instead — functionally identical, at the only
+  point in the pipeline where the units actually line up (confirmed via a direct probe:
+  a small lift leaves the active quadrant's own weights byte-identical; a large lift
+  correctly trims them and flags `ceiling_pressure`).
+  **Ladder numbers are a starting proposal, not yet reviewed** — flagged for Jorge,
+  FOLLOWUPS #63.
 
 **`quadrant_performance`** (FOLLOWUPS #12) answers the question the 2026-07-02 report exposed: the system rotated into Q3/Q4 while the Q3 basket was the worst performer since inception, and nothing forced the analyzer to engage with that tension. Built by `collector._build_quadrant_performance` right after the `performance` scoreboard so it reuses the SAME in-run perf series (`read_perf_series()` result, never re-downloaded). Per Q1-Q4 bucket (current `QUADRANT_CONCENTRATE` membership): `ret_30d_pct`/`ret_60d_pct`/`ret_90d_pct` + `excess_Nd_pp` vs SPY — window returns mirror `web/api/function_app.py::_quadrant_series` semantics (base = first close INSIDE the window slice, via a deliberate pure copy `_quadrant_perf_series` kept in lock-step by hand since the SWA API can't import this module) — plus a **hysteresis scan**: `favored_streak` (consecutive sessions ending today the bucket has been in that day's `favored_bucket`), `streak_excess_pp` (basket cumulative excess vs SPY over the streak, based at the session BEFORE the streak began), `lagging_sessions` (the current run of sessions, recomputed AS-OF each session — not just today's number — where that streak excess was negative), and `suspect` (true when the bucket is favored today AND `lagging_sessions >= suspect_after_sessions`, config `risk-limits.json → quadrant_performance`, default 10). Top level: `{as_of, spy_ret_30d_pct, buckets, favored_today, roster_note}` (`roster_note` flags that early-window returns under-represent the 2026-07-10 roster-revision's new members, same caveat as the `/performance` web chart). **Describe-only — never touches `reference_weights` or any deterministic gate**; the analyzer's prompt (Section 1 echo + a mandatory confronting paragraph when any favored bucket is `suspect`, raising the evidentiary bar for INCREASING that bucket's weight further) is the only consumer. A `regime_suspect` layer OverrideHistory row is written per suspect bucket per report day (analyzer `_write_regime_suspect_history`) so #13's monthly review can grade "what did we do when the market disagreed, and who was right" — **no stamper grades these rows yet** (`_stamp_override_outcomes` requires override-shaped `falsifier_date`/`sleeve`/`direction` fields via `_grade_override`; `_stamp_switch_outcomes` hardcodes an allow-list of `layer` values that excludes `regime_suspect`); a future grading pass would need a third stamping path comparing the favored bucket's forward return vs SPY from the flagged date, mirroring `_grade_switch`'s shape rather than `_grade_override`'s.
 

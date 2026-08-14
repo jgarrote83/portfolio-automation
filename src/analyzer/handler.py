@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from shared.keyvault import load_secrets
@@ -383,6 +383,20 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
                 )
             except Exception as e:  # noqa: BLE001
                 logger.error("Quadrant allocation addendum failed (non-fatal): %s", e)
+
+            # Task A1 (2026-08-14, D-1) — canonical submitted-order addendum,
+            # rendered from the FINAL validated trades[] array itself (never from
+            # the model's prose). Motivating incident: the 2026-08-12 report
+            # narrated a 6-order "Final trade plan" while its own trades[] field
+            # held a single, unrelated, fully-synthesized band-enforcement trade
+            # — five orders vanished between the narrative and the model's own
+            # JSON with no Data Integrity Warning anywhere. Unconditional (always
+            # rendered, including the empty-array case) — silence is what let
+            # this hide.
+            try:
+                report_md += _submitted_order_addendum(trades_obj.get("trades", []), gaps)
+            except Exception as e:  # noqa: BLE001
+                logger.error("Submitted-order addendum failed (non-fatal): %s", e)
             logger.info("Trade validation: %s", combined_summary)
         except Exception:  # noqa: BLE001
             logger.exception("Pass-2 trade validation CRASHED — flagging file (fail-closed)")
@@ -393,6 +407,10 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
     _write_trade_history(date_str, trades_obj, snapshot)
     _write_override_history(date_str, result.get("decisions", []), snapshot)
     _write_regime_suspect_history(date_str, snapshot, trades_obj)
+    try:
+        _write_thematic_history(date_str, trades_obj.get("thematic_conviction") or [], gaps)
+    except Exception:  # noqa: BLE001
+        logger.exception("Thematic history write failed (non-fatal)")
 
     logger.info(
         "=== Analyzer completed for %s — %d trades recommended ===",
@@ -526,6 +544,80 @@ def _quadrant_allocation_addendum(
             "run and could not be applied to this view — treat those trades' effect "
             "on their bucket qualitatively._"
         )
+    return "\n".join(lines) + "\n"
+
+
+def _submitted_order_addendum(trades: list[dict], gaps: list[dict] | None) -> str:
+    """Canonical submitted-order addendum (Task A1, 2026-08-14, decision D-1) —
+    deterministic, rendered directly from the FINAL validated `trades[]` array
+    (post pass-2, post cash-floor guard, post reference-execution merge — the
+    exact list `write_trades` persists and the executor will submit).
+
+    Deliberately does NOT parse the model's own markdown prose to detect
+    divergence from it — the 2026-08-12 incident showed a model can narrate an
+    elaborate 6-order "Final trade plan" in its report while its own structured
+    `trades[]` field contains a single, unrelated, entirely synthesized
+    band-enforcement trade (5 of 6 orders never existed outside the prose).
+    Parsing free text to catch that is fragile and will rot, and still
+    wouldn't explain *why*. Rendering the ground-truth list right after the
+    narrative makes any divergence visually undeniable with zero parsing —
+    hence "if the narrative above differs from this table, this table governs."
+
+    `Origin` distinguishes `model` (the LLM's raw proposal, survived
+    unmodified), `enforced` (synthesized by `reference_execution.reconcile`,
+    tagged `source == "band_enforcement"`), and `guard` (quantity trimmed by
+    the cash-floor guard, tagged `adjusted_by == "cash_floor_guard"` — see
+    `_apply_cash_floor_guard`).
+    """
+    price_by_symbol: dict[str, float] = {}
+    for g in gaps or []:
+        sym = str(g.get("symbol") or "").upper()
+        try:
+            px = float(g.get("price") or 0)
+        except (TypeError, ValueError):
+            px = 0.0
+        if sym and px > 0:
+            price_by_symbol[sym] = px
+
+    lines = [
+        "\n\n---\n\n### 📋 Canonical submitted order array (deterministic — post-validation)\n",
+        "These are the orders that will be sent to the broker. If the narrative "
+        "recommendation above differs from this table, **THIS TABLE GOVERNS**.\n",
+    ]
+    if not trades:
+        lines.append("**Total: 0 orders — no trades this session.**")
+        return "\n".join(lines) + "\n"
+
+    lines += [
+        "| # | Side | Symbol | Qty | Est. notional | Origin |",
+        "|---|---|---|---|---|---|",
+    ]
+    sells = buys = 0
+    for i, t in enumerate(trades, start=1):
+        side = str(t.get("side") or "?").lower()
+        symbol = str(t.get("symbol") or "?").upper()
+        try:
+            qty = float(t.get("quantity") or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        px = price_by_symbol.get(symbol)
+        notional = f"${qty * px:,.2f}" if px else "n/a"
+        if t.get("adjusted_by") == "cash_floor_guard":
+            origin = "guard"
+        elif t.get("source") == "band_enforcement":
+            origin = "enforced"
+        else:
+            origin = "model"
+        if side == "sell":
+            sells += 1
+        elif side == "buy":
+            buys += 1
+        qty_str = f"{qty:g}" if qty else "0"
+        lines.append(f"| {i} | {side.upper()} | {symbol} | {qty_str} | {notional} | {origin} |")
+    lines.append(
+        f"\n**Total: {len(trades)} order{'s' if len(trades) != 1 else ''}. "
+        f"Sells {sells} / Buys {buys}.**"
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -682,6 +774,7 @@ def _apply_cash_floor_guard(
         trimmed_trade = dict(sgov_trade)
         trimmed_trade["quantity"] = new_qty
         trimmed_trade["qty"] = new_qty
+        trimmed_trade["adjusted_by"] = "cash_floor_guard"
         trimmed = list(trades)
         trimmed[sgov_idx] = trimmed_trade
         addendum = (
@@ -1075,7 +1168,25 @@ def _split_response(raw: str, date_str: str) -> tuple[str, dict]:
 
     trades_obj = _extract_json(trades_part.strip())
     if not isinstance(trades_obj, dict) or "trades" not in trades_obj:
-        logger.warning("Trades block malformed — defaulting to empty list")
+        # A0 (2026-08-14 audit): mirror the "marker missing" branch above and
+        # persist the raw response for post-mortem. Before this fix, a
+        # malformed/truncated trades JSON silently defaulted to an empty list
+        # with only a log line — and when the 2026-08-12 incident needed
+        # forensic reconstruction, App Insights retention had already expired
+        # and there was no raw response anywhere to distinguish "the model
+        # never emitted the trades" from "the model emitted them and the JSON
+        # got truncated." Non-fatal — a debug-write failure must never lose
+        # the (empty) trades result.
+        logger.warning(
+            "Trades block malformed for %s — saving raw output to "
+            "daily-reports/_debug/%s-raw.txt; defaulting to empty list",
+            date_str, date_str,
+        )
+        try:
+            from shared.storage import write_debug_raw
+            write_debug_raw(date_str, raw)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not persist debug raw response: %s", e)
         trades_obj = {"trades": []}
 
     # A1 (2026-07-22): sanitize optional watch_candidates — drop malformed entries
@@ -1262,6 +1373,71 @@ def _write_override_history(date_str: str, decisions: list[dict], snapshot: dict
             upsert_entity("OverrideHistory", entity)
         except Exception as e:  # noqa: BLE001
             logger.error("OverrideHistory upsert failed for %s: %s", row_key, e)
+
+
+def _write_thematic_history(date_str: str, thematic_nominations: list[dict],
+                            gaps: list[dict] | None) -> None:
+    """D6 (2026-08-14 audit) — WRITE ONLY: one `ThematicHistory` row per
+    thematic-conviction nomination the model emitted this session
+    (`trades_obj["thematic_conviction"]`, D7 schema). Mirrors
+    `_write_override_history`'s write-once shape (PK=year-month, stable
+    RowKey). `entry_price` is read from `gaps` (the SAME price source the
+    reference-execution gap table already uses — held names are paper-
+    canonical, unheld targets fall back to FMP; see the price-basis-coherence
+    doctrine) — never re-fetched.
+
+    Deliberately does NOT compute `conviction`/`target_pct_of_equity` here:
+    that is the collector's `_thematic_ladder_lookup`, and analyzer/collector
+    are separate deployable Function apps with no cross-import between them
+    (verified — neither imports the other). Grading (`_stamp_thematic_outcomes`
+    / `_build_thematic_calibration`) only needs `p_up` + the resolved
+    `actual_up_{h}d`, so this omission costs nothing.
+
+    Unpriced (no gap row for the symbol) still writes the row — `entry_price`
+    stays null and the stamper's `_grade_thematic_horizon` returns `None`
+    (indeterminate_data) for that row rather than guessing. Non-fatal per row.
+    """
+    if not thematic_nominations:
+        return
+    price_by_symbol: dict[str, float] = {}
+    for g in gaps or []:
+        sym = str(g.get("symbol") or "").upper()
+        try:
+            px = float(g.get("price") or 0)
+        except (TypeError, ValueError):
+            px = 0.0
+        if sym and px > 0:
+            price_by_symbol[sym] = px
+
+    year_month = date_str[:7]
+    filed = date.fromisoformat(date_str)
+    horizon_dates = {h: (filed + timedelta(days=h)).isoformat() for h in (30, 60, 90)}
+    for idx, nom in enumerate(thematic_nominations):
+        sym = str(nom.get("symbol") or "").upper()
+        if not sym:
+            continue
+        row_key = f"THM-{date_str.replace('-', '')}-{idx:03d}"
+        try:
+            evidence = nom.get("evidence") or []
+            entity = {
+                "PartitionKey": year_month,
+                "RowKey": row_key,
+                "symbol": sym,
+                "filed_date": date_str,
+                "p_up": float(nom.get("p_up")) if nom.get("p_up") is not None else None,
+                "theme": nom.get("theme", ""),
+                "evidence": (" | ".join(str(e) for e in evidence))[:32000],
+                "evidence_count": len(evidence),
+                "invalidation": (nom.get("invalidation") or "")[:32000],
+                "entry_price": price_by_symbol.get(sym),
+                "horizon_30d": horizon_dates[30],
+                "horizon_60d": horizon_dates[60],
+                "horizon_90d": horizon_dates[90],
+                "outcome_status": "",
+            }
+            upsert_entity("ThematicHistory", entity)
+        except Exception as e:  # noqa: BLE001
+            logger.error("ThematicHistory upsert failed for %s: %s", row_key, e)
 
 
 def _write_regime_suspect_history(date_str: str, snapshot: dict, trades_obj: dict) -> None:
