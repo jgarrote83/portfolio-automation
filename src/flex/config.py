@@ -60,6 +60,22 @@ class FlexConfig:
     gap_adr_mult: float = 2.0          # gap above this × ADR raises the confirmation bar (not auto-skip)
     # --- liquidity screen (tied to IEX-VWAP validity) ---
     min_adv_usd: float = 50_000_000.0  # min average daily dollar volume for entry
+    # --- conviction-path profile (Task E, 2026-08-14 flex-conviction-path cycle) ---
+    # A wider stop than the catalyst profile's 4.0% — a multi-week thesis needs room
+    # the LLM's own invalidation level defines, not a tight intraday ATR distance.
+    conviction_max_stop_pct: float = 10.0
+    # "No-chase" entry cap: reject if price already sits more than this many ATRs
+    # above session VWAP — the conviction path is patient (no VWAP-rising/gap logic
+    # at all), so it must not buy into a name that already ran hard today.
+    conviction_no_chase_atr: float = 1.0
+    # --- cash accommodation (B5) — mirrors risk-limits.json's core-level cash-sleeve
+    # doctrine so a flex conviction buy can never drain literal cash below the SAME
+    # floor the core book protects (must not rebuild the M5 bug: a lift/overlay must
+    # never fund itself out of the cash floor). Duplicated here (not imported from
+    # risk-limits.json) because flex is deliberately decoupled from core config —
+    # see FlexConfig's module doctrine; kept in sync by hand, values as of 2026-08-14.
+    cash_sleeve_floor_pct: float = 5.0
+    literal_cash_floor_pct: float = 0.75
 
     def stop_epsilon(self, atr: float) -> float:
         """Absolute minimum stop move before a cancel/replace, in price units."""
@@ -83,4 +99,8 @@ def load_flex_config() -> FlexConfig:
         entry_cutoff_min=_env_int("FLEX_ENTRY_CUTOFF_MIN", d.entry_cutoff_min),
         gap_adr_mult=_env_float("FLEX_GAP_ADR_MULT", d.gap_adr_mult),
         min_adv_usd=_env_float("FLEX_MIN_ADV_USD", d.min_adv_usd),
+        conviction_max_stop_pct=_env_float("FLEX_CONVICTION_MAX_STOP_PCT", d.conviction_max_stop_pct),
+        conviction_no_chase_atr=_env_float("FLEX_CONVICTION_NO_CHASE_ATR", d.conviction_no_chase_atr),
+        cash_sleeve_floor_pct=_env_float("FLEX_CASH_SLEEVE_FLOOR_PCT", d.cash_sleeve_floor_pct),
+        literal_cash_floor_pct=_env_float("FLEX_LITERAL_CASH_FLOOR_PCT", d.literal_cash_floor_pct),
     )

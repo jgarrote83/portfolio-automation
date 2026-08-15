@@ -35,20 +35,20 @@ _BIG_GAP_HOLD_ATR = 0.10
 _VWAP_SLOPE_LOOKBACK = 5
 
 
-def size_flex_position(
+def _size_conviction_position(
     equity: float,
     entry_price: float,
     stop_distance: float,
-    cfg: FlexConfig,
+    risk_budget_pct: float,
+    per_name_cap_pct: float,
     sleeve_room_usd: float | None = None,
 ) -> dict:
-    """Size a flex entry under three constraints; report which one binds.
-
-    Order: risk-budget sizing (constant dollar risk) → per-name notional cap
-    (concentration backstop) → sleeve cap (aggregate flex room). The smallest
-    wins, and ``binding`` names the governor — the whole point, so the
-    risk-budget-vs-cap interaction is visible in logs/tests rather than buried.
-    """
+    """Shared three-way sizing governor (risk-budget → per-name cap → sleeve
+    cap, smallest wins, `binding` names it) — used by both `size_flex_position`
+    (catalyst profile, reads its pcts off a `FlexConfig`) and
+    `build_conviction_entry` (conviction profile, passes an already-scaled
+    `risk_budget_pct` = `cfg.risk_budget_pct * size_mult`). Extracted so the
+    two profiles' sizing math can never drift apart by hand-copy."""
     out = {
         "size_shares": 0,
         "notional_usd": 0.0,
@@ -59,8 +59,8 @@ def size_flex_position(
     if stop_distance <= 0 or entry_price <= 0 or equity <= 0:
         return out
 
-    risk_shares = math.floor((cfg.risk_budget_pct / 100.0 * equity) / stop_distance)
-    cap_shares = math.floor((cfg.per_name_cap_pct / 100.0 * equity) / entry_price)
+    risk_shares = math.floor((risk_budget_pct / 100.0 * equity) / stop_distance)
+    cap_shares = math.floor((per_name_cap_pct / 100.0 * equity) / entry_price)
     sleeve_shares = (
         math.floor(sleeve_room_usd / entry_price)
         if sleeve_room_usd is not None
@@ -85,6 +85,26 @@ def size_flex_position(
         "binding": binding,
     })
     return out
+
+
+def size_flex_position(
+    equity: float,
+    entry_price: float,
+    stop_distance: float,
+    cfg: FlexConfig,
+    sleeve_room_usd: float | None = None,
+) -> dict:
+    """Size a flex entry under three constraints; report which one binds.
+
+    Order: risk-budget sizing (constant dollar risk) → per-name notional cap
+    (concentration backstop) → sleeve cap (aggregate flex room). The smallest
+    wins, and ``binding`` names the governor — the whole point, so the
+    risk-budget-vs-cap interaction is visible in logs/tests rather than buried.
+    """
+    return _size_conviction_position(
+        equity, entry_price, stop_distance,
+        cfg.risk_budget_pct, cfg.per_name_cap_pct, sleeve_room_usd,
+    )
 
 
 def build_flex_entry(
@@ -219,6 +239,220 @@ def build_flex_entry(
     })
     if sizing["size_shares"] < 1:
         return _skip("size_zero")
+
+    out["entry_trigger"] = "pass"
+    out["skip_reason"] = None
+    return out
+
+
+def _cash_accommodation_shares(
+    proposed_shares: int,
+    entry_price: float,
+    literal_cash_usd: float,
+    sgov_usd: float,
+    equity: float,
+    cfg: FlexConfig,
+) -> dict:
+    """B5 — clamp a conviction-path entry's share count so it can never drain
+    literal cash below `literal_cash_floor_pct` of equity, nor the whole cash
+    sleeve (literal cash + SGOV) below `cash_sleeve_floor_pct` of equity.
+
+    A CLAMP, never an outright rejection — "size-floored ≠ impossible" is the
+    existing doctrine everywhere else in this system (core reference execution,
+    thematic conviction), applied here too. Explicitly the M5 callback: M5 was
+    a lift silently spending cash the reduction pool should have protected;
+    the fix there excluded `__cash__` from the pool it could drain. The
+    parallel bug here would be a conviction entry sized purely off the risk-
+    budget/per-name/sleeve-cap chain with NO awareness that literal cash is
+    already thin — this function is that missing awareness, checked at the
+    point of sizing rather than trusted to some upstream exclusion list.
+
+    Returns ``{"shares": int, "funding_clamped": bool}``. Non-positive
+    inputs (equity/entry_price) degrade to 0 shares, clamped — fail-closed,
+    never a divide-by-zero or a fabricated allowance.
+
+    **PR #41 M-A finding (confirmed empirically, not yet fixed — decision
+    gate, FOLLOWUPS #75):** ``room = min(literal_room, sleeve_room)`` funds a
+    conviction entry from LITERAL CASH ALONE — the flex engine has no
+    mechanism to sell SGOV (SGOV is a core pool member, permanently inside
+    `flex_separation_set`; there is also no same-session cross-engine trade
+    path from the ~15-min intraday flex tick to the once-daily core
+    executor). Against a representative book (equity ~$102k, literal cash
+    ~1.5%, SGOV ~7.7%), `literal_room` is the ONLY term that ever binds —
+    `sleeve_room` is structurally unreachable capacity, not a real second
+    funding source — so every conviction band collapses to the SAME clamped
+    share count regardless of `size_mult`. Confirmed via a blocking sub-probe
+    that same-session SGOV liquidation is NOT available and would require
+    breaking the flex/core Separation Contract to build. Deliberately NOT
+    fixed here — a ladder re-scope (shrink the bands to fit literal-cash-only
+    funding) or a new pre-market core-side literal-cash pre-fund step are both
+    real design choices Jorge must make, not something to infer silently.
+    """
+    if proposed_shares <= 0 or entry_price <= 0 or equity <= 0:
+        return {"shares": 0, "funding_clamped": proposed_shares > 0}
+
+    notional = proposed_shares * entry_price
+    literal_floor_usd = cfg.literal_cash_floor_pct / 100.0 * equity
+    sleeve_floor_usd = cfg.cash_sleeve_floor_pct / 100.0 * equity
+
+    literal_room = max(0.0, literal_cash_usd - literal_floor_usd)
+    sleeve_room = max(0.0, (literal_cash_usd + sgov_usd) - sleeve_floor_usd)
+    room = min(literal_room, sleeve_room)
+
+    if notional <= room:
+        return {"shares": proposed_shares, "funding_clamped": False}
+
+    affordable = int(room // entry_price)
+    affordable = max(0, min(affordable, proposed_shares))
+    return {"shares": affordable, "funding_clamped": True}
+
+
+def build_conviction_entry(
+    candidate: dict,
+    intraday_bars: list[dict],
+    daily_bars: list[dict],
+    quadrant: str,
+    equity: float,
+    session_minutes_elapsed: int,
+    cfg: FlexConfig,
+    size_mult: float,
+    sleeve_room_usd: float | None = None,
+    quadrant_basis: str = "",
+    literal_cash_usd: float | None = None,
+    sgov_usd: float | None = None,
+) -> dict:
+    """Task E — the conviction-path Layer 2 entry pipeline, a SEPARATE gate
+    sequence from `build_flex_entry` (the catalyst path stays byte-identical;
+    nothing here is shared logic beyond the common indicator/sizing helpers).
+
+    Differences from the catalyst profile (all deliberate, per the 2026-08-14
+    cycle's decision to demote a dated catalyst from gate to amplifier):
+      - No gap/VWAP-rising-slope entry trigger. Instead a "no-chase" cap:
+        entry is refused if price already sits more than
+        `conviction_no_chase_atr` ATRs above session VWAP (`entry_above_
+        no_chase_limit`) — patient by design, never chasing an intraday
+        breakout the way the catalyst profile deliberately does.
+      - Stop is the NOMINATION's own `invalidation` price level (the LLM's
+        stated thesis-invalidation point), not an ATR-derived distance —
+        still bounded by `conviction_max_stop_pct` (10.0 vs the catalyst
+        profile's 4.0) as a sanity backstop, never a runaway stop.
+      - No time stop at all (Layer 2 has none for this path — the calendar
+        clock is replaced entirely by the collector-side `release_sessions`
+        hysteresis decay; see `build_flex_exit_state`'s `path`-aware skip).
+      - Sizing multiplies the risk-BUDGET itself by `size_mult` (the ladder's
+        confirmed size_mult) before the existing risk-budget/per-name-cap/
+        sleeve-cap chain runs — the SAME three-way governor, just fed a
+        smaller effective risk budget for a lower-conviction nomination —
+        then B5's cash-accommodation clamp runs last.
+    """
+    symbol = str(candidate.get("symbol") or "").upper()
+    sector = candidate.get("sector")
+
+    out: dict = {
+        "symbol": symbol,
+        "sector": sector,
+        "quadrant": quadrant,
+        "quadrant_basis": quadrant_basis,
+        "path": "conviction",
+        "regime_fit": None,
+        "adv_usd": None,
+        "vwap": None,
+        "no_chase_limit": None,
+        "atr14": None,
+        "stop_distance": None,
+        "stop_price": None,
+        "stop_pct": None,
+        "entry_price": None,
+        "size_shares": 0,
+        "notional_usd": 0.0,
+        "notional_pct": 0.0,
+        "realized_risk_pct": 0.0,
+        "binding": None,
+        "funding_clamped": False,
+        "entry_trigger": "fail",
+        "skip_reason": None,
+    }
+
+    def _skip(reason: str) -> dict:
+        out["skip_reason"] = reason
+        return out
+
+    if not intraday_bars or not daily_bars:
+        return _skip("no_bars")
+
+    out["regime_fit"] = regime_fit(sector, quadrant)
+
+    adv = avg_dollar_volume(daily_bars)
+    out["adv_usd"] = adv
+    if adv is None or adv < cfg.min_adv_usd:
+        return _skip("liquidity_below_min")
+
+    if session_minutes_elapsed < cfg.vwap_window_min:
+        return _skip("pre_window")
+    if session_minutes_elapsed >= cfg.entry_cutoff_min:
+        return _skip("after_cutoff")
+
+    entry_price = _last_close(intraday_bars)
+    if entry_price is None or entry_price <= 0:
+        return _skip("no_price")
+    out["entry_price"] = entry_price
+
+    vwap = session_vwap(intraday_bars)
+    out["vwap"] = vwap
+    if vwap is None:
+        return _skip("no_vwap")
+
+    atr = atr14(daily_bars)
+    out["atr14"] = atr
+    if atr is None or atr <= 0:
+        return _skip("no_atr")
+
+    no_chase_limit = vwap + cfg.conviction_no_chase_atr * atr
+    out["no_chase_limit"] = no_chase_limit
+    if entry_price > no_chase_limit:
+        return _skip("entry_above_no_chase_limit")
+
+    invalidation = candidate.get("invalidation")
+    try:
+        stop_price = float(invalidation)
+    except (TypeError, ValueError):
+        return _skip("no_invalidation_level")
+    if stop_price <= 0 or stop_price >= entry_price:
+        return _skip("invalid_invalidation_level")
+    stop_distance = entry_price - stop_price
+    out["stop_price"] = stop_price
+    out["stop_distance"] = stop_distance
+    out["stop_pct"] = stop_distance / entry_price * 100.0
+    if out["stop_pct"] > cfg.conviction_max_stop_pct:
+        return _skip("stop_too_wide")
+
+    effective_risk_budget_pct = cfg.risk_budget_pct * max(0.0, size_mult)
+    sizing = _size_conviction_position(
+        equity, entry_price, stop_distance, effective_risk_budget_pct,
+        cfg.per_name_cap_pct, sleeve_room_usd,
+    )
+    shares, binding = sizing["size_shares"], sizing["binding"]
+    funding_clamped = False
+    if literal_cash_usd is not None and sgov_usd is not None:
+        accommodation = _cash_accommodation_shares(
+            shares, entry_price, literal_cash_usd, sgov_usd, equity, cfg,
+        )
+        shares = accommodation["shares"]
+        funding_clamped = accommodation["funding_clamped"]
+        if funding_clamped:
+            binding = "cash_floor"
+
+    notional = shares * entry_price
+    out.update({
+        "size_shares": shares,
+        "notional_usd": notional,
+        "notional_pct": notional / equity * 100.0 if equity else 0.0,
+        "realized_risk_pct": shares * stop_distance / equity * 100.0 if equity else 0.0,
+        "binding": binding,
+        "funding_clamped": funding_clamped,
+    })
+    if shares < 1:
+        return _skip("size_zero" if not funding_clamped else "cash_floor_breach")
 
     out["entry_trigger"] = "pass"
     out["skip_reason"] = None

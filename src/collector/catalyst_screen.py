@@ -39,8 +39,16 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-# The six catalyst_score components, in a fixed order (also the ledger's
+# The seven catalyst_score components, in a fixed order (also the ledger's
 # `components_missing` ordering — deterministic output, easier to diff/test).
+# `relative_strength` (2026-08-14, flex-conviction-path cycle, Task D) is the
+# seventh: 60-day total-return excess vs SPY. Applicable to every instrument
+# type (unlike earnings_proximity/political_flow, which are single-name-only
+# concepts) — the system already computes and displays this exact figure
+# every session (`regional_rotation`'s rotation-score dashboard row) and it
+# fed nothing into the funnel; this wires it in. Motivating incident: EUAD
+# carried +16-22pp 60d excess vs SPY for four straight sessions, displayed
+# daily, discarded by the ranking pipeline.
 COMPONENTS: tuple[str, ...] = (
     "earnings_proximity",
     "news_recency",
@@ -48,12 +56,41 @@ COMPONENTS: tuple[str, ...] = (
     "momentum",
     "regime_fit_score",
     "political_flow",
+    "relative_strength",
 )
 
 # A candidate needs at least this many of the 6 components to be nominatable —
 # below this, a lucky one- or two-input score would look flatteringly high
 # despite being mostly unmeasured. See composite_score()'s docstring.
 MIN_COMPONENTS_RANKABLE = 4
+
+# Single-name-only components: a fund/ETF has no earnings date to report and
+# is not the kind of individual-insider-conviction target Quiver's
+# congressional-purchase signal measures. NOT_APPLICABLE for a fund, never
+# merely "missing_data" -- see applicable_components()'s docstring for the
+# distinction and why it matters.
+_SINGLE_NAME_ONLY_COMPONENTS = ("earnings_proximity", "political_flow")
+
+
+def applicable_components(is_fund: bool) -> tuple[str, ...]:
+    """Task D-priority-3/4 (2026-08-14 flex-conviction-path cycle) — which of
+    the 7 `COMPONENTS` are even CONCEPTUALLY possible for this instrument
+    type, independent of whether data happens to be available this session.
+
+    This is the ABSENT-VS-ZERO rule's sibling distinction: `earnings_proximity`
+    /`political_flow` being `None` for a real operating company with no
+    scheduled print / no congressional flow this week is `missing_data` (could
+    resolve tomorrow); the SAME fields being `None` for an ETF are
+    `not_applicable` (can never resolve — an ETF will never report
+    "earnings"). Conflating the two let a candidate's rankability be judged
+    against a bar it can never structurally clear. Determined from FMP's own
+    `isEtf`/`isFund` profile booleans (D-priority-4) — more robust than
+    inferring instrument type from a sector string, which is unreliable/absent
+    for many funds.
+    """
+    if is_fund:
+        return tuple(c for c in COMPONENTS if c not in _SINGLE_NAME_ONLY_COMPONENTS)
+    return COMPONENTS
 
 
 # --- hard screen (mechanical, applied before any scoring) -------------------
@@ -145,6 +182,44 @@ def momentum_score(raw_pct: float | None, cap_pct: float = 15.0) -> float | None
     return round((clamped + cap_pct) / (2 * cap_pct), 4)
 
 
+def relative_strength_from_closes(
+    candidate_closes: dict[str, float], spy_closes: dict[str, float], window: int = 60,
+) -> float | None:
+    """Total-return excess vs SPY over the trailing `window` TRADING days, from
+    `{date: close}` maps (the `_close_by_date` shape — date-keyed, not the
+    ascending-list shape `momentum_from_bars` takes). Mirrors the
+    `_r5_from_closes` trading-day-offset idiom used elsewhere in this system:
+    sort the date keys, compare the latest close to the close `window`
+    trading days earlier. `None` when either series lacks enough history —
+    never a fabricated 0.0 (an absent relative-strength reading must drop out
+    of the composite mean like every other component, not silently score as
+    "flat vs SPY")."""
+    if not candidate_closes or not spy_closes:
+        return None
+    c_dates = sorted(candidate_closes)
+    s_dates = sorted(spy_closes)
+    if len(c_dates) < window + 1 or len(s_dates) < window + 1:
+        return None
+    c_now, c_then = candidate_closes[c_dates[-1]], candidate_closes[c_dates[-1 - window]]
+    s_now, s_then = spy_closes[s_dates[-1]], spy_closes[s_dates[-1 - window]]
+    if not c_then or not s_then:
+        return None
+    c_ret = (c_now / c_then - 1.0) * 100.0
+    s_ret = (s_now / s_then - 1.0) * 100.0
+    return round(c_ret - s_ret, 4)
+
+
+def relative_strength_score(raw_excess_pct: float | None, cap_pct: float = 20.0) -> float | None:
+    """Normalizes a raw excess-vs-SPY % to [0,1] via the SAME symmetric
+    +/-cap_pct clamp `momentum_score` uses (0.5 = matching SPY; 1.0 = +cap_pct%
+    or more excess; 0.0 = -cap_pct% or worse) — same treatment as momentum so
+    this component does not dominate the composite by scale alone."""
+    if raw_excess_pct is None:
+        return None
+    clamped = max(-cap_pct, min(cap_pct, raw_excess_pct))
+    return round((clamped + cap_pct) / (2 * cap_pct), 4)
+
+
 def group_news_by_symbol(items: list[dict]) -> dict[str, list[dict]]:
     """FMP stock-news items -> {symbol: [items...]}. Items with no symbol field
     are dropped (nothing to attribute them to)."""
@@ -231,23 +306,39 @@ def political_flow_score(purchase_count: int, cap: int = 5) -> float | None:
 
 # --- composite ----------------------------------------------------------
 
-def composite_score(components: dict[str, float | None]) -> dict:
+def composite_score(
+    components: dict[str, float | None], applicable: tuple[str, ...] | None = None,
+) -> dict:
     """`catalyst_score = mean(available components)`. Absent components drop
     out of the mean entirely rather than scoring 0.0 (see module docstring).
-    `rankable` requires >= MIN_COMPONENTS_RANKABLE of 6 — below that, a score
-    built from one or two lucky inputs would look flatteringly confident
-    despite being mostly unmeasured; such a candidate is never nominated
-    regardless of its (still-reported, for the ledger) score.
+
+    `applicable` (Task D-priority-3, default `None` = all 7, i.e. the
+    ORIGINAL unconditional behavior — fully backward compatible) narrows the
+    denominator to what's even conceptually possible for this instrument type
+    (see `applicable_components`). `rankable` is a DOUBLE-CLAUSE guard:
+    `components_applicable >= MIN_COMPONENTS_RANKABLE` AND
+    `components_available >= MIN_COMPONENTS_RANKABLE` — both required. A
+    single clause on "available" alone is the "2-of-2 applicable passes"
+    weak-bar failure mode: an instrument type with only 2 structurally
+    possible components, both populated, would trivially satisfy an
+    available-only bar despite having barely more signal than a coin flip;
+    the applicable-count clause independently vetoes it regardless of how
+    fully its narrow applicable set happens to be populated.
     """
-    available = {k: v for k, v in components.items() if v is not None}
-    missing = [k for k in COMPONENTS if components.get(k) is None]
+    applicable = tuple(applicable) if applicable is not None else COMPONENTS
+    available = {k: v for k, v in components.items() if k in applicable and v is not None}
+    missing = [k for k in applicable if components.get(k) is None]
+    not_applicable = [k for k in COMPONENTS if k not in applicable]
+    n_applicable = len(applicable)
     n = len(available)
     score = round(sum(available.values()) / n, 4) if n > 0 else None
     return {
         "score": score,
         "components_available": n,
         "components_missing": missing,
-        "rankable": n >= MIN_COMPONENTS_RANKABLE,
+        "components_not_applicable": not_applicable,
+        "components_applicable": n_applicable,
+        "rankable": n_applicable >= MIN_COMPONENTS_RANKABLE and n >= MIN_COMPONENTS_RANKABLE,
     }
 
 
@@ -309,17 +400,20 @@ def build_ranking_ledger(candidates: list[dict], top_n: int) -> dict:
             row.update({
                 "components": {}, "score": None,
                 "components_available": 0, "components_missing": list(COMPONENTS),
+                "components_not_applicable": [], "components_applicable": len(COMPONENTS),
                 "rankable": False, "nominated": False,
             })
             ledger.append(row)
             continue
         comp = c["components"]
-        cs = composite_score(comp)
+        cs = composite_score(comp, c.get("applicable"))
         row.update({
             "components": comp,
             "score": cs["score"],
             "components_available": cs["components_available"],
             "components_missing": cs["components_missing"],
+            "components_not_applicable": cs["components_not_applicable"],
+            "components_applicable": cs["components_applicable"],
             "rankable": cs["rankable"],
             "nominated": False,
         })
@@ -338,10 +432,13 @@ def build_ranking_ledger(candidates: list[dict], top_n: int) -> dict:
 __all__ = [
     "COMPONENTS",
     "MIN_COMPONENTS_RANKABLE",
+    "applicable_components",
     "screen_candidate",
     "earnings_proximity_score",
     "momentum_from_bars",
     "momentum_score",
+    "relative_strength_from_closes",
+    "relative_strength_score",
     "days_since_latest_news",
     "news_recency_score",
     "keyword_hits",

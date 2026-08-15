@@ -19,7 +19,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from flex import trades as flex_trades
 from flex.config import load_flex_config
-from flex.entry import build_flex_entry
+from flex.entry import build_conviction_entry, build_flex_entry
 from flex.exit_state import build_flex_exit_state
 from flex.ledger import new_entry, read_ledger, write_ledger
 from flex.reconcile import reconcile_ledger
@@ -110,6 +110,14 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
     daytrade_syms = _daytrade_ledger_symbols()
     held_syms = frozenset(str(p.get("symbol") or "").upper() for p in positions if p.get("symbol"))
     nominations = _flex_nominations(read_trades(today), held_symbols=held_syms, exclude=daytrade_syms)
+    # Task B/E (2026-08-14 flex-conviction-path cycle) — the SECOND, parallel
+    # nomination path: collector-computed (one-session lag, see
+    # collector.handler._build_flex_conviction) rather than same-day LLM JSON,
+    # since it needs the collector's own price cache for base_rate_up. Same
+    # separation-set/daytrade exclusion as the catalyst path.
+    conviction_candidates = _flex_conviction_candidates(
+        snapshot, held_symbols=held_syms, exclude=daytrade_syms,
+    )
     minutes = _session_minutes(client, today, now_et)
     # Flex Sleeve Performance Ledger Task B: read the funnel's catalyst_score
     # per symbol directly from the snapshot rather than trusting the model's
@@ -117,7 +125,7 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
     catalyst_lookup = _catalyst_score_lookup(snapshot)
 
     # ── STEP 3 — fetch bars for held ∪ nominated symbols ─────────────────────
-    symbols = sorted(set(ledger) | {n["symbol"] for n in nominations})
+    symbols = sorted(set(ledger) | {n["symbol"] for n in nominations} | set(conviction_candidates))
     minute_bars, daily_bars = _fetch_bars(client, symbols, today)
 
     equity = _equity(client)
@@ -125,6 +133,18 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
     # ── STEP 4 — management (every in-hours tick) ────────────────────────────
     for sym in list(ledger.keys()):
         entry = ledger[sym]
+        # Task E release-driven exit: a conviction-path hold whose collector-
+        # side hysteresis has fully released (no longer in today's active[]
+        # list) exits HERE, bypassing the mechanical exit_state entirely — its
+        # "shelf life" is the confirm/release hysteresis, not a calendar clock
+        # (build_flex_exit_state's time_stop rule is skipped for this path;
+        # see exit_state.py). A still-active conviction hold falls through to
+        # the SAME mechanical stop/trail/scale-out machinery as catalyst.
+        if str(entry.get("path") or "catalyst") == "conviction" and sym not in conviction_candidates:
+            decisions["exits"].append({"symbol": sym, "next_action": "conviction_released"})
+            if not dry_run:
+                _act_on_release_exit(client, ledger, sym, today, decisions, executions)
+            continue
         st = build_flex_exit_state(
             {**entry, "symbol": sym}, minute_bars.get(sym, []), daily_bars.get(sym, []), cfg, now_et,
         )
@@ -155,9 +175,41 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
         decisions["entries"].append(e)
         if e["entry_trigger"] == "pass" and not dry_run:
             opened = _open_position(client, ledger, sym, e, nom, today, decisions, executions,
-                                    catalyst_lookup.get(sym))
+                                    catalyst_lookup.get(sym), path="catalyst")
             if opened:
                 sleeve_used += e["notional_usd"]
+
+    # Conviction-path entries — same sleeve budget/count cap, separate builder
+    # (Task E) and separate cash-accommodation clamp (B5). Read once per tick:
+    # a conviction entry must never drain literal cash/the cash sleeve below
+    # the core floors (the M5 callback — see build_conviction_entry's docstring).
+    literal_cash_usd, sgov_usd = _cash_figures(client, positions)
+    for sym, conv in conviction_candidates.items():
+        if sym in ledger:
+            continue
+        if len(ledger) >= _FLEX_COUNT_CAP:
+            decisions["orders_suppressed"].append({"symbol": sym, "reason": "flex_count_cap"})
+            continue
+        sleeve_room = max(0.0, sleeve_cap_usd - sleeve_used)
+        cand = {
+            "symbol": sym, "sector": _sector_for(sym, snapshot, conv),
+            "invalidation": conv.get("invalidation"),
+        }
+        e = build_conviction_entry(
+            cand, minute_bars.get(sym, []), daily_bars.get(sym, []),
+            quadrant, equity, minutes if minutes is not None else -1, cfg,
+            size_mult=float(conv.get("applied_size_mult") or 0.0),
+            sleeve_room_usd=sleeve_room, quadrant_basis=quadrant_basis,
+            literal_cash_usd=literal_cash_usd, sgov_usd=sgov_usd,
+        )
+        decisions["entries"].append(e)
+        if e["entry_trigger"] == "pass" and not dry_run:
+            nom_like = {**conv, "rationale": "; ".join(conv.get("evidence") or [])}
+            opened = _open_position(client, ledger, sym, e, nom_like, today, decisions, executions,
+                                    catalyst=None, path="conviction")
+            if opened:
+                sleeve_used += e["notional_usd"]
+                literal_cash_usd = max(0.0, literal_cash_usd - e["notional_usd"])
 
     # ── STEP 6/7 — persist ───────────────────────────────────────────────────
     write_ledger(ledger)
@@ -319,7 +371,8 @@ def _act_on_exit(client, ledger, sym, st, today, decisions, executions) -> None:
         decisions["orders_suppressed"].append({"symbol": sym, "reason": f"exit_error:{action}:{e}"})
 
 
-def _open_position(client, ledger, sym, e, nom, today, decisions, executions, catalyst=None) -> bool:
+def _open_position(client, ledger, sym, e, nom, today, decisions, executions, catalyst=None,
+                    path: str = "catalyst") -> bool:
     qty = int(e["size_shares"])
     stop_price = round(float(e["stop_price"]), 2)
     try:
@@ -343,6 +396,7 @@ def _open_position(client, ledger, sym, e, nom, today, decisions, executions, ca
         catalyst_score=catalyst.get("score"),
         score_components=catalyst.get("components"),
         nomination_thesis=nom.get("rationale") or "",
+        path=path,
     )
     # Persist the ledger IMMEDIATELY on entry (defensive — MU orphan incident). The
     # tick otherwise only writes the ledger at end-of-STEP-6; a crash/timeout after
@@ -438,6 +492,89 @@ def _flex_nominations(trades_doc, held_symbols: frozenset[str] = frozenset(),
             if sym not in separation and sym not in exclude:
                 out.append({**n, "symbol": sym})
     return out
+
+
+def _flex_conviction_candidates(
+    snapshot: dict, held_symbols: frozenset[str] = frozenset(),
+    exclude: frozenset[str] = frozenset(),
+) -> dict[str, dict]:
+    """Task B/E — today's ACTIVE flex-conviction nominations, read from the
+    collector's same-day `flex_conviction` snapshot block (already
+    hysteresis-confirmed, capped, calibrated — see
+    `collector.handler._build_flex_conviction`). Same separation-set/exclude
+    filtering as `_flex_nominations`; keyed by symbol (not a list) since this
+    dict doubles as BOTH the entry candidate set (STEP 5) and the release-
+    exit membership check (STEP 4) — a symbol's absence here IS the release
+    signal for an already-held conviction position."""
+    fc = snapshot.get("flex_conviction") or {}
+    if not isinstance(fc, dict) or not fc.get("enabled"):
+        return {}
+    separation = flex_separation_set(frozenset(held_symbols))
+    out: dict[str, dict] = {}
+    for c in fc.get("active") or []:
+        if not isinstance(c, dict) or not c.get("symbol"):
+            continue
+        sym = str(c["symbol"]).upper()
+        if sym not in separation and sym not in exclude:
+            out[sym] = c
+    return out
+
+
+def _cash_figures(client, positions: list[dict]) -> tuple[float, float]:
+    """B5 — literal cash (Alpaca `cash`) and SGOV notional (from the SAME
+    already-fetched `positions` list, zero extra calls for that half) — the
+    two live inputs the cash-accommodation clamp checks a conviction entry
+    against. Never raises; a read failure degrades to (0.0, 0.0) — the
+    clamp then fails closed (zero room) rather than silently skipping the
+    check on an error."""
+    try:
+        cash = float(client.get_account().get("cash") or 0)
+    except Exception:  # noqa: BLE001
+        logger.exception("cash read failed")
+        cash = 0.0
+    sgov = 0.0
+    for p in positions or ():
+        if str(p.get("symbol") or "").upper() == "SGOV":
+            try:
+                sgov = float(p.get("market_value") or 0)
+            except (TypeError, ValueError):
+                sgov = 0.0
+            break
+    return cash, sgov
+
+
+def _act_on_release_exit(client, ledger, sym, today, decisions, executions) -> None:
+    """Task E — full-qty market exit for a conviction-path hold whose
+    collector-side hysteresis has released (mirrors the `time_stop` branch of
+    `_act_on_exit` exactly, since it's the same mechanical action — sell the
+    remainder, cancel stops, finalize — only the TRIGGER differs: hysteresis
+    release rather than a calendar clock)."""
+    entry = ledger.get(sym)
+    if entry is None:
+        return
+    qty = int(entry.get("qty_current") or 0)
+    try:
+        _cancel_stops(client, entry)
+        if qty > 0:
+            order = client.submit_order(
+                sym, qty, "sell", order_type="market", time_in_force="day",
+                client_order_id=_coid(today, sym, "release"))
+            _issued(decisions, executions, sym, "conviction_released", order)
+            fill_price = _order_fill_price(client, order.get("id"))
+            extra_fill = {"date": today, "qty": qty, "price": fill_price, "reason": "conviction_released"}
+            trade = None
+            try:
+                trade = _finalize_closed_trade(
+                    client, entry, sym, "conviction_released", today, extra_fill=extra_fill)
+            except Exception as cte:  # noqa: BLE001
+                logger.exception("closed-trade finalize failed for %s (conviction_released)", sym)
+                _record_closed_trade_write_failure(decisions, sym, "conviction_released", cte)
+            _record_trade_history(today, sym, "sell", qty, status="conviction_released",
+                                  extra=_trade_history_extra(trade))
+        ledger.pop(sym, None)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("release exit for %s failed", sym)
+        decisions["orders_suppressed"].append({"symbol": sym, "reason": f"release_error:{e}"})
 
 
 def _daytrade_ledger_symbols() -> frozenset[str]:

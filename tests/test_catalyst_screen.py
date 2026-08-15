@@ -8,6 +8,8 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from collector.catalyst_screen import (  # noqa: E402
+    COMPONENTS,
+    applicable_components,
     build_ranking_ledger,
     composite_score,
     days_since_latest_news,
@@ -20,6 +22,8 @@ from collector.catalyst_screen import (  # noqa: E402
     news_recency_score,
     news_tone_score,
     political_flow_score,
+    relative_strength_from_closes,
+    relative_strength_score,
     screen_candidate,
 )
 
@@ -125,6 +129,50 @@ def test_momentum_score_clamps_and_centers():
     assert momentum_score(999.0, cap_pct=15.0) == 1.0  # clamped, never > 1.0
 
 
+# --- relative_strength (Task D, 2026-08-14 flex-conviction-path cycle) ------
+
+def _by_date(dates: list[str], vals: list[float]) -> dict[str, float]:
+    return dict(zip(dates, vals))
+
+
+_DATES_61 = [f"2026-{(1 + i // 28):02d}-{(1 + i % 28):02d}" for i in range(61)]
+
+
+def test_relative_strength_needs_enough_history_both_series():
+    cand = _by_date(_DATES_61[:30], [100.0] * 30)   # too short
+    spy = _by_date(_DATES_61, [500.0] * 61)
+    assert relative_strength_from_closes(cand, spy, window=60) is None
+
+
+def test_relative_strength_computes_excess_vs_spy():
+    # Candidate up 20% over the window, SPY up 5% -> excess = +15pp.
+    cand_vals = [100.0] * 60 + [120.0]
+    spy_vals = [500.0] * 60 + [525.0]
+    cand = _by_date(_DATES_61, cand_vals)
+    spy = _by_date(_DATES_61, spy_vals)
+    excess = relative_strength_from_closes(cand, spy, window=60)
+    assert abs(excess - 15.0) < 1e-6
+
+
+def test_relative_strength_missing_either_series_is_none():
+    spy = _by_date(_DATES_61, [500.0] * 61)
+    assert relative_strength_from_closes({}, spy, window=60) is None
+    assert relative_strength_from_closes(None, spy, window=60) is None
+    cand = _by_date(_DATES_61, [100.0] * 61)
+    assert relative_strength_from_closes(cand, {}, window=60) is None
+
+
+def test_relative_strength_score_absent_when_raw_none():
+    assert relative_strength_score(None) is None
+
+
+def test_relative_strength_score_clamps_and_centers():
+    assert relative_strength_score(0.0) == 0.5
+    assert relative_strength_score(20.0, cap_pct=20.0) == 1.0
+    assert relative_strength_score(-20.0, cap_pct=20.0) == 0.0
+    assert relative_strength_score(999.0, cap_pct=20.0) == 1.0  # clamped
+
+
 # --- news recency ---------------------------------------------------------
 
 def test_days_since_latest_news_absent_when_no_items():
@@ -205,7 +253,7 @@ def test_political_flow_caps_at_full_score():
 # --- composite_score: the absent-vs-zero handicap test ----------------------
 
 def test_composite_drops_absent_components_from_mean():
-    # Only 4 of 6 available; the 2 absent must NOT drag the mean toward 0.
+    # Only 4 of 7 available; the 3 absent must NOT drag the mean toward 0.
     comps = {
         "earnings_proximity": None,
         "news_recency": 1.0,
@@ -213,11 +261,12 @@ def test_composite_drops_absent_components_from_mean():
         "momentum": 1.0,
         "regime_fit_score": 1.0,
         "political_flow": None,
+        "relative_strength": None,
     }
     cs = composite_score(comps)
     assert cs["score"] == 1.0  # mean of the 4 available 1.0's, not diluted by absence
     assert cs["components_available"] == 4
-    assert set(cs["components_missing"]) == {"earnings_proximity", "political_flow"}
+    assert set(cs["components_missing"]) == {"earnings_proximity", "political_flow", "relative_strength"}
     assert cs["rankable"] is True
 
 
@@ -243,6 +292,68 @@ def test_composite_all_absent_scores_none():
     cs = composite_score(comps)
     assert cs["score"] is None
     assert cs["rankable"] is False
+
+
+# --- applicable_components / double-clause rankability guard (Task D-priority-3/4) --
+
+def test_applicable_components_single_name_gets_all_seven():
+    assert applicable_components(is_fund=False) == COMPONENTS
+
+
+def test_applicable_components_fund_excludes_earnings_and_political():
+    out = applicable_components(is_fund=True)
+    assert "earnings_proximity" not in out
+    assert "political_flow" not in out
+    assert len(out) == 5
+
+
+def test_omitting_applicable_preserves_original_unconditional_behavior():
+    comps = {
+        "earnings_proximity": None, "news_recency": 1.0, "news_tone": 1.0,
+        "momentum": 1.0, "regime_fit_score": 1.0, "political_flow": None,
+        "relative_strength": None,
+    }
+    with_none = composite_score(comps, None)
+    without_arg = composite_score(comps)
+    assert with_none == without_arg
+    assert with_none["components_not_applicable"] == []
+    assert with_none["components_applicable"] == 7
+
+
+def test_fund_candidate_classifies_earnings_and_political_as_not_applicable():
+    comps = {
+        "earnings_proximity": None, "news_recency": 1.0, "news_tone": 1.0,
+        "momentum": 1.0, "regime_fit_score": 1.0, "political_flow": None,
+        "relative_strength": 1.0,
+    }
+    cs = composite_score(comps, applicable_components(is_fund=True))
+    assert set(cs["components_not_applicable"]) == {"earnings_proximity", "political_flow"}
+    assert cs["components_missing"] == []   # nothing MISSING -- absence here is structural
+    assert cs["components_applicable"] == 5
+    assert cs["components_available"] == 5
+    assert cs["rankable"] is True
+
+
+def test_double_clause_guard_vetoes_low_applicable_count_even_when_fully_populated():
+    # The exact "2-of-2 applicable passes" failure mode: only 2 components are
+    # even conceptually possible, BOTH populated -- an available-only bar
+    # (2 >= 2) would trivially pass. The applicable-count clause must
+    # independently veto it regardless.
+    comps = {"momentum": 1.0, "regime_fit_score": 1.0}
+    cs = composite_score(comps, applicable=("momentum", "regime_fit_score"))
+    assert cs["components_available"] == 2
+    assert cs["components_applicable"] == 2
+    assert cs["rankable"] is False   # vetoed despite 100% coverage of its applicable set
+
+
+def test_narrow_applicable_set_with_enough_populated_and_enough_applicable_passes():
+    comps = {
+        "news_recency": 1.0, "news_tone": 1.0, "momentum": 1.0,
+        "regime_fit_score": 1.0, "relative_strength": 1.0,
+    }
+    applicable = applicable_components(is_fund=True)  # 5 applicable
+    cs = composite_score(comps, applicable)
+    assert cs["rankable"] is True
 
 
 # --- discovery_symbols --------------------------------------------------

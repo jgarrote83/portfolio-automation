@@ -22,6 +22,90 @@ def _bars(n=25, close=100.0, vol=5_000_000):
     return out
 
 
+def _close_series(dates, closes):
+    return dict(zip(dates, closes))
+
+
+_DATES_61 = [f"2026-{(1 + i // 28):02d}-{(1 + i % 28):02d}" for i in range(61)]
+
+
+def test_relative_strength_populates_when_close_history_available():
+    profiles = {"ETF1": {"symbol": "ETF1", "sector": "Financial Services"}}
+    bars = {"ETF1": _bars()}
+    close_by_date = {
+        "ETF1": _close_series(_DATES_61, [100.0] * 60 + [120.0]),   # +20% over 60d
+        "SPY": _close_series(_DATES_61, [500.0] * 60 + [510.0]),    # +2% over 60d
+    }
+    result = _build_catalyst_screen(
+        discovery=["ETF1"], profiles_by_symbol=profiles, bars_by_symbol=bars,
+        earnings_market_rows=[], stock_news=[], congressional=[],
+        quadrant="Q2", quadrant_basis="active", held=set(), exclude=set(),
+        legacy_blocked=set(), min_adv_usd=50_000_000.0, today=TODAY, top_n=5,
+        close_by_date=close_by_date,
+    )
+    row = next(r for r in result["ledger"] if r["symbol"] == "ETF1")
+    assert row["components"]["relative_strength"] is not None
+    assert row["basis"]["relative_strength_raw_pct"] is not None
+    assert abs(row["basis"]["relative_strength_raw_pct"] - 18.0) < 1e-6
+
+
+def test_fund_candidate_gets_earnings_and_political_marked_not_applicable():
+    profiles = {"ETF1": {"symbol": "ETF1", "sector": "Financial Services", "isEtf": True}}
+    bars = {"ETF1": _bars()}
+    result = _build_catalyst_screen(
+        discovery=["ETF1"], profiles_by_symbol=profiles, bars_by_symbol=bars,
+        earnings_market_rows=[], stock_news=[], congressional=[],
+        quadrant="Q2", quadrant_basis="active", held=set(), exclude=set(),
+        legacy_blocked=set(), min_adv_usd=50_000_000.0, today=TODAY, top_n=5,
+    )
+    row = next(r for r in result["ledger"] if r["symbol"] == "ETF1")
+    assert set(row["components_not_applicable"]) == {"earnings_proximity", "political_flow"}
+    assert row["components_applicable"] == 5
+    assert row["basis"]["is_fund"] is True
+
+
+def test_single_stock_candidate_has_no_not_applicable_components():
+    profiles = {"NVDA": {"symbol": "NVDA", "sector": "Technology"}}
+    bars = {"NVDA": _bars()}
+    result = _build_catalyst_screen(
+        discovery=["NVDA"], profiles_by_symbol=profiles, bars_by_symbol=bars,
+        earnings_market_rows=[], stock_news=[], congressional=[],
+        quadrant="Q1", quadrant_basis="active", held=set(), exclude=set(),
+        legacy_blocked=set(), min_adv_usd=50_000_000.0, today=TODAY, top_n=5,
+    )
+    row = next(r for r in result["ledger"] if r["symbol"] == "NVDA")
+    assert row["components_not_applicable"] == []
+    assert row["components_applicable"] == 7
+    assert row["basis"]["is_fund"] is False
+
+
+def test_isfund_field_alone_also_marks_not_applicable():
+    profiles = {"MF1": {"symbol": "MF1", "sector": "Financial Services", "isFund": True}}
+    bars = {"MF1": _bars()}
+    result = _build_catalyst_screen(
+        discovery=["MF1"], profiles_by_symbol=profiles, bars_by_symbol=bars,
+        earnings_market_rows=[], stock_news=[], congressional=[],
+        quadrant="Q2", quadrant_basis="active", held=set(), exclude=set(),
+        legacy_blocked=set(), min_adv_usd=50_000_000.0, today=TODAY, top_n=5,
+    )
+    row = next(r for r in result["ledger"] if r["symbol"] == "MF1")
+    assert row["basis"]["is_fund"] is True
+
+
+def test_relative_strength_absent_without_close_history():
+    profiles = {"ETF1": {"symbol": "ETF1", "sector": "Financial Services"}}
+    bars = {"ETF1": _bars()}
+    result = _build_catalyst_screen(
+        discovery=["ETF1"], profiles_by_symbol=profiles, bars_by_symbol=bars,
+        earnings_market_rows=[], stock_news=[], congressional=[],
+        quadrant="Q2", quadrant_basis="active", held=set(), exclude=set(),
+        legacy_blocked=set(), min_adv_usd=50_000_000.0, today=TODAY, top_n=5,
+        # close_by_date omitted entirely -- must degrade gracefully, not crash.
+    )
+    row = next(r for r in result["ledger"] if r["symbol"] == "ETF1")
+    assert row["components"]["relative_strength"] is None
+
+
 def test_strong_no_earnings_candidate_beats_weak_earnings_candidate():
     profiles = {
         "STRONG": {"symbol": "STRONG", "sector": "Technology"},

@@ -112,8 +112,14 @@ def build_flex_exit_state(
     if current_price is None or atr is None or qty_current < 1:
         return out
 
-    # 1. Time stop — a catalyst has a shelf life.
-    if tdays is not None and tdays >= cfg.time_stop_days:
+    # 1. Time stop — a catalyst has a shelf life. Task E (2026-08-14): the
+    # conviction path has NO calendar clock at all — its "shelf life" is the
+    # collector-side release_sessions hysteresis decay instead (see
+    # `_release_pending_exit`/flex/handler.py's release-driven exit, which
+    # reads the SAME-DAY flex_conviction snapshot block). A conviction entry
+    # skips this rule entirely, never falling through to a phantom time_stop.
+    is_conviction = str(ledger_entry.get("path") or "catalyst") == "conviction"
+    if not is_conviction and tdays is not None and tdays >= cfg.time_stop_days:
         out["next_action"] = "time_stop"
         out["scale_out_qty"] = qty_current
         return out
