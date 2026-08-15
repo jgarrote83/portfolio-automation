@@ -36,6 +36,7 @@ def new_entry(
     catalyst_score: float | None = None,
     score_components: dict | None = None,
     nomination_thesis: str = "",
+    path: str = "catalyst",
 ) -> dict:
     """Build a fresh ledger row for a newly opened flex position.
 
@@ -66,4 +67,5 @@ def new_entry(
         "catalyst_score": catalyst_score,
         "score_components": score_components,
         "nomination_thesis": nomination_thesis,
+        "path": path,
     }

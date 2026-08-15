@@ -3,7 +3,18 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-08-14 (08-11→08-14 report audit: report-to-broker fidelity, oil signal correctness, transition_watch hysteresis, thematic conviction overlay, branch `feat/20260814-thematic-conviction-oil-fidelity`).**
+**▶ START HERE — last session 2026-08-14 (flex-conviction-path cycle: a SECOND flex-nomination path requiring no dated catalyst, base-rate-relative sizing, `flex_eligibility`, applicable-set rankability, Layer 2 profile split, branch `feat/20260814-flex-conviction-path`).**
+See entry **#70** below for the full per-task design (Tasks A0/B/C/D/E/F), the
+corrected A0 probe premise (08-11 filed real nominations — the "5-session drought"
+framing was wrong), the three unresolved decision gates (**#63** re-scoped/**#71**/
+**#72**), and the two post-merge watch items (**#73**/**#74**). Two small prerequisite
+fixes merged first, each its own PR, neither previously bookkept here until now: PR
+#39 (**#68** — the M5 thematic-cash-drain fix this cycle was gated on) and PR #40
+(**#69** — the flex-state stale-read bug the A0 probe surfaced as an unplanned
+finding). Suite baseline (post-PR #40) 1176 → final 1272 passed, ruff clean.
+**Auto-merge: NO, human review required.**
+
+**▶ Prior session 2026-08-14, earlier same day (08-11→08-14 report audit: report-to-broker fidelity, oil signal correctness, transition_watch hysteresis, thematic conviction overlay, branch `feat/20260814-thematic-conviction-oil-fidelity`) — merged, PR #38 (`12e49fb`), plus two follow-up fixes PR #39/#40 (entries #68/#69).**
 Four-task PR triggered by a chain of defects the 08-11→08-14 reports exposed: a 6-order
 "Final trade plan" that collapsed to 1 submitted order with no warning anywhere (Task A);
 `transition_watch` activating for one session on a stale FRED oil leg the axis itself had
@@ -404,8 +415,17 @@ stamped) is measuring the wrong thing entirely, not just imprecisely.
   grading is UNTOUCHED (this is an additive sleeve-specific path, not a
   replacement); a human-reviewed PR per the Learning Loop's proposer≠approver
   invariant if the grading feeds any autonomous decision.
+- **Related but NOT a resolution (2026-08-14, entry #70):** the flex-
+  conviction-path cycle added a SEPARATE, sleeve-appropriate grading track
+  (`ThematicHistory` rows tagged `path: "flex_conviction"`, resolved at each
+  nomination's OWN `horizon_days` rather than a fixed 30/60/90 ladder) — but
+  this grades the p_up PREDICTION (Brier/hit-rate calibration for the
+  conviction-path nomination itself), not a closed trade's realized
+  `r_multiple`. It does not touch `_OUTCOME_HORIZONS`/`TradeHistory` at all,
+  so this item (the catalyst path's calendar-drift mismatch) remains fully
+  open and unaddressed.
 
-### 63. Thematic-ladder numbers — pending Jorge's sanity check (HIGH — sizing decision, cross-refs #64)
+### 63. Ladder numbers — pending Jorge's sanity check, NOW COVERS TWO LADDERS (HIGH — sizing decision, cross-refs #64/#71/#72)
 From the 2026-08-14 session (entry above). The `p_up_min` band edges and
 `target_pct_of_equity` values in `risk-limits.json → thematic_conviction.ladder`
 (0.52/0.58/0.65/0.75 → 0.50/1.25/2.5/4.0pp) and the `per_ticker_cap_pct_of_equity`
@@ -415,6 +435,23 @@ instruction. They were chosen to mirror the shape of the existing
 `conviction_ladder_pct_of_core` ladder (coarse, monotonic bands) but the actual pp
 values are a judgment call about how much capital a thematic conviction call should
 be allowed to move, which is Jorge's to make, not inferred from precedent.
+
+**Re-scoped 2026-08-14 (flex-conviction-path cycle, entry #70) — this item now covers
+a SECOND ladder too.** `risk-limits.json → conviction.ladder` (`edge_min` 0.0/0.04/
+0.07/0.12/0.18 → `size_mult` 0.0/0.25/0.45/0.70/1.00) is the SAME kind of unreviewed
+starting proposal, for the flex sleeve's conviction path — see entry #70 for the full
+design. It has the same base shape (coarse, monotonic bands) but is NOT the same
+numbers as the thematic ladder (different units — `size_mult` scales an existing
+risk-budget/cap chain, not a direct %-of-equity target — and a different domain,
+`edge` = p_up minus an empirically-measured base rate, not raw `p_up`). Review both
+together — they share a design lineage but must not be assumed to share numbers.
+`base_rate_lookback_days` (504) and `base_rate_min_windows` (60) are also unreviewed
+— see entry #70 for why 504/60 were chosen (roughly 2 trading years; ~60 overlapping
+windows was judged the minimum for a stable empirical fraction, not derived from any
+formal significance test — there is no backtest harness, per #23, to validate this
+against). `catalyst_size_mult` (1.5) and `catalyst_promotes_band` (both on by
+default) are covered separately — see entry #71 (roughly a 2x combined effect when
+both fire together).
 
 ### 64. D-6 decision gate — thematic lift on a non-selected pool member (HIGH — architecture decision, cross-refs #63)
 From the 2026-08-14 session. Task D4 rule 3 excludes a thematic nomination on a
@@ -530,7 +567,74 @@ avoidance.
   is a separate cycle and must not ride along with a data-layer change.
 
 **Sequencing.** Do not start until PR #38's M5 (thematic lift draining literal
-cash below `literal_cash_floor_pct`) is closed and merged.
+cash below `literal_cash_floor_pct`) is closed and merged. **Satisfied** — see
+entry **#68** (M5 merged, PR #39, `dc20130`). This item is otherwise unrelated to
+the flex-conviction-path cycle (entry **#70**) that also depended on M5 — they
+share a prerequisite, not a scope.
+
+### 71. G-2 decision gate — catalyst amplifier's combined effect on the flex conviction path (HIGH — sizing decision, cross-refs #63/#70)
+From the 2026-08-14 flex-conviction-path session (entry **#70**). `risk-limits.json →
+conviction.catalyst_size_mult` (1.5) and `conviction.catalyst_promotes_band` (`true`)
+are BOTH on by default and compose (see `_conviction_catalyst_amplifier` — the
+promoted band's own `size_mult` is the multiplication base, not the original band's),
+so a conviction nomination that also carries a real dated catalyst within
+`horizon_days` gets roughly a **2x** combined size effect (one band promotion,
+typically ~1.4-1.6x on its own depending which two adjacent rungs, THEN x1.5 again) —
+never audited against how large a same-session swing that could produce on a single
+flex name relative to the `per_name_cap_pct`/`sleeve_cap_pct` backstops it still runs
+through. Present, not decided: (a) keep both defaults as specified, (b) turn off
+`catalyst_promotes_band` and keep only the size_mult multiplier (roughly halves the
+combined effect), (c) lower `catalyst_size_mult` toward ~1.2. No recommendation —
+this is a risk-appetite call, not a correctness bug; the existing per-name/sleeve
+caps still bind regardless of which option is chosen.
+
+### 72. G-3 decision gate — momentum/relative-strength protection deliberately absent from the conviction path (MEDIUM — architecture decision, cross-refs #70)
+From the 2026-08-14 flex-conviction-path session (entry **#70**). The catalyst path's
+Layer 2 (`build_flex_entry`) requires the entry to be above a RISING session VWAP
+(`above_vwap` + `vwap_slope > 0`) before triggering — a momentum/price-confirmation
+gate. The conviction path's Layer 2 (`build_conviction_entry`) deliberately has NO
+such gate — only a "no-chase" ceiling (`entry_price <= vwap + conviction_no_chase_atr
+× ATR`) that prevents buying too far ABOVE the day's VWAP, but nothing that requires
+the name to be showing ANY positive intraday momentum at all. This was a deliberate
+design choice (a multi-week thesis should not need today's tape to already agree with
+it — the entire point of this path is entering EARLY, before a catalyst-style
+momentum confirmation would exist), but it was never explicitly weighed against the
+alternative of requiring at least a neutral-or-better intraday read. Present, not
+decided: (a) leave as specified — no momentum gate, only the no-chase ceiling: (b)
+add a soft floor (e.g. `entry_price >= vwap - N × ATR`, rejecting an entry into an
+actively-falling tape even before the no-chase ceiling would ever bind) — this would
+be a NEW third gate, not a reuse of the catalyst profile's rising-VWAP requirement,
+since requiring RISING momentum would defeat the "enter early" design goal entirely.
+No recommendation.
+
+### 73. Post-merge watch — first flex-conviction nomination reaching `confirm_sessions` (LOW — verification only, cross-refs #70)
+From the 2026-08-14 flex-conviction-path session (entry **#70**). Mirrors entry
+**#66**'s thematic-conviction watch item, for the sibling flex path. The per-symbol
+hysteresis (`_confirm_flex_conviction_entry`) and the `flex_conviction` snapshot
+block are both unit-tested against hand-built fixtures, but the FULL round trip — a
+real LLM-emitted `path: "conviction"` nomination surviving one session's lag,
+computing a real `base_rate_up` off live price history, confirming after
+`confirm_sessions`=2 consecutive matching nominations, and appearing in
+`flex_conviction.active[]` — has never been observed end-to-end. Watch for the first
+live confirmation and verify: `base_rate_up`/`edge` land in a sane range (base rate
+roughly 0.5-0.6 for a normal equity name over 15-30d), the ladder lookup lands on the
+expected band, and the applied `size_mult` ramped in at `max_session_delta_pct_of_
+equity`=1.5 rather than jumping.
+
+### 74. Post-merge watch — first flex-conviction entry through Layer 2, and the release-driven exit (LOW — verification only, cross-refs #70/#73)
+From the 2026-08-14 flex-conviction-path session (entry **#70**). Once entry **#73**
+confirms a live active conviction nomination, the NEXT unobserved step is the actual
+`build_conviction_entry` firing intraday: the no-chase limit passing, the
+invalidation-level stop sizing correctly (bounded by `conviction_max_stop_pct`=10.0),
+and B5's cash-accommodation clamp behaving correctly against real Alpaca cash/SGOV
+figures (never observed against a live account, only hand-built fixtures in
+`test_flex_conviction_entry.py`/`test_flex_conviction_wiring.py`). Separately, watch
+for the FIRST release-driven exit (`_act_on_release_exit` firing because a held
+conviction position's symbol dropped out of `flex_conviction.active[]`) — confirm it
+sells the full remaining `qty_current`, cancels the resting stop first, and writes a
+`conviction_released`-tagged closed-trade record exactly like the existing
+`time_stop`/`scale_out` paths (never observed live; unit-tested against a fake
+client only).
 
 ### 58. `catalyst_score` weight tuning — gated on graded outcome rows (LOW — data-gated, do not touch early)
 From the 2026-08-10 catalyst-sleeve-funnel session (entry **#57**). `src/collector/catalyst_screen.py`'s
@@ -1789,6 +1893,149 @@ deviation from the literal spec). Key numbers and artifacts for future reference
   rewritten tests), every one confirmed failing against the PR-as-submitted commit via
   `git stash` isolation. Full per-task probe before/after output is in the PR #38
   description.
+
+### 69. Flex-state stale-read fix — Done, branch `fix/20260814-flex-state-stale-read`, PR #40 merged `9768da5` (auto-merge: NO, human review required)
+Found empirically while probing the "5-session flex nomination drought" premise for
+the conviction-path cycle (entry **#70**): 2026-08-11 actually filed two real
+nominations (AVGO, ENTG), each evaluated 26 times by the intraday engine per the
+append-only `flex-decisions/2026-08-11.jsonl` log — legitimate, correctly functioning
+Layer 2 declines (AVGO: `pre_window`→`no_bars`→`below_vwap`/`vwap_not_rising`→
+`stop_too_wide`→`after_cutoff`; ENTG: `liquidity_below_min` all day). Yet
+`daily-snapshots/2026-08-12.json`'s `flex_state.entries` showed `[]`, as if nothing
+had ever been evaluated. **Root cause:** `flex-state/{date}.json` is a single blob
+overwritten on EVERY ~15-min tick, and every trading day's LAST tick is unavoidably a
+post-close `market_closed` tick (the clock-gate early return, before entry/exit
+evaluation runs) — so the blob's final state for ANY day was always the empty
+closed-tick stub, regardless of how much real activity happened intraday. **Fix**
+(write-side only, per Jorge's explicit direction — evaluate the intraday-timer
+overwrite itself, not just the collector-side reader that consumes it):
+`_persist()`'s `market_closed` branch now reads back today's EXISTING blob (if any
+real tick already wrote one) and carries its `entries`/`exits`/`quadrant` forward
+into the closed-tick write, instead of overwriting them with an empty stub; if NO
+real tick has run yet today (blob absent), it skips the write entirely rather than
+writing a premature stub. `read_json_blob` already returns `None` (never raises) on
+a missing blob, so no reader-side change was needed — analyzed and confirmed, not
+assumed. 4 new tests (`test_flex_state_persistence.py`), all confirmed failing
+against pre-fix source via `git stash` isolation. **Jorge's explicit scoping
+decision: NOT folded into the conviction-path cycle as a "Task G"** — landed as its
+own small dedicated PR merging before that cycle started, per instruction.
+
+### 68. PR #38 finding M5 — thematic lift draining literal cash below its floor — Done, branch `fix/20260814-thematic-cash-drain-m5`, PR #39 merged `dc20130` (auto-merge: NO, human review required)
+The M1 remediation's reduction-pool exclusion list (entry **#62**) named `"SGOV"` by
+ticker but not the `"__cash__"` placeholder key that holds the literal-cash buffer
+(`_CASH_BUFFER_PCT`) — a separate key in `weights` at the same point, not in
+`active_names` either, so it stayed silently eligible as pool-1 reduction capacity.
+Reproduced empirically: a thematic lift of just 2.5pp on a floored core name drained
+`literal_cash_target_pct` from a 1.5% baseline down to 0.096% — below
+`literal_cash_floor_pct` (0.75%) — while `cash_sleeve_target_pct` (computed upstream,
+independently of the thematic step) stayed frozen at 12.0 and `by_quadrant.cash_
+sleeve` disagreed with both. **Fix:** exclude `"__cash__"` alongside `"SGOV"` from the
+thematic reduction pool — literal cash has its OWN floor (`literal_cash_floor_pct`),
+an entirely separate protection from the sleeve-level cash-sleeve floor, and neither
+should ever be spent to fund a thematic lift. This was the hard sequencing gate for
+the flex-conviction-path cycle (entry **#70**) — "do not start until M5 is fixed,
+re-audited, and merged" — now satisfied.
+
+### 70. 2026-08-14 flex-conviction-path cycle: SECOND flex-nomination path (no dated catalyst required) + flex_eligibility + applicable-set rankability + Layer 2 profile split — Done, branch `feat/20260814-flex-conviction-path` (auto-merge: NO, human review required)
+Six-task cycle fixing the flex sleeve's structural inability to trade a real, live
+thesis with no scheduled event — the catalyst path (`build_flex_entry`) REQUIRES a
+dated catalyst, so EUAD (European defense-capex re-rating, +16-22pp 60d excess vs SPY
+for four straight sessions) was correctly declined every single day, filing zero
+flex nominations on 4 of 5 sessions (08-10/08-12/08-13/08-14) for exactly this
+reason. **Task A0 blocking probe (done first, per instruction) corrected the spec's
+own premise**: the "zero nominations for five sessions" framing was FALSE — 08-11
+filed two real nominations (AVGO, ENTG), both correctly evaluated and declined by
+Layer 2 (see entry **#69** for the unplanned stale-read bug this probe surfaced and
+that got fixed as its OWN prerequisite PR, per Jorge's explicit direction not to fold
+it in here as a "Task G"). AVGO's `vwap_not_rising`/`stop_too_wide` decline is direct
+empirical support for Task E's profile split below.
+
+- **Task B (the design's central point) — base-rate-relative conviction ladder.**
+  `edge = p_up - base_rate_up`, NEVER `p_up` alone: over a 15-30 trading-day window a
+  broad, liquid equity name rises unconditionally ~55-58% of the time, so an absolute
+  `p_up >= 0.52` threshold is BELOW the base rate and would fire on nearly every
+  candidate. `_base_rate_up` (pure, `collector/handler.py`) computes each candidate's
+  own trailing empirical fraction of overlapping `horizon_days`-length windows with
+  positive total return over `base_rate_lookback_days` (504 sessions, ~2y) —
+  fail-closed below `base_rate_min_windows` (60): `base_rate_up: None`, NEVER a
+  substituted 0.50. `_conviction_edge` clamps at 0. `_conviction_ladder_lookup` maps
+  the edge to a `{conviction, size_mult}` band (config `conviction.ladder` — a
+  SEPARATE ladder from `thematic_conviction.ladder`, unreviewed numbers, see entry
+  **#63**). `_conviction_catalyst_amplifier` applies a REAL dated catalyst (if the
+  nomination has one, within `horizon_days`) as an amplifier — `catalyst_size_mult`
+  and an optional one-band promotion — never a gate; see entry **#71** for the
+  unreviewed combined-effect decision gate. `_confirm_flex_conviction_entry` mirrors
+  `_confirm_thematic_entry`'s exact confirm/release hysteresis algorithm (new
+  `FlexConvictionState` table) applied to `size_mult` instead of a %-of-equity
+  target. `_build_flex_conviction` (the collector orchestrator, mirrors `_build_
+  thematic_conviction`'s architecture exactly) reads back the PRIOR day's
+  `path == "conviction"` nominations (one-session lag — deliberate, same reason as
+  thematic_conviction: `base_rate_up` needs the collector's OWN price cache, which a
+  same-day flex tick doesn't have) and writes the `flex_conviction` snapshot block;
+  `flex/handler.py` reads `flex_conviction.active[]` same-day as ADDITIONAL entry
+  candidates alongside the unchanged catalyst-path `flex_nominations[]` read.
+- **Task C — `flex_eligibility` deterministic block (C1) + prompt rules (C2).**
+  `_build_flex_eligibility` covers every `LEGACY_EXITS` name and every live flex
+  candidate with `{symbol, core_re_entry, flex_nominatable, reason}`, derived live
+  from the SAME `flex_separation_set`/`FLEX_REENTERABLE` machinery the engine itself
+  uses — never hand-maintained. Prompt doctrine (project-instructions.md): a report
+  may not assert a symbol "cannot" be flex-nominated without citing the matching row;
+  must distinguish "the system could not nominate this" (cited, deterministic) from
+  "I am choosing not to nominate this" (a live judgment call) — the EUAD false-
+  prohibition failure mode this closes; `regional_rotation`'s top-named rotation
+  candidate must be adjudicated every session.
+- **Task D — rankability fixes.** D-priority-1: `relative_strength` (60d total-return
+  excess vs SPY) is the 7th `catalyst_score` component — EUAD's own headline metric,
+  previously computed daily and displayed in `regional_rotation` but fed into nothing.
+  D-priority-2: static+dynamic `flex_candidates` (never in the discovery-fetch loop)
+  now get their own `{date: close}` history fetch (~14 calls/day, well within FMP's
+  250/day budget per the A1 probe) — the blocker for `relative_strength`/`base_rate_up`
+  on names that were never part of the discovery universe. D-priority-3: applicable-
+  set split — `earnings_proximity`/`political_flow` are `not_applicable` (not merely
+  `missing_data`) for a fund/ETF; rankability is now a DOUBLE-CLAUSE guard
+  (`components_applicable >= 4` AND `components_available >= 4`) closing the "2-of-2
+  applicable passes" weak-bar failure mode a single available-only clause would have
+  left open. D-priority-4: `isEtf`/`isFund` FMP profile booleans (not sector-string
+  inference) determine the applicable set.
+- **Task E — Layer 2 entry/exit profile split.** `build_conviction_entry` (new,
+  `flex/entry.py`) is a SEPARATE gate sequence from `build_flex_entry` (byte-identical,
+  untouched): no gap/VWAP-rising trigger, instead a "no-chase" ceiling
+  (`conviction_no_chase_atr`); stop is the nomination's own `invalidation` price level,
+  bounded by `conviction_max_stop_pct` (10.0, vs the catalyst profile's 4.0) — never
+  ATR-derived; sizing scales the risk BUDGET itself by `size_mult` before the same
+  risk-budget/per-name-cap/sleeve-cap governor runs. `build_flex_exit_state` gains a
+  `path`-aware skip: NO time stop at all for a conviction-path entry (replaced by the
+  release-driven exit in `flex/handler.py`, firing when a held conviction symbol drops
+  out of `flex_conviction.active[]`). B5 cash accommodation (`cash_accommodation_
+  shares`) clamps a conviction entry's shares so it can never drain literal cash below
+  `literal_cash_floor_pct` or the whole cash sleeve below `cash_sleeve_floor_pct` — the
+  explicit M5 callback (entry **#68**): a clamp, never a rejection, mirroring "size-
+  floored ≠ impossible."
+- **Task F — grading extension, reused not duplicated.** `ThematicHistory` gains a
+  `path` field (`"core_thematic"` vs `"flex_conviction"`) rather than a new table.
+  `_write_flex_conviction_history` (analyzer) writes one row per `path == "conviction"`
+  nomination (RowKey `FLEXCV-…`, vs thematic's `THM-…`); `_stamp_flex_conviction_
+  outcomes` resolves each row at its OWN `horizon_days` (single-shot, not the 30/60/90
+  ladder core-thematic uses) via the identical perf-series/FMP-fallback pricing;
+  `_build_flex_conviction_calibration` computes a SEPARATE Brier/hit-rate/damping
+  track filtered on `path == "flex_conviction"`, never blended with core-thematic's.
+  Reuses `_thematic_brier`/`_thematic_damping_factor` verbatim.
+- **Three decision gates surfaced for Jorge, unresolved this cycle** — entry **#63**
+  (re-scoped: BOTH ladders' numbers), entry **#71** (G-2: catalyst amplifier's ~2x
+  combined effect), entry **#72** (G-3: no momentum-protection gate on the conviction
+  path, deliberate). Two post-merge watch items — entries **#73**/**#74**.
+
+**Baseline:** `PYTHONPATH=src pytest` on branch tip before this cycle (post-PR #40,
+`9768da5`, measured via a full `git stash -u` isolation, not carried forward from
+memory — see the entry #60/#61 baseline-measurement correction this doctrine exists
+to prevent) = **1176 passed**. **Final: 1272 passed** (96 new, across 6 new test
+files — `test_flex_conviction_pure.py`, `test_flex_conviction_hysteresis.py`,
+`test_flex_conviction_entry.py`, `test_flex_conviction_exit_state.py`,
+`test_flex_conviction_wiring.py`, `test_write_flex_conviction_history.py` — plus
+extensions to `test_catalyst_screen.py`, `test_build_catalyst_screen.py`, and
+`test_prompt_hygiene_sentinels.py`), ruff clean project-wide. Every new/modified
+test confirmed failing against pre-fix source via `git stash` isolation on the
+specific changed file, per the empirical-verification doctrine.
 
 ### 60. 2026-08-10 session (later same day): Flex Sleeve Performance Ledger + SWA panel — Done, branch `feat/20260810-flex-performance-ledger` (auto-merge: NO, human review required)
 The Flex Catalyst Engine had no performance record — `src/flex/ledger.py` was

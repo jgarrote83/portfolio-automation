@@ -343,26 +343,121 @@ For each catalyst idea, emit one `flex_nominations[]` entry. A good nomination:
    (thin names break the intraday VWAP read). If fundamentals/price are missing from
    the snapshot, say so — the engine cannot size a name it has no data for.
 
+#### The conviction path — a SECOND, parallel flex-nomination route (no dated catalyst required)
+
+**Motivating incident (2026-08 flex-conviction-path cycle):** EUAD (European defense-
+capex re-rating) ran +16–22pp of 60-day excess vs SPY for four straight sessions with
+a real, live, well-evidenced thesis — and was correctly declined every single day,
+because the catalyst path above REQUIRES a dated catalyst and EUAD had none. Four of
+five sessions (08-10/08-12/08-13/08-14) filed zero nominations for exactly this
+reason: not because the book lacked good ideas, but because the only nomination route
+that existed structurally excluded a real one. Every `flex_nominations[]` entry now
+carries a mandatory **`path`** field: `"catalyst"` (everything above — unchanged) or
+`"conviction"` (this section). Omitting `path` defaults to `"catalyst"` for backward
+compatibility, but state it explicitly going forward.
+
+A `path: "conviction"` nomination:
+- **Needs NO dated catalyst.** `catalyst_date` is OPTIONAL on this path — this is the
+  entire point. If you do have a genuine dated catalyst within the nomination's
+  `horizon_days`, include it anyway: the collector applies it as an **amplifier**
+  (`flex_conviction.ladder`'s config: `catalyst_size_mult`, and — if
+  `catalyst_promotes_band` — one band promotion), never a gate. A missing/out-of-window
+  `catalyst_date` is simply no amplification, never a defect.
+- **`p_up`** is the probability the ticker's total return is positive over
+  `horizon_days` (state two decimals) — the SAME falsifiable-precision contract as
+  `thematic_conviction.p_up` below, just scoped to the flex sleeve. `horizon_days`
+  must fall inside `flex_conviction.ladder`'s configured range (currently 15–30) —
+  a multi-week-to-two-month thesis, not an intraday one.
+- **THE central design point: your `p_up` is graded against an empirical base rate,
+  never in isolation.** Over a 15–30 trading-day window, a broad, liquid equity name
+  rises unconditionally something like 55–58% of the time. The collector computes
+  each candidate's own trailing empirical `base_rate_up` (fail-closed — insufficient
+  price history excludes the candidate rather than assuming 0.50) and derives
+  `edge = p_up − base_rate_up`; ONLY the edge drives the size ladder. A `p_up` of 0.55
+  on a name whose own base rate is 0.55 has ZERO edge and earns zero size, no matter
+  how confident it sounds. Do not nominate at a `p_up` you cannot distinguish from "this
+  ticker just generally goes up" — state, in the rationale, what SPECIFICALLY makes
+  your probability estimate higher than an unconditional base rate for this timeframe.
+  You will not see the resolved `base_rate_up`/`edge` for a brand-new candidate until
+  the FOLLOWING session's `flex_conviction` block (the same one-session lag as
+  `thematic_conviction` — see below) — this is deliberate, not a bug to route around.
+- **`evidence[]` must cite `flex_conviction.ladder`'s config `min_evidence_items` (or
+  more) named deterministic snapshot blocks**, the identical standard as
+  `thematic_conviction.evidence` — prose from a prior report does not count.
+- **`invalidation` is mandatory** — a specific, checkable price level or observable
+  (e.g. a literal price, "`AVGO` closes below `$X` on 2 consecutive sessions") that
+  would prove the thesis wrong. This is also the position's STOP once entered — Layer
+  2's conviction profile sizes the stop off this level directly (bounded by
+  `conviction_max_stop_pct`, wider than the catalyst profile's ATR-derived stop —
+  a multi-week thesis needs room an intraday ATR distance does not give it), never an
+  ATR distance.
+- **No time stop on this path.** The catalyst profile's `time_stop_days` calendar
+  clock does not apply here — a conviction position's "shelf life" is the confirm/
+  release hysteresis itself (`flex_conviction.active`/`.pending`, `confirm_sessions`/
+  `release_sessions`): it exits when the nomination stops reproducing, not on a fixed
+  day count. You do not manage this — echo `flex_conviction`, never recompute it.
+- **Cite `flex_conviction.eligibility`/`flex_eligibility`** (see below) before
+  nominating — a symbol the collector marks `flex_nominatable: false` (e.g. a live
+  core pool member, a `LEGACY_EXITS` name still mid-wind-down, a price-quarantined
+  name) cannot enter via either path regardless of thesis quality.
+- Everything else about the Separation Contract is unchanged: no price/stop/size math
+  from you, sells before buys is the engine's problem not yours, and the ≤10-ticker /
+  ≤25%-of-equity flex budget is shared across BOTH paths (a conviction entry and a
+  catalyst entry compete for the same room).
+
+**`flex_eligibility` — deterministic nominatability, never asserted from memory
+(Task C, resolves the EUAD false-prohibition failure mode).** Before stating that a
+name "cannot" be flex-nominated (core re-entry closed, held in wind-down, pool-
+blocked, quarantined), **cite the matching row in `flex_eligibility.candidates`** —
+`{symbol, core_re_entry, flex_nominatable, reason}`. Distinguish **"the system could
+not nominate this"** (a cited, deterministic `flex_nominatable: false` reason) from
+**"I am choosing not to nominate this"** (a live judgment call — weak thesis, no
+edge, insufficient evidence) — these are different claims and must never be
+conflated. The exact failure this replaces: a report asserting a name was
+structurally un-nominatable when the truth was simply that no nomination PATH
+existed for its thesis type yet (EUAD, above) — that is a "the system could not"
+claim made with nothing to cite, and it was wrong. If `flex_eligibility.available`
+is `false`, say so and do not assert nominatability either way. **Adjudicate
+`regional_rotation`'s top-named rotation candidate every session** — either nominate
+it (citing its `flex_eligibility` row) or state explicitly why not (weak thesis /
+no edge / evidence short of the bar) — never let it pass unmentioned.
+
 **`catalyst_screen` — the deterministic discovery ranking (session 2026-08-10,
-catalyst-sleeve-funnel Task D).** Every run, the collector screens a DISCOVERY
-universe (genuinely new names — never held, never previously nominated — sourced
-from the market-wide earnings calendar `earnings_calendar_market` and market-wide
-congressional flow) and ranks it by a deterministic `catalyst_score`: the EQUAL-
-WEIGHTED mean of up to six components (`earnings_proximity`, `news_recency`,
-`news_tone`, `momentum`, `regime_fit_score`, `political_flow`), each independently
+catalyst-sleeve-funnel Task D; extended 2026-08-14, Task D-priority-1/3/4).** Every
+run, the collector screens a DISCOVERY universe (genuinely new names — never held,
+never previously nominated — sourced from the market-wide earnings calendar
+`earnings_calendar_market` and market-wide congressional flow) and ranks it by a
+deterministic `catalyst_score`: the EQUAL-WEIGHTED mean of up to seven components
+(`earnings_proximity`, `news_recency`, `news_tone`, `momentum`, `regime_fit_score`,
+`political_flow`, `relative_strength` — 60-day total-return excess vs SPY, added
+2026-08-14 after EUAD's +16-22pp 60d excess sat unused in `regional_rotation` for
+four straight sessions while feeding nothing into this ranking), each independently
 computed — **you never compute this score, only read it.** A component with no
 underlying data is ABSENT and drops out of the mean rather than scoring 0 — this is
-why a no-earnings-date name is never handicapped for it (see item 1). A candidate
-needs at least 4 of the 6 components available to be `rankable`; the top-ranked
-rankable names are pre-merged into `flex_candidates` (`source: "screened"`,
-alongside the existing `"static"`/`"dynamic"` names) so they already carry a price
-and profile like any other candidate. Read `catalyst_screen.ledger` for the full
-scored pool (including screened-out and thin-coverage names, each with its
-`screen_reason` or `components_missing`) and `catalyst_screen.nominated` for the
-names that cleared the bar — treat a high-ranked `nominated` name as a legitimate,
-pre-vetted lead, not just another idea; you are still free to nominate from
-`ai_conviction`/`congressional`/`lobbying`/`contracts`/`thematic` as before, but
-should not ignore what the deterministic screen has already surfaced. If
+why a no-earnings-date name is never handicapped for it (see item 1).
+
+**Applicable-set split (Task D-priority-3/4, 2026-08-14):** `earnings_proximity` and
+`political_flow` are single-name-only concepts — a fund/ETF has no earnings date to
+report and is not the kind of individual-insider-conviction target the political-flow
+signal measures. For a fund candidate (FMP's own `isEtf`/`isFund` profile booleans —
+`catalyst_screen.ledger[].basis.is_fund` — never a sector-string guess), these two
+are `components_not_applicable`, DISTINCT from `components_missing` (a component that
+COULD resolve but hasn't this session). Rankability is a DOUBLE-CLAUSE guard:
+`components_applicable >= 4` AND `components_available >= 4` — both required. Do not
+conflate the two counts: a candidate with only 2 structurally-possible components,
+both populated, is still NOT rankable (the applicable-count clause vetoes it
+independently of how fully its narrow set happens to be populated) — never read
+"components_missing is empty" alone as evidence of a well-covered candidate; check
+`components_applicable` too. The top-ranked rankable names are pre-merged into
+`flex_candidates` (`source: "screened"`, alongside the existing `"static"`/`"dynamic"`
+names) so they already carry a price and profile like any other candidate. Read
+`catalyst_screen.ledger` for the full scored pool (including screened-out and thin-
+coverage names, each with its `screen_reason`, `components_missing`, and
+`components_not_applicable`) and `catalyst_screen.nominated` for the names that
+cleared the bar — treat a high-ranked `nominated` name as a legitimate, pre-vetted
+lead, not just another idea; you are still free to nominate from `ai_conviction`/
+`congressional`/`lobbying`/`contracts`/`thematic` as before, but should not ignore
+what the deterministic screen has already surfaced. If
 `catalyst_screen.available` is `false` (build failure — non-fatal, the funnel falls
 back to `flex_candidates`' static+dynamic names only), say so and proceed without it.
 
@@ -1444,6 +1539,29 @@ A single JSON snapshot for one trading day containing:
   it fires**, never let a thematic lift quietly de-risk the favored quadrant unremarked. See
   "Thematic capex cascade" above for how a nomination is emitted, and "Conviction-scaled
   concentration" for how this differs from sleeve conviction.
+- `flex_eligibility` — **deterministic flex-nomination eligibility** (Task C, 2026-08-14
+  flex-conviction-path cycle): `candidates[]`, each `{symbol, core_re_entry
+  ("closed"/"not_applicable"), flex_nominatable, reason}` — covers every `LEGACY_EXITS`
+  name and every live static/dynamic/screened flex candidate, derived live from the same
+  separation-set/re-enterable/quarantine machinery the engine itself uses. Cite the
+  matching row before asserting a symbol cannot be flex-nominated — see "The conviction
+  path" above for the full doctrine (the EUAD false-prohibition failure mode this closes).
+- `flex_conviction` — **the SECOND, parallel flex-nomination path** (Task B, 2026-08-14
+  flex-conviction-path cycle): `enabled`, `ladder` (edge_min → conviction/size_mult band,
+  echoed from config), `eligibility` (echoes `flex_eligibility` above), `excluded`
+  (`{symbol, reason}` — `not_flex_nominatable` / `insufficient_evidence` / `invalid_p_up`
+  / `horizon_out_of_range` / `insufficient_base_rate_history`), `active[]` (confirmed,
+  currently-applied entries — each `{symbol, p_up, base_rate_up, base_rate_windows, edge,
+  conviction, target_size_mult, applied_size_mult, horizon_days, evidence, invalidation,
+  catalyst_date, catalyst_amplified, confirm_streak, review_date}`), `pending[]` (building
+  toward confirmation, not yet applied), and `calibration` (`sample_size`, `brier_score`,
+  `hit_rate`, `damping_factor` — a SEPARATE track from `thematic_conviction.calibration`,
+  never blended). One-session lag, same as `thematic_conviction` — a nomination you file
+  today is evaluated (base rate computed, edge derived, hysteresis advanced) starting the
+  FOLLOWING session, not same-day. See "The conviction path" above for the full nomination
+  doctrine (edge-over-base-rate, no dated catalyst required, invalidation-as-stop, no time
+  stop). **Echo `active[]`/`pending[]`/`calibration` — never recompute the ladder lookup,
+  the base rate, or the hysteresis state yourself.**
 - `flex_state` — **the intraday Flex engine's computed state** (it owns the flex sleeve end-to-end). Per held flex name: the **exit** decision (`next_action` ∈ hold/scale_out/trail/time_stop/stopped, `r_multiple`, `trail_stop`). Per nomination evaluated: the **entry** decision (`entry_trigger` pass/fail, `skip_reason`, `binding`, `size_shares`). Also `quadrant` (the deterministic quadrant the engine used), `as_of`, and **`reconciliation`** (`{status, engine_held, broker_held}` — the deterministic engine-vs-broker check). **When `reconciliation.status` is `ok`, echo the engine's numbers; never recompute or override a flex price/stop/size. When it is `mismatch`, the PAPER ACCOUNT is canonical** — count `broker_held` names as real flex holdings (🔴), run kill-criteria against the broker position using the last recorded kill price from flex/`TradeHistory`, and open no new flex entry in the affected symbol until resolved (see "Reading flex_state" above). Absent ⟹ engine disabled or not yet run that day — say so, don't invent flex levels.
 - `performance` — the scoreboard (Phase C): account equity vs fully-invested SPY since `inception_date` (`return_since_inception_pct`, `spy_return_since_inception_pct`, `excess_vs_spy_pp`), `rolling` 30/60/90d windows (null until that much history exists), `max_drawdown_pct`, `account.cash_pct`, and **`excess_attribution`** (per `inception`/`30d` window: `excess_pp`, `cash_contribution_pp`, `invested_contribution_pp`, `avg_cash_pct`, `method`). This is the mission metric — beating SPY. **Any sentence attributing the vs-SPY excess to "cash drag" or "selection" MUST cite `excess_attribution`** — the sign is routinely backwards freehand (when SPY is negative, flat cash ADDS excess and the lag lives in the invested book). If `available` is false (pre-funding / Alpaca fallback day), say so and skip the scoreboard line.
 - `quadrant_performance` — regime-call accountability (FOLLOWUPS #12, describe-only): per Q1-Q4 bucket, `ret_30d_pct`/`ret_60d_pct`/`ret_90d_pct` + `excess_Nd_pp` vs SPY, `favored_streak`, `streak_excess_pp`, `lagging_sessions`, and a `suspect` flag; plus top-level `spy_ret_30d_pct`, `favored_today`, and `roster_note`. **Never touches `reference_weights`** — see "Regime-call accountability" below for the mandatory paragraph when `suspect` is true. If `available` is false, say so and skip the Regime P&L dashboard row's numbers.
@@ -2046,13 +2164,21 @@ A single JSON object — no prose, no code fences, no markdown:
   "flex_nominations": [
     {
       "symbol": "TICKER",
+      "path": "catalyst" | "conviction",
       "sector": "FMP sector — must want the active quadrant",
       "flex_source": "ai_conviction" | "congressional" | "lobbying" | "contracts" | "thematic",
       "primary_trigger": "news_catalyst" | "earnings" | "congressional_cluster" | "thematic_tier" | "valuation" | "technical",
       "thesis_type": "catalyst" | "mispricing" | "macro_fit",
       "trigger_evidence": "the specific headline+source+date or data point",
-      "catalyst_date": "YYYY-MM-DD",
-      "rationale": "1–2 sentence catalyst thesis + why it fits the active quadrant"
+      "catalyst_date": "YYYY-MM-DD or null (optional on the conviction path)",
+      "rationale": "1–2 sentence thesis + why it fits the active quadrant",
+      "p_up": 0.64,
+      "horizon_days": 21,
+      "evidence": [
+        "60d relative_strength +18pp vs SPY (catalyst_screen.ledger.AVGO.basis)",
+        "named deterministic snapshot block #2"
+      ],
+      "invalidation": "the specific price level or observable that would prove this nomination wrong — conviction path only, mandatory there"
     }
   ],
   "overrides": [
@@ -2085,10 +2211,13 @@ A single JSON object — no prose, no code fences, no markdown:
 ```
 
 `flex_nominations` is the **FLEX_SCHEMA_V1** contract with the intraday Flex engine —
-candidate catalyst ideas only. **No price, stop, size, or take-profit** here: the
-engine computes and executes those intraday and reports back in `flex_state`. Omit
-the array (or leave it `[]`) when you have no flex idea. `trades[]` is for **Core**
-weight changes; do not put flex buys or sells in it.
+candidate ideas only, on ONE of two paths (mandatory `path` field, see "The conviction
+path" above): `"catalyst"` (a dated event; `catalyst_date`/`primary_trigger`/
+`thesis_type`/`trigger_evidence` apply) or `"conviction"` (`p_up`/`horizon_days`/
+`evidence`/`invalidation` apply; no dated catalyst required). **No price, stop, size,
+or take-profit** here on EITHER path: the engine computes and executes those intraday
+and reports back in `flex_state`. Omit the array (or leave it `[]`) when you have no
+flex idea. `trades[]` is for **Core** weight changes; do not put flex buys or sells in it.
 
 `overrides` is the **OVERRIDE_SCHEMA_V1_1** contract (see "Execute toward the reference" in
 Section 2). Emit one record **per sleeve** (`sleeve` is mandatory) for **every deviation from

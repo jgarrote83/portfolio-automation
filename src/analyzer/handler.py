@@ -411,6 +411,10 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
         _write_thematic_history(date_str, trades_obj.get("thematic_conviction") or [], gaps)
     except Exception:  # noqa: BLE001
         logger.exception("Thematic history write failed (non-fatal)")
+    try:
+        _write_flex_conviction_history(date_str, trades_obj.get("flex_nominations") or [])
+    except Exception:  # noqa: BLE001
+        logger.exception("Flex-conviction history write failed (non-fatal)")
 
     logger.info(
         "=== Analyzer completed for %s — %d trades recommended ===",
@@ -1434,10 +1438,66 @@ def _write_thematic_history(date_str: str, thematic_nominations: list[dict],
                 "horizon_60d": horizon_dates[60],
                 "horizon_90d": horizon_dates[90],
                 "outcome_status": "",
+                "path": "core_thematic",
             }
             upsert_entity("ThematicHistory", entity)
         except Exception as e:  # noqa: BLE001
             logger.error("ThematicHistory upsert failed for %s: %s", row_key, e)
+
+
+def _write_flex_conviction_history(date_str: str, flex_nominations: list[dict]) -> None:
+    """Task F (2026-08-14 flex-conviction-path cycle) — WRITE ONLY: one
+    `ThematicHistory` row per `path == "conviction"` entry in the model's
+    `flex_nominations[]` this session, tagged `path: "flex_conviction"` so its
+    calibration/grading NEVER blends with the core thematic-conviction track
+    (`_build_flex_conviction_calibration`/`_stamp_flex_conviction_outcomes` in
+    collector/handler.py query on this exact tag). Reuses `ThematicHistory` —
+    NOT a new table — per the cycle's explicit "reuse, don't duplicate"
+    instruction; distinguished from core-thematic rows by RowKey prefix
+    (`FLEXCV-` vs `THM-`) and this `path` field.
+
+    Unlike `_write_thematic_history`, this path has no `gaps`-table price
+    source (flex candidates are off the core roster) — `entry_price` is left
+    unset here; the stamper resolves its own base price at grading time via
+    the identical perf-series-closes-first/FMP-fallback mechanism
+    `_stamp_thematic_outcomes` already uses (see `_px` there), so nothing is
+    lost by not precomputing it here. Non-fatal per row. Catalyst-path
+    entries in the SAME `flex_nominations[]` list are skipped entirely — they
+    are graded by the existing flex-sleeve TradeHistory mechanism, not this
+    p_up/Brier track.
+    """
+    convictions = [n for n in flex_nominations if isinstance(n, dict) and n.get("path") == "conviction"]
+    if not convictions:
+        return
+    year_month = date_str[:7]
+    for idx, nom in enumerate(convictions):
+        sym = str(nom.get("symbol") or "").upper()
+        if not sym:
+            continue
+        row_key = f"FLEXCV-{date_str.replace('-', '')}-{idx:03d}"
+        try:
+            evidence = nom.get("evidence") or []
+            try:
+                horizon_days = int(nom.get("horizon_days") or 0)
+            except (TypeError, ValueError):
+                horizon_days = 0
+            entity = {
+                "PartitionKey": year_month,
+                "RowKey": row_key,
+                "symbol": sym,
+                "filed_date": date_str,
+                "path": "flex_conviction",
+                "p_up": float(nom.get("p_up")) if nom.get("p_up") is not None else None,
+                "horizon_days": horizon_days,
+                "evidence": (" | ".join(str(e) for e in evidence))[:32000],
+                "evidence_count": len(evidence),
+                "invalidation": str(nom.get("invalidation") or "")[:32000],
+                "catalyst_date": nom.get("catalyst_date") or "",
+                "outcome_status": "",
+            }
+            upsert_entity("ThematicHistory", entity)
+        except Exception as e:  # noqa: BLE001
+            logger.error("ThematicHistory (flex_conviction) upsert failed for %s: %s", row_key, e)
 
 
 def _write_regime_suspect_history(date_str: str, snapshot: dict, trades_obj: dict) -> None:

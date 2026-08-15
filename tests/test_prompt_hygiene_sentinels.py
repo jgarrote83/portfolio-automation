@@ -119,6 +119,39 @@ _THEMATIC_CONVICTION_SENTINELS = (
 )
 _THEMATIC_OLD_INSTRUCTION_RETIRED_PHRASE = "note the linkage in the rebalancing rationale"
 
+# Task B/E (2026-08-14 flex-conviction-path cycle): the SECOND, parallel flex-
+# nomination path — no dated catalyst required, edge-over-base-rate sizing,
+# invalidation-as-stop, no time stop. Closes the EUAD 4-of-5-sessions drought
+# (a real thesis with no dated catalyst had no nomination path at all).
+_FLEX_CONVICTION_PATH_SENTINELS = (
+    'path: "conviction"',
+    "edge = p_up",
+    "base_rate_up",
+    "No time stop on this path",
+)
+# Task C1/C2 (2026-08-14 flex-conviction-path cycle): flex_eligibility citation
+# doctrine, closing the EUAD false-prohibition failure mode — a report must
+# distinguish "the system could not nominate this" (cited, deterministic) from
+# "I am choosing not to nominate this" (a live judgment call), and must
+# adjudicate regional_rotation's top-named candidate every session.
+_FLEX_ELIGIBILITY_SENTINELS = (
+    "flex_eligibility.candidates",
+    "the system could not",
+    "I am choosing not to nominate this",
+    "top-named rotation candidate",
+)
+
+# Task D-priority-3/4 (2026-08-14 flex-conviction-path cycle): applicable-set
+# split (missing_data vs not_applicable) + the double-clause rankability
+# guard, so "components_missing is empty" alone is never read as full
+# coverage for a fund with a structurally narrow applicable set.
+_APPLICABLE_SET_SENTINELS = (
+    "components_not_applicable",
+    "components_applicable >= 4",
+    "components_available >= 4",
+    "is_fund",
+)
+
 
 def _text() -> str:
     return _PROMPT.read_text(encoding="utf-8")
@@ -220,3 +253,21 @@ def test_old_decorative_theme_narration_instruction_retired():
     four-session floor-pin incident)."""
     text = _text()
     assert _THEMATIC_OLD_INSTRUCTION_RETIRED_PHRASE not in text
+
+
+def test_flex_conviction_path_doctrine_present():
+    text = _text()
+    for s in _FLEX_CONVICTION_PATH_SENTINELS:
+        assert s in text, f"missing flex-conviction-path sentinel: {s!r}"
+
+
+def test_flex_eligibility_doctrine_present():
+    text = _text()
+    for s in _FLEX_ELIGIBILITY_SENTINELS:
+        assert s in text, f"missing flex_eligibility sentinel: {s!r}"
+
+
+def test_applicable_set_doctrine_present():
+    text = _text()
+    for s in _APPLICABLE_SET_SENTINELS:
+        assert s in text, f"missing applicable-set sentinel: {s!r}"

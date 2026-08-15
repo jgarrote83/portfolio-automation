@@ -64,6 +64,34 @@
     "_note": "D-4/D-5 (2026-08-14). The book had no path from a live named theme to a position size: project-instructions.md told the analyst to 'note the linkage in the rebalancing rationale' and nothing more, so a sustained Hormuz oil disruption left VDE pinned at a 1-share 0.097% floor for four consecutive sessions. Jorge's decision (2026-08-14) is that the LLM advises via an explicit probability-of-increase rather than a mechanical price-level trigger, and that the resulting size scales by confidence rather than being fixed. p_up_min bands are deliberately coarse -- a continuous probability-to-weight map is false precision and jitters session-to-session. brier_damping closes the Phase-C loop: a model that cannot beat the base rate loses the lever mechanically rather than by human intervention. PENDING JORGE'S SANITY CHECK (FOLLOWUPS): the p_up_min band edges and target_pct_of_equity values above are a starting proposal, not yet reviewed."
   },
 
+  "conviction": {
+    "enabled": true,
+    "horizon_days_range": [15, 30],
+    "base_rate_lookback_days": 504,
+    "base_rate_min_windows": 60,
+    "ladder": [
+      {"edge_min": 0.18, "conviction": "very_high", "size_mult": 1.00},
+      {"edge_min": 0.12, "conviction": "high",      "size_mult": 0.70},
+      {"edge_min": 0.07, "conviction": "moderate",  "size_mult": 0.45},
+      {"edge_min": 0.04, "conviction": "low",       "size_mult": 0.25},
+      {"edge_min": 0.0,  "conviction": "none",      "size_mult": 0.0}
+    ],
+    "catalyst_size_mult": 1.5,
+    "catalyst_promotes_band": true,
+    "min_evidence_items": 2,
+    "confirm_sessions": 2,
+    "release_sessions": 2,
+    "max_session_delta_pct_of_equity": 1.5,
+    "brier_min_sample": 10,
+    "brier_damping": [
+      {"brier_max": 0.20, "factor": 1.0},
+      {"brier_max": 0.25, "factor": 0.75},
+      {"brier_max": 0.30, "factor": 0.50},
+      {"brier_max": 1.0,  "factor": 0.0}
+    ],
+    "_note": "2026-08-14 flex-conviction-path cycle. The flex sleeve filed zero nominations for 4 of 5 sessions (08-10/08-12/08-13/08-14) because the catalyst path REQUIRES a dated catalyst -- and a real, live European-defense-capex theme (EUAD +16-22pp 60d excess vs SPY for four straight sessions) had none, so the model correctly declined it every day under the only entry path that existed. This is a SECOND, parallel nomination path: the LLM advises via p_up (probability the ticker's total return is positive over horizon_days, 15-30d) rather than requiring a dated event. THE SINGLE MOST IMPORTANT DESIGN POINT: edge = p_up - base_rate_up, NOT p_up alone. A 15-30d broad equity ETF rises ~55-58% of the time unconditionally -- an absolute p_up>=0.52 threshold is BELOW the base rate and would fire on nearly every candidate, indistinguishable from having no signal at all. base_rate_up is the empirical fraction of overlapping horizon_days-length windows with positive total return over the trailing base_rate_lookback_days (~2y) -- computed per candidate, never assumed at 0.50. Unavailable or fewer than base_rate_min_windows overlapping windows -> the candidate is NOT conviction-eligible this session (fail-closed, never a substituted 0.50). size_mult scales the size the EXISTING risk-budget/per-name-cap/sleeve-cap sizing chain produces -- it is not an independent percent of equity, and none of those existing caps are relaxed. catalyst_size_mult (1.5) and catalyst_promotes_band (both on by default -- Jorge should sanity-check, see decision gate G-2, this is roughly a 2x effective amplification together) apply ONLY when a conviction nomination also carries a real dated catalyst within horizon_days -- both applied BEFORE the per-name/sleeve caps, never after, so the amplifier can never breach a cap. confirm_sessions/release_sessions/max_session_delta_pct_of_equity mirror PR #38's thematic-conviction hysteresis discipline exactly (same doctrine, separate state -- flex entries track price/stop/horizon in a way core reference weights don't). Ladder edge_min/size_mult values, like PR #38's thematic ladder, are a STARTING PROPOSAL pending Jorge's sanity check -- see FOLLOWUPS #63 (re-scoped to cover both ladders)."
+  },
+
   "no_read_ballast": {
     "conviction_score_min": 7.0,
     "ballast_names": ["GLD", "TLT"],
