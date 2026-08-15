@@ -461,6 +461,77 @@ ramped in at `max_session_delta_pp`=1.5pp rather than jumping, the lifted symbol
 `target_weights_pct` actually moved, and no unexpected `ceiling_pressure` fired on a
 modest single-name lift.
 
+### 67. Periodic quadrant roster review — semi-annual out-of-band task (MEDIUM — architecture, data-gated on screening universe)
+**Decision (2026-08-14, Jorge).** AI-chosen core selection is **rejected for the
+daily path.** The core roster stays deterministic session-to-session and
+`CORE_ROSTER` / `sleeve-roles.json` remain the authoritative source every
+consumer resolves through. Instead, the "is this still the best ticker for this
+quadrant?" question moves to a **separate task that runs twice a year** (interval
+6 or 12 months — TBD, see decision gate below).
+
+**Why out-of-band rather than daily.** A roster question is a slow-moving
+decision and the daily loop is where whipsaw risk lives. Three separate
+one-session flip-flops were found in two audit cycles (VDE reference 0.091% →
+4.118% → 0.091%, `transition_watch` on/off, thematic jitter) — every one caused
+by a fast signal driving a slow allocation without hysteresis. Daily LLM
+re-selection of core would be the maximal version of that failure mode, applied
+to the All-Weather backbone. It also contradicts two standing principles:
+"24 CORE, weight-only changes, never sold to zero" and "new tickers enter only
+via FLEX."
+
+Running it semi-annually gives the review a horizon long enough for performance
+evidence to mean something, and keeps the daily book deterministic.
+
+**Scope of the review task.** For each quadrant (Q1/Q2/Q3/Q4) and each role:
+- Assemble a candidate universe for the quadrant (see data gap below).
+- Rank the incumbent against candidates on trailing performance, expense ratio,
+  liquidity/ADV, tracking consistency, and quadrant fit.
+- Emit a **ranked proposal**, not a trade. Output is a structured amendment
+  proposal in the same shape the Learning Loop already uses (#40-adjacent) —
+  reviewed by Jorge, applied via a `sleeve-roles.json` PR, never auto-applied.
+- Any adopted change enters the roster as a **pool addition** and is then subject
+  to the existing streak-based auto-switch machinery (PR #31,
+  `feat/20260727-sleeve-auto-switch`), so adoption still requires the N-of-10
+  streak. The review proposes candidates; it does not hot-swap incumbents.
+
+**Data gap (blocking — must be resolved before implementation).** FMP Starter has
+**no company-screener endpoint**. Wired endpoints are: `profile`,
+`batch-quote-short`, `historical-price-eod`, `earnings-calendar`, `news/stock`,
+`etf/holdings`, `etf/country-weightings`, `etf/sector-weightings`, senate/house
+trades, `discounted-cash-flow`, `ratings-snapshot`. Today's discovery universe
+(earnings calendar + congressional flow + news) is not a quadrant screen.
+
+Feasible path with endpoints already paid for: **quadrant → representative ETF →
+`etf/holdings` look-through → candidate universe**, ranked with
+`discounted-cash-flow` and `ratings-snapshot`. Because this runs twice a year
+rather than daily, the 250 req/day FMP budget is a much softer constraint than it
+would be for a daily screen — a single review run can afford a wide look-through.
+This is the main practical argument for the semi-annual cadence beyond whipsaw
+avoidance.
+
+**Decision gates (for Jorge, at implementation time):**
+- **67a — Interval:** 6 months or 12 months. 6mo gives more adaptation and more
+  chances to churn a working roster; 12mo is more conservative and matches the
+  "process discipline over outcome-chasing" principle. No recommendation yet —
+  wants at least one full cycle of Phase C grading data to inform it.
+- **67b — Trigger:** calendar-scheduled (e.g. every January/July) vs. manually
+  invoked by Jorge. Calendar is auditable and unmissable; manual avoids running a
+  review during a regime the book is mid-transition through.
+- **67c — Scope per run:** all four quadrants in one run, or one quadrant per
+  quarter on a rotation. Rotation spreads the API cost and the review burden.
+
+**Explicitly out of scope for this item:**
+- Off-quadrant sleeve picks and the `role_quadrant_drift` accounting — separate
+  item, needs `primary_quadrant()` to bucket by ticker rather than role or Table A
+  silently desynchronizes (2026-07-09 "Q3 42.9% vs footnote 58%" failure class).
+- `LEGACY_EXITS` doctrine — unchanged. A legacy exit is not a roster-review
+  candidate for core under any interval.
+- The conviction-path flex sizing work (probability + catalyst amplifier) — that
+  is a separate cycle and must not ride along with a data-layer change.
+
+**Sequencing.** Do not start until PR #38's M5 (thematic lift draining literal
+cash below `literal_cash_floor_pct`) is closed and merged.
+
 ### 58. `catalyst_score` weight tuning — gated on graded outcome rows (LOW — data-gated, do not touch early)
 From the 2026-08-10 catalyst-sleeve-funnel session (entry **#57**). `src/collector/catalyst_screen.py`'s
 composite is deliberately EQUAL-WEIGHTED across its 6 components in v1 — the
