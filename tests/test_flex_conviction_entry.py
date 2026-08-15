@@ -13,7 +13,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from flex.config import FlexConfig  # noqa: E402
-from flex.entry import build_conviction_entry, cash_accommodation_shares  # noqa: E402
+from flex.entry import _cash_accommodation_shares, build_conviction_entry  # noqa: E402
 
 CFG = FlexConfig()
 EQUITY = 1_000_000.0
@@ -121,7 +121,7 @@ def test_no_bars_skips():
 # --- B5 cash accommodation ---------------------------------------------------
 
 def test_cash_accommodation_no_clamp_when_room_is_ample():
-    out = cash_accommodation_shares(
+    out = _cash_accommodation_shares(
         proposed_shares=100, entry_price=100.0,
         literal_cash_usd=50_000.0, sgov_usd=20_000.0, equity=EQUITY, cfg=CFG,
     )
@@ -131,7 +131,7 @@ def test_cash_accommodation_no_clamp_when_room_is_ample():
 def test_cash_accommodation_clamps_when_literal_cash_thin():
     # literal_cash_floor_pct=0.75% of 1,000,000 = 7,500. Only 8,000 literal
     # cash available -> room = 500 -> 5 shares at $100, well under 100 proposed.
-    out = cash_accommodation_shares(
+    out = _cash_accommodation_shares(
         proposed_shares=100, entry_price=100.0,
         literal_cash_usd=8_000.0, sgov_usd=100_000.0, equity=EQUITY, cfg=CFG,
     )
@@ -143,7 +143,7 @@ def test_cash_accommodation_clamps_when_cash_sleeve_thin():
     # cash_sleeve_floor_pct=5.0% of 1,000,000 = 50,000. literal+SGOV = 51,000
     # -> sleeve room = 1,000 -> 10 shares, binding even though literal cash
     # alone (30,000) has plenty of room -- the sleeve-level floor governs.
-    out = cash_accommodation_shares(
+    out = _cash_accommodation_shares(
         proposed_shares=100, entry_price=100.0,
         literal_cash_usd=30_000.0, sgov_usd=21_000.0, equity=EQUITY, cfg=CFG,
     )
@@ -152,7 +152,7 @@ def test_cash_accommodation_clamps_when_cash_sleeve_thin():
 
 
 def test_cash_accommodation_zero_room_yields_zero_shares():
-    out = cash_accommodation_shares(
+    out = _cash_accommodation_shares(
         proposed_shares=100, entry_price=100.0,
         literal_cash_usd=1_000.0, sgov_usd=0.0, equity=EQUITY, cfg=CFG,
     )
@@ -160,7 +160,7 @@ def test_cash_accommodation_zero_room_yields_zero_shares():
 
 
 def test_cash_accommodation_zero_proposed_shares_is_not_clamped():
-    out = cash_accommodation_shares(
+    out = _cash_accommodation_shares(
         proposed_shares=0, entry_price=100.0,
         literal_cash_usd=1_000.0, sgov_usd=0.0, equity=EQUITY, cfg=CFG,
     )
@@ -174,3 +174,49 @@ def test_build_conviction_entry_wires_cash_accommodation_end_to_end():
     )
     assert r["funding_clamped"] is True
     assert r["binding"] == "cash_floor"
+
+
+def test_KNOWN_LIMITATION_ladder_collapses_to_one_share_count_thin_literal_cash():
+    """PR #41 M-A finding, deliberately NOT fixed (decision gate, FOLLOWUPS
+    #75) -- pins the CURRENT, confirmed-broken behavior so a future session
+    does not assume this already works, and so the eventual fix (whichever
+    option Jorge picks) has to consciously update or delete this test.
+
+    Reproduces the reviewer's real-book numbers: equity ~$102k, literal cash
+    ~1.5% of equity, SGOV ~7.7% of equity. `_cash_accommodation_shares` funds
+    a conviction entry from LITERAL CASH ALONE (the flex engine cannot sell
+    SGOV -- confirmed via a blocking sub-probe: SGOV is a permanent member of
+    `flex_separation_set`, and there is no same-session cross-engine trade
+    path from a ~15-min flex tick to the once-daily core executor). Every
+    conviction band -- low/moderate/high/very_high -- collapses to the SAME
+    clamped share count, because literal_room ($735) is smaller than every
+    band's pre-clamp notional and is the ONLY term that ever binds.
+    """
+    equity = 101_922.0
+    literal_cash = 1_499.0
+    sgov = 7_828.0
+    bands = {"low": 0.25, "moderate": 0.45, "high": 0.70, "very_high": 1.00}
+
+    results = {}
+    for band, mult in bands.items():
+        r = build_conviction_entry(
+            {"symbol": "AVGO", "sector": "Technology", "invalidation": 96.0},
+            _intraday([100] * 7), _daily(), "Q1", equity, 45, CFG, mult,
+            literal_cash_usd=literal_cash, sgov_usd=sgov,
+        )
+        results[band] = r["size_shares"]
+
+    # ALL four bands produce the identical share count -- the ladder is
+    # entirely collapsed by the literal-cash-only funding pool.
+    assert len(set(results.values())) == 1, (
+        f"expected the known-collapsed single value across all bands, got {results!r} "
+        "-- if this now varies, M-A has been fixed: update/remove this pinned test "
+        "and close FOLLOWUPS #75."
+    )
+    assert all(r["funding_clamped"] for r in (
+        build_conviction_entry(
+            {"symbol": "AVGO", "sector": "Technology", "invalidation": 96.0},
+            _intraday([100] * 7), _daily(), "Q1", equity, 45, CFG, mult,
+            literal_cash_usd=literal_cash, sgov_usd=sgov,
+        ) for mult in bands.values()
+    ))

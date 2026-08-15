@@ -1720,6 +1720,34 @@ def _grade_thematic_horizon(
     return out
 
 
+def _backfill_thematic_history_path() -> int:
+    """PR #41 M-B remediation — one-time (idempotent) migration: every
+    `ThematicHistory` row written BEFORE the `path` field existed (i.e. every
+    row from the 2026-08-14 audit's D6 launch, before this cycle added the
+    flex_conviction track) carries no `path` key at all. A naive `path eq
+    'core_thematic'` filter would silently drop that entire legacy history —
+    a second calibration bug shipped as the fix for the first. Backfilling
+    `path = "core_thematic"` onto every row lacking the field lets both
+    fixed queries below use a clean, explicit filter instead of an implicit
+    "absent means core" rule that breaks the next time a third path is
+    added. Cheap no-op on every run after the first (0 rows lack `path`).
+    Returns the backfilled row count (logged by the caller).
+    """
+    backfilled = 0
+    for r in query_entities("ThematicHistory"):
+        if r.get("path"):
+            continue
+        try:
+            upsert_entity("ThematicHistory", {
+                "PartitionKey": r["PartitionKey"], "RowKey": r["RowKey"],
+                "path": "core_thematic",
+            })
+            backfilled += 1
+        except Exception:  # noqa: BLE001
+            logger.exception("Thematic path backfill failed for %s", r.get("RowKey"))
+    return backfilled
+
+
 def _stamp_thematic_outcomes(fmp: FMPClient) -> None:
     """D6: grade matured `ThematicHistory` rows at each horizon (30/60/90d) —
     reuses the SAME perf-series-closes-first / FMP-fallback price resolution
@@ -1730,9 +1758,22 @@ def _stamp_thematic_outcomes(fmp: FMPClient) -> None:
     set once that horizon resolves, after which the row is no longer
     reprocessed. Unpriced maturity -> `indeterminate_data`, never guessed.
     Caller wraps in try/except — never breaks the collector.
+
+    PR #41 M-B fix: this stamper must NEVER grade a `flex_conviction` row —
+    it derives horizons from a fixed 30/60/90d ladder built for the core
+    book's cadence, wrong for a nomination with its own 15-30d `horizon_days`.
+    Two independent guards, both required (belt and braces — this exact
+    "audited the write, missed the read" shape has recurred five times
+    across two cycles; see FOLLOWUPS): (1) the query is now explicitly
+    scoped to `path eq 'core_thematic'` (requires `_backfill_thematic_history_
+    path` to have run first, so legacy pre-`path` rows aren't silently
+    dropped); (2) even so, a row is only graded if it carries the core
+    writer's own `horizon_30d`/`horizon_60d`/`horizon_90d` fields — a
+    flex_conviction row never does (it carries `horizon_days` instead), so it
+    is structurally ungradeable here regardless of what its `path` claims.
     """
     today = date.today()
-    rows = query_entities("ThematicHistory")
+    rows = query_entities("ThematicHistory", "path eq 'core_thematic'")
     pending = [r for r in rows if not r.get("outcome_status")]
     if not pending:
         return
@@ -1762,6 +1803,12 @@ def _stamp_thematic_outcomes(fmp: FMPClient) -> None:
         filed = str(r.get("filed_date") or "")[:10]
         if not sym or not filed or _max_matured_horizon(filed, today) < 30:
             continue
+        # Structural guard (2): a core row always carries all three horizon_Nd
+        # fields (written by _write_thematic_history); a flex_conviction row
+        # never does. Absent -> not shaped like a core row -> skip entirely,
+        # independent of the path filter above.
+        if not any(r.get(f"horizon_{h}d") for h in _OUTCOME_HORIZONS):
+            continue
         base = _px(sym, filed)
         base_spy = _px("SPY", filed)
         entity = {"PartitionKey": r["PartitionKey"], "RowKey": r["RowKey"],
@@ -1769,9 +1816,14 @@ def _stamp_thematic_outcomes(fmp: FMPClient) -> None:
         headline = None
         any_graded = False
         for h in _OUTCOME_HORIZONS:
-            if date.fromisoformat(filed) + timedelta(days=h) > today:
+            tgt = r.get(f"horizon_{h}d")
+            if not tgt:
                 continue
-            tgt = (date.fromisoformat(filed) + timedelta(days=h)).isoformat()
+            try:
+                if date.fromisoformat(str(tgt)[:10]) > today:
+                    continue
+            except ValueError:
+                continue
             grade = _grade_thematic_horizon(base, _px(sym, tgt), base_spy, _px("SPY", tgt))
             if grade:
                 any_graded = True
@@ -1799,9 +1851,18 @@ def _build_thematic_calibration(risk_limits: dict) -> dict:
     `p_up`/`actual_up_60d` pairs) into `{sample_size, brier_score, hit_rate,
     damping_factor}` for the `thematic_conviction.calibration` snapshot field.
     Reuses the pure `_thematic_brier`/`_thematic_damping_factor` — this
-    function only queries + shapes the pairs."""
+    function only queries + shapes the pairs.
+
+    PR #41 M-B fix: explicitly scoped to `path eq 'core_thematic'` — this
+    query previously had NO path filter at all, so a resolved `flex_
+    conviction` row (which `actual_up_60d` the OLD unfiltered
+    `_stamp_thematic_outcomes` would have mis-graded onto it) silently
+    polluted the core thematic Brier/damping track. Requires `_backfill_
+    thematic_history_path` to have run first so legacy pre-`path` rows
+    aren't dropped.
+    """
     tc_cfg = risk_limits.get("thematic_conviction") or _RISK_LIMITS_DEFAULTS["thematic_conviction"]
-    rows = query_entities("ThematicHistory", "outcome_status eq 'resolved'")
+    rows = query_entities("ThematicHistory", "path eq 'core_thematic' and outcome_status eq 'resolved'")
     pairs: list[tuple[float, float]] = []
     for r in rows:
         p_up = r.get("p_up")
@@ -3422,6 +3483,17 @@ def run() -> None:
         _stamp_switch_outcomes(fmp)
     except Exception:  # noqa: BLE001
         logger.exception("Switch stamping failed (non-fatal)")
+
+    # --- PR #41 M-B fix: backfill path="core_thematic" onto every legacy row ---
+    # BEFORE either stamper/calibration query below scopes on it. Idempotent,
+    # cheap no-op after the first run.
+    try:
+        _backfilled = _backfill_thematic_history_path()
+        if _backfilled:
+            logger.info("ThematicHistory path backfill: %d legacy row(s) tagged core_thematic",
+                        _backfilled)
+    except Exception:  # noqa: BLE001
+        logger.exception("Thematic path backfill failed (non-fatal)")
 
     # --- D6 (2026-08-14 audit): grade matured thematic-conviction nominations ---
     try:
@@ -6685,10 +6757,17 @@ def _build_flex_eligibility(
     the conviction path because it didn't exist yet).
 
     Covers every `LEGACY_EXITS` name (both re-enterable and not) UNION every
-    live flex-candidates entry (static + dynamic) — never hand-maintained,
-    always DERIVED live from the same `flex_separation_set`/`FLEX_REENTERABLE`
-    /`LEGACY_EXITS` machinery the flex engine itself uses to decide
-    nominatability, plus the collector's own price-quarantine set.
+    live flex-candidates entry (static + dynamic) — never hand-maintained.
+
+    **PR #41 review (S-1) fix:** the `flex_nominatable` BOOLEAN itself now
+    comes directly from `flex_separation_set(...)` — the SAME authoritative
+    gate the flex engine checks before ever nominating a symbol — rather than
+    a hand-rolled reconstruction of pool membership from `roles_config()`.
+    Only the `reason` LABEL (which of several possibly-overlapping causes to
+    cite — e.g. XSD is both a semis pool member AND a non-reenterable legacy
+    exit) still inspects `pool_members`/`is_legacy`/`FLEX_REENTERABLE`/`held`
+    directly; that labeling can never disagree with the engine about WHETHER
+    a symbol is blocked, because it never decides that — only explains it.
 
     `core_re_entry`: `"closed"` for every `LEGACY_EXITS` name (core doctrine —
     a legacy exit never re-enters the core reference, regardless of its flex-
@@ -6696,6 +6775,7 @@ def _build_flex_eligibility(
     core name to begin with.
     """
     held = {str(s).upper() for s in (held_symbols or ())}
+    separation = flex_separation_set(frozenset(held))
     pool_members: set[str] = set()
     for r in roles_config():
         for m in r.get("pool", ()):
@@ -6708,12 +6788,14 @@ def _build_flex_eligibility(
         core_re_entry = "closed" if is_legacy else "not_applicable"
         if sym in (quarantined_symbols or ()):
             nominatable, reason = False, "price_quarantined"
-        elif sym in pool_members:
-            nominatable, reason = False, "core_pool_member"
-        elif is_legacy and sym not in FLEX_REENTERABLE:
-            nominatable, reason = False, "legacy_exit_not_reenterable"
-        elif is_legacy and sym in held:
-            nominatable, reason = False, "legacy_exit_held_winddown"
+        elif sym in separation:
+            nominatable = False
+            if sym in pool_members:
+                reason = "core_pool_member"
+            elif is_legacy and sym not in FLEX_REENTERABLE:
+                reason = "legacy_exit_not_reenterable"
+            else:
+                reason = "legacy_exit_held_winddown"
         else:
             nominatable, reason = True, None
         rows.append({

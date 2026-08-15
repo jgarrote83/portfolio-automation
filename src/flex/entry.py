@@ -245,7 +245,7 @@ def build_flex_entry(
     return out
 
 
-def cash_accommodation_shares(
+def _cash_accommodation_shares(
     proposed_shares: int,
     entry_price: float,
     literal_cash_usd: float,
@@ -270,6 +270,23 @@ def cash_accommodation_shares(
     Returns ``{"shares": int, "funding_clamped": bool}``. Non-positive
     inputs (equity/entry_price) degrade to 0 shares, clamped — fail-closed,
     never a divide-by-zero or a fabricated allowance.
+
+    **PR #41 M-A finding (confirmed empirically, not yet fixed — decision
+    gate, FOLLOWUPS #75):** ``room = min(literal_room, sleeve_room)`` funds a
+    conviction entry from LITERAL CASH ALONE — the flex engine has no
+    mechanism to sell SGOV (SGOV is a core pool member, permanently inside
+    `flex_separation_set`; there is also no same-session cross-engine trade
+    path from the ~15-min intraday flex tick to the once-daily core
+    executor). Against a representative book (equity ~$102k, literal cash
+    ~1.5%, SGOV ~7.7%), `literal_room` is the ONLY term that ever binds —
+    `sleeve_room` is structurally unreachable capacity, not a real second
+    funding source — so every conviction band collapses to the SAME clamped
+    share count regardless of `size_mult`. Confirmed via a blocking sub-probe
+    that same-session SGOV liquidation is NOT available and would require
+    breaking the flex/core Separation Contract to build. Deliberately NOT
+    fixed here — a ladder re-scope (shrink the bands to fit literal-cash-only
+    funding) or a new pre-market core-side literal-cash pre-fund step are both
+    real design choices Jorge must make, not something to infer silently.
     """
     if proposed_shares <= 0 or entry_price <= 0 or equity <= 0:
         return {"shares": 0, "funding_clamped": proposed_shares > 0}
@@ -417,7 +434,7 @@ def build_conviction_entry(
     shares, binding = sizing["size_shares"], sizing["binding"]
     funding_clamped = False
     if literal_cash_usd is not None and sgov_usd is not None:
-        accommodation = cash_accommodation_shares(
+        accommodation = _cash_accommodation_shares(
             shares, entry_price, literal_cash_usd, sgov_usd, equity, cfg,
         )
         shares = accommodation["shares"]

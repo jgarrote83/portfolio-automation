@@ -471,7 +471,7 @@ on pre-fix source (`git stash` isolation). Suite 1176→1272, ruff clean.
   `path`-aware skip: NO time stop at all on the conviction path — replaced entirely by
   a release-driven exit in `flex/handler.py` (fires when a held conviction symbol
   drops out of `flex_conviction.active[]`, i.e. the collector's hysteresis has
-  released it). **B5 cash accommodation** (`cash_accommodation_shares`) clamps a
+  released it). **B5 cash accommodation** (`_cash_accommodation_shares`) clamps a
   conviction entry's shares so it can never drain literal cash below `literal_cash_
   floor_pct` or the whole cash sleeve below `cash_sleeve_floor_pct` — a clamp, never a
   rejection ("size-floored ≠ impossible"), and the explicit M5 callback: the SAME
@@ -498,6 +498,54 @@ on pre-fix source (`git stash` isolation). Suite 1176→1272, ruff clean.
   choice — the whole point is entering EARLY, before a catalyst-style momentum
   confirmation would exist — never independently weighed). Two post-merge watch
   items — FOLLOWUPS #73/#74.
+- **PR #41 pre-merge remediation (same day, two blocking findings M-A/M-B, two
+  smaller S-1/S-2).** An audit against the installed branch found: Tasks B, D, and
+  E's catalyst-path regression guard all clean (0 mismatches across 600 sizing
+  combinations for the `size_flex_position` refactor; the base-rate design
+  correctly yields `('none', 0.0)` at the exact `p_up=0.52`/`base_rate_up=0.57` trap
+  it was designed for). Two blocking findings: **M-B** — `_stamp_thematic_outcomes`
+  and `_build_thematic_calibration` queried `ThematicHistory` with NO (or an
+  incomplete) `path` filter, so a `flex_conviction` row (identical `outcome_status:
+  ""` to a core row) was silently graded by the CORE stamper at the wrong
+  30/60/90d horizon and polluted the core Brier/calibration track — confirmed
+  empirically (a flex row's `actual_up_60d`/`p_up` got written by the core
+  stamper before the flex stamper ever saw it). Fixed with THREE parts, all
+  required: a one-time idempotent `_backfill_thematic_history_path` migration
+  (tags every legacy pre-`path` row `"core_thematic"` so a naive filter doesn't
+  silently drop history), explicit `path eq 'core_thematic'` scoping on both
+  broken queries, and a structural belt-and-braces guard (the core stamper now
+  keys each horizon off the row's OWN stored `horizon_30d`/`horizon_60d`/
+  `horizon_90d` fields rather than deriving them from `filed_date` — a flex row
+  never has these fields, so it is ungradeable here regardless of what `path`
+  claims). All four `ThematicHistory` query call sites audited and inventoried
+  (2 were already correct). **M-A** — `_cash_accommodation_shares` funds a
+  conviction entry from `min(literal_room, sleeve_room)`, but the flex engine
+  cannot sell SGOV (a permanent `flex_separation_set` member; no same-session
+  cross-engine trade path exists to the once-daily core executor) — confirmed via
+  a blocking sub-probe BEFORE any fix was attempted, per instruction. Consequence,
+  reproduced against a representative book (equity ~$102k, literal cash ~1.5%,
+  SGOV ~7.7%): every conviction band collapses to the SAME clamped share count,
+  since `literal_room` is the only term that ever binds. **Deliberately NOT
+  fixed** — redesigning the funding pool is a real architecture decision (three
+  options recorded, none chosen) — see FOLLOWUPS #75. What WAS fixed
+  independent of that decision: the helper renamed to `_cash_accommodation_shares`
+  (private, matching `_size_conviction_position`'s convention), and prompt
+  doctrine now requires narrating `binding == "cash_floor"` explicitly whenever it
+  fires, zero or nonzero shares. **S-1**: `_build_flex_eligibility` grounds its
+  `flex_nominatable` boolean directly in `flex_separation_set(...)` (the SAME
+  authoritative gate the engine itself checks) instead of a hand-rolled
+  `roles_config()` reconstruction — 0 live divergence found, but the fix removes
+  the risk entirely; a permanent cross-check test runs the two side by side
+  across 4 holding scenarios. **S-2**: `flex_state.as_of` staleness doctrine
+  (carried from PR #40's stale-read fix) — the collector now correctly runs
+  pre-market, so `as_of` is normally the PRIOR trading day; the prompt must
+  narrate a non-today `as_of` block in the past tense with the date named. Suite
+  1272→1291 (19 new), ruff clean, every M-B/S-1 test confirmed failing on
+  pre-fix source via `git stash` isolation (M-A's fix is deliberately deferred,
+  so its test pins the CURRENT known-limitation behavior instead of a
+  before/after pair). Full pattern note: this is the SIXTH instance across two
+  cycles of "correct about what changed, wrong about the collection it joined"
+  — see FOLLOWUPS #76 for the new PR-template review gate this adds.
 
 **`quadrant_performance`** (FOLLOWUPS #12) answers the question the 2026-07-02 report exposed: the system rotated into Q3/Q4 while the Q3 basket was the worst performer since inception, and nothing forced the analyzer to engage with that tension. Built by `collector._build_quadrant_performance` right after the `performance` scoreboard so it reuses the SAME in-run perf series (`read_perf_series()` result, never re-downloaded). Per Q1-Q4 bucket (current `QUADRANT_CONCENTRATE` membership): `ret_30d_pct`/`ret_60d_pct`/`ret_90d_pct` + `excess_Nd_pp` vs SPY — window returns mirror `web/api/function_app.py::_quadrant_series` semantics (base = first close INSIDE the window slice, via a deliberate pure copy `_quadrant_perf_series` kept in lock-step by hand since the SWA API can't import this module) — plus a **hysteresis scan**: `favored_streak` (consecutive sessions ending today the bucket has been in that day's `favored_bucket`), `streak_excess_pp` (basket cumulative excess vs SPY over the streak, based at the session BEFORE the streak began), `lagging_sessions` (the current run of sessions, recomputed AS-OF each session — not just today's number — where that streak excess was negative), and `suspect` (true when the bucket is favored today AND `lagging_sessions >= suspect_after_sessions`, config `risk-limits.json → quadrant_performance`, default 10). Top level: `{as_of, spy_ret_30d_pct, buckets, favored_today, roster_note}` (`roster_note` flags that early-window returns under-represent the 2026-07-10 roster-revision's new members, same caveat as the `/performance` web chart). **Describe-only — never touches `reference_weights` or any deterministic gate**; the analyzer's prompt (Section 1 echo + a mandatory confronting paragraph when any favored bucket is `suspect`, raising the evidentiary bar for INCREASING that bucket's weight further) is the only consumer. A `regime_suspect` layer OverrideHistory row is written per suspect bucket per report day (analyzer `_write_regime_suspect_history`) so #13's monthly review can grade "what did we do when the market disagreed, and who was right" — **no stamper grades these rows yet** (`_stamp_override_outcomes` requires override-shaped `falsifier_date`/`sleeve`/`direction` fields via `_grade_override`; `_stamp_switch_outcomes` hardcodes an allow-list of `layer` values that excludes `regime_suspect`); a future grading pass would need a third stamping path comparing the favored bucket's forward return vs SPY from the flagged date, mirroring `_grade_switch`'s shape rather than `_grade_override`'s.
 

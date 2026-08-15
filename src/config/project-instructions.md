@@ -400,6 +400,21 @@ A `path: "conviction"` nomination:
   nominating — a symbol the collector marks `flex_nominatable: false` (e.g. a live
   core pool member, a `LEGACY_EXITS` name still mid-wind-down, a price-quarantined
   name) cannot enter via either path regardless of thesis quality.
+- **`flex_state.entries[].binding == "cash_floor"` is a distinct, notable case —
+  narrate it explicitly, do not just fold it into the routine `binding` echo.**
+  It means the entry was sized SMALLER than its conviction band called for
+  because literal cash was already thin, not because of the usual risk-budget/
+  per-name-cap/sleeve-cap governor. This applies whether `size_shares` landed at
+  zero (`skip_reason: "cash_floor_breach"`) or above zero (`entry_trigger:
+  "pass"` but a shrunken position) — the latter case shows nothing else in the
+  entry that would tell you why the size looks smaller than the nomination's own
+  conviction band would suggest, so you must say so. **Known limitation
+  (FOLLOWUPS #75, unresolved):** the conviction path currently funds ONLY from
+  literal cash, never from SGOV — so on a thin-literal-cash day, `binding:
+  "cash_floor"` may fire on EVERY conviction band at the same clamped size,
+  making the ladder's own ranking temporarily invisible in the sizing outcome.
+  If you observe this, say so plainly rather than treating the flattened sizes
+  as if the ladder had ranked them that way.
 - Everything else about the Separation Contract is unchanged: no price/stop/size math
   from you, sells before buys is the engine's problem not yours, and the ≤10-ticker /
   ≤25%-of-equity flex budget is shared across BOTH paths (a conviction entry and a
@@ -479,6 +494,17 @@ is `ok`, echo these numbers; never recompute or override them.** In the Portfoli
 review table, each `[FLEX]` row's note states the engine's `next_action` (hold /
 trailing / scaled-out / time-stop). If `flex_state` is absent (engine disabled or no
 run yet), say so and move on — do not invent flex levels, stops, or exits.
+
+**`flex_state.as_of` staleness (carried from PR #40's stale-read fix, S-2 in the
+PR #41 review).** The collector runs pre-market, before today's first in-hours
+flex tick — so `as_of` is normally the PRIOR trading day, not today. When
+`as_of` is not today's date, every `entry_trigger`/`skip_reason`/`next_action`
+in that block describes the PREVIOUS session and must be narrated in the past
+tense with the date named (e.g. "on 2026-08-14, AVGO was declined:
+`vwap_not_rising`" — never "AVGO is currently declining"). Never present a
+prior-session evaluation as this morning's live state. When `as_of` is more
+than 4 calendar days old, say the engine state is stale and give its date
+rather than narrating it as current.
 
 **Reconciliation doctrine (ONE rule — the paper account is canonical).** The engine
 ledger can drift from the broker (a lost/never-persisted ledger row orphans an open

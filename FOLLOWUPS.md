@@ -453,6 +453,13 @@ against). `catalyst_size_mult` (1.5) and `catalyst_promotes_band` (both on by
 default) are covered separately — see entry #71 (roughly a 2x combined effect when
 both fire together).
 
+**BLOCKED on entry #75 (PR #41 review, M-A) for the `conviction.ladder` half only.**
+Every band currently clamps to the SAME share count on a thin-literal-cash day (the
+cash-accommodation funding pool collapse) — sanity-checking `size_mult` values against
+a symptom that can't reach the book yet would be reviewing numbers in a vacuum.
+Resolve #75 first, then revisit this ladder's numbers. The `thematic_conviction.ladder`
+half is unaffected and can be reviewed independently.
+
 ### 64. D-6 decision gate — thematic lift on a non-selected pool member (HIGH — architecture decision, cross-refs #63)
 From the 2026-08-14 session. Task D4 rule 3 excludes a thematic nomination on a
 non-selected pool member (e.g. SOXX while `semis.selected = SMH`) with reason
@@ -635,6 +642,107 @@ sells the full remaining `qty_current`, cancels the resting stop first, and writ
 `conviction_released`-tagged closed-trade record exactly like the existing
 `time_stop`/`scale_out` paths (never observed live; unit-tested against a fake
 client only).
+
+### 75. M-A decision gate — the flex conviction path's cash-accommodation clamp collapses the entire ladder (HIGH — architecture decision, blocking, cross-refs #63/#70)
+From the PR #41 review round (M-A, blocking finding). `_cash_accommodation_
+shares` (`flex/entry.py`) funds a conviction entry from `min(literal_room,
+sleeve_room)` — but the flex engine has NO mechanism to sell SGOV to realize
+`sleeve_room`: SGOV is a permanent member of `flex_separation_set` (the same
+separation contract that keeps flex from ever touching a core pool member),
+and there is no same-session cross-engine trade path from the ~15-min
+intraday flex tick to the once-daily core executor (09:35 ET). Confirmed via
+a blocking sub-probe before any fix was attempted, per instruction.
+
+**Consequence, reproduced empirically against a representative book**
+(equity ~$101,922, literal cash ~$1,499 [1.47%], SGOV ~$7,828 [7.68%]):
+`literal_room` ($735) is smaller than every conviction band's pre-clamp
+notional and is the ONLY term that ever binds, so **every band — low/
+moderate/high/very_high — collapses to the identical clamped share count**
+(7 shares / $700 in the reproduction). The entire ladder — base rates, edge
+computation, hysteresis, the catalyst amplifier — resolves to one number
+whenever literal cash is this thin. Pinned as a known-limitation test
+(`tests/test_flex_conviction_entry.py::
+test_KNOWN_LIMITATION_ladder_collapses_to_one_share_count_thin_literal_cash`)
+so a future session doesn't assume this already works; the eventual fix must
+consciously update or delete that test and close this entry.
+
+**Deliberately NOT fixed this cycle** — redesigning the funding pool is a
+real architecture decision, not something to infer silently (per explicit
+instruction: "stop and report" rather than re-scope on its own authority).
+Three real options, presented without a recommendation:
+- **Option 1 — cross-engine SGOV pre-fund.** A new, ONCE-DAILY, core-side
+  step (NOT same-session, NOT flex-triggered) that sweeps a small SGOV
+  amount to literal cash BEFORE the flex engine's morning entry window,
+  whenever `flex_conviction.active[]` carries a nonzero-target nomination.
+  Preserves the Separation Contract (core still only trades on its own daily
+  cadence; flex still never places an SGOV order itself) but is real new
+  scope — needs its own design pass (who decides the sweep size, does it
+  compete with the core SGOV carve-out doctrine already in `risk-limits.json
+  → cash_sleeve_band_pct`, what happens on a day the core executor is
+  skipped).
+- **Option 2 — re-scope the ladder to fit literal-cash-only funding.**
+  Shrink `conviction.ladder`'s `size_mult` values (or `risk_budget_pct`) so a
+  `very_high` band's pre-clamp notional realistically fits inside a typical
+  literal-cash balance without needing SGOV capacity at all. Simplest, but
+  makes the conviction path materially smaller than currently designed, and
+  changes the SAME numbers already flagged unreviewed in entry #63 above —
+  do not sanity-check #63's ladder numbers until this is resolved, since
+  every band clamps to the same value regardless of what they're set to.
+- **Option 3 — accept the collapse as a rare/thin-cash-day edge case.** If
+  literal cash is routinely NOT this thin in practice (the reproduction used
+  a specific historical snapshot), the collapse may be uncommon enough that
+  the existing clamp — now with the visibility fix (`binding: "cash_floor"`
+  narrated explicitly, S-2's sibling M-A "also fix") — is an acceptable
+  interim state. Needs empirical data on how often literal cash sits below
+  the threshold where every band starts colliding, which does not exist yet.
+
+**What WAS fixed this cycle (independent of the funding-pool decision):**
+`_cash_accommodation_shares` renamed from `cash_accommodation_shares` (now
+correctly private, matching `_size_conviction_position`'s convention — it has
+no external callers outside `flex/entry.py` itself and tests). Prompt
+doctrine now requires narrating `binding == "cash_floor"` explicitly whenever
+it fires, whether the resulting position is zero or nonzero shares (closes
+the "silent size reduction" visibility gap the M5 incident already
+established as this project's recurring failure mode).
+
+### 76. Process item — "what else is in this collection?" PR review gate (MEDIUM — process, cross-refs #62/#68/#70)
+From the PR #41 review round. Six instances of ONE pattern across two cycles:
+a fix correct about the thing it changed, wrong about the collection it
+joined.
+1. PR #38 — a ceiling-pressure test used 40pp where the real cap was 8.
+2. PR #38 — a pool-member test passed an override map where production
+   passes an empty one.
+3. PR #38 — a swept invariant summed a total that excluded the exact field
+   being drained.
+4. PR #39 — the M1 exclusion list named `"SGOV"` and missed its sibling
+   `"__cash__"`.
+5. PR #40 — clean (no instance).
+6. PR #41 — `path` was added to the two `ThematicHistory` writers and the two
+   NEW query call sites, but missed on the two PRE-EXISTING queries
+   (`_stamp_thematic_outcomes`, `_build_thematic_calibration`) — fixed as M-B
+   in this same PR.
+
+Each fix was correct about the thing it changed and wrong about the
+collection it joined. The code has improved every round while the pattern
+held — not a competence issue, a missing review step. **Add to the PR
+template as an explicit gate:**
+
+> **What else is in this collection, and did I check all of it?**
+> List every member of any list, dict, table, or query set this change
+> touches, and state for each whether it was verified.
+
+For M-B specifically, the full inventory of every
+`query_entities("ThematicHistory"...)` call site (there were exactly four)
+and its filter, as this gate would have required:
+1. `_stamp_thematic_outcomes` — was UNFILTERED (the bug) → now
+   `path eq 'core_thematic'`.
+2. `_build_thematic_calibration` — was `outcome_status eq 'resolved'` only
+   (the bug) → now `path eq 'core_thematic' and outcome_status eq
+   'resolved'`.
+3. `_stamp_flex_conviction_outcomes` — already correct,
+   `path eq 'flex_conviction'`.
+4. `_build_flex_conviction_calibration` — already correct,
+   `path eq 'flex_conviction' and outcome_status eq 'resolved'`.
 
 ### 58. `catalyst_score` weight tuning — gated on graded outcome rows (LOW — data-gated, do not touch early)
 From the 2026-08-10 catalyst-sleeve-funnel session (entry **#57**). `src/collector/catalyst_screen.py`'s

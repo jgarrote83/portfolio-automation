@@ -152,6 +152,23 @@ _APPLICABLE_SET_SENTINELS = (
     "is_fund",
 )
 
+# PR #41 review round — M-A "also fix" (surface the clamped-but-nonzero cash-
+# floor case explicitly, not just via a silent binding echo).
+_CASH_FLOOR_VISIBILITY_SENTINELS = (
+    'binding == "cash_floor"',
+    "cash_floor_breach",
+    "FOLLOWUPS #75",
+)
+
+# PR #41 review round — S-2 (carried from PR #40): flex_state.as_of staleness
+# doctrine, since the collector now correctly runs pre-market and as_of is
+# normally the PRIOR trading day.
+_FLEX_STATE_AS_OF_STALENESS_SENTINELS = (
+    "flex_state.as_of` staleness",
+    "must be narrated in the past",
+    "say the engine state is stale",
+)
+
 
 def _text() -> str:
     return _PROMPT.read_text(encoding="utf-8")
@@ -271,3 +288,15 @@ def test_applicable_set_doctrine_present():
     text = _text()
     for s in _APPLICABLE_SET_SENTINELS:
         assert s in text, f"missing applicable-set sentinel: {s!r}"
+
+
+def test_cash_floor_visibility_doctrine_present():
+    text = _text()
+    for s in _CASH_FLOOR_VISIBILITY_SENTINELS:
+        assert s in text, f"missing cash-floor-visibility sentinel: {s!r}"
+
+
+def test_flex_state_as_of_staleness_doctrine_present():
+    text = _text()
+    for s in _FLEX_STATE_AS_OF_STALENESS_SENTINELS:
+        assert s in text, f"missing flex_state.as_of staleness sentinel: {s!r}"
