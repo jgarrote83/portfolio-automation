@@ -670,17 +670,69 @@ def _symbols_notional(positions, symbols) -> float:
 
 
 def _persist(today, decisions, quadrant, ledger, executions, quadrant_basis: str = "") -> None:
-    flex_state = {
-        "as_of": today, "quadrant": quadrant, "quadrant_basis": quadrant_basis,
-        "reconcile": decisions.get("reconcile", {}),
-        "exits": decisions.get("exits", []),
-        "entries": decisions.get("entries", []),
-        "held": sorted(ledger.keys()),
-    }
-    try:
-        write_json_blob("flex-state", f"{today}.json", flex_state)
-    except Exception:  # noqa: BLE001
-        logger.exception("flex-state write failed")
+    """Persist this tick's state, decisions log, and executions.
+
+    2026-08-14 fix (flex-state stale-read incident): `flex-state/{date}.json`
+    is a single blob overwritten every ~15-min tick, all 24 hours ("0 */15 * *
+    * 1-5" — the clock gate, not the cron, does the real gating). Every
+    trading day's LAST tick is unavoidably a post-close "market_closed" tick
+    (STEP 1's early return, before entry/exit evaluation ever runs that tick)
+    — so before this fix, the blob's FINAL state for ANY day was always the
+    empty closed-tick stub, regardless of which day's file a reader looked
+    at. The collector's own walkback (`for back in range(0, 8)`, taking the
+    first EXISTING file) then found today's own empty pre-market stub at
+    back=0 and never reached back far enough to see yesterday's real
+    end-of-day activity — confirmed empirically: two real nominations
+    (AVGO/ENTG) were evaluated 26 times each on 2026-08-11 per the
+    `flex-decisions` JSONL log, yet every downstream snapshot showed
+    `flex_state.entries: []` as if nothing had ever been evaluated.
+
+    Fix, write-side only (the reader's existing walkback is already correct
+    once "the file exists" becomes a meaningful signal — verified
+    `read_json_blob` returns `None` on a missing blob, never raises, so the
+    walkback already tolerates gaps):
+    - On a market-closed tick, if today's file does not exist yet (a
+      pre-market tick before this trading day has had ANY real activity),
+      skip the flex-state write entirely — the file stays absent and the
+      collector's walkback falls through to the PRIOR trading day's file,
+      which (by this same rule) correctly holds ITS last real activity.
+    - On a market-closed tick, if today's file DOES already exist (a real
+      in-hours tick ran earlier today), carry its `entries`/`exits`/
+      `quadrant`/`quadrant_basis` forward untouched — only the administrative
+      fields (`as_of`, `reconcile`, `held`) refresh every tick.
+    - An in-hours tick (`quadrant_basis != "market_closed"`) is unchanged:
+      always writes its own real evaluation.
+    """
+    if quadrant_basis == "market_closed":
+        try:
+            existing = read_json_blob("flex-state", f"{today}.json")
+        except Exception:  # noqa: BLE001
+            existing = None
+        if existing is not None:
+            flex_state = {
+                **existing,
+                "as_of": today,
+                "reconcile": decisions.get("reconcile", {}),
+                "held": sorted(ledger.keys()),
+            }
+            try:
+                write_json_blob("flex-state", f"{today}.json", flex_state)
+            except Exception:  # noqa: BLE001
+                logger.exception("flex-state write failed")
+        # else: no real tick has run yet today — deliberately skip the write.
+    else:
+        flex_state = {
+            "as_of": today, "quadrant": quadrant, "quadrant_basis": quadrant_basis,
+            "reconcile": decisions.get("reconcile", {}),
+            "exits": decisions.get("exits", []),
+            "entries": decisions.get("entries", []),
+            "held": sorted(ledger.keys()),
+        }
+        try:
+            write_json_blob("flex-state", f"{today}.json", flex_state)
+        except Exception:  # noqa: BLE001
+            logger.exception("flex-state write failed")
+
     append_jsonl_blob("flex-decisions", f"{today}.jsonl", decisions)
     if executions:
         try:
