@@ -7447,6 +7447,21 @@ def _build_reference_weights(
     # * scale`). If even that is exhausted, the thematic lifts THEMSELVES are
     # scaled down pro-rata to fit — `thematic_budget_clamped: true` with the pp
     # dropped — fail toward a smaller thematic position, never a broken total.
+    #
+    # M5 fix (2026-08-14, PR #38 post-merge finding): "never the cash sleeve"
+    # above was only half-enforced — the reduction pool excluded the "SGOV" key
+    # by name but NOT the "__cash__" placeholder key that holds the literal-cash
+    # buffer (`_CASH_BUFFER_PCT`), which is ALSO a key in `weights` at this point
+    # and is not in `active_names` either. A thematic lift therefore drained
+    # literal cash from its ~1.5% target down to 0.096% (below
+    # `literal_cash_floor_pct` = 0.75%) at just a 2.5pp lift, while
+    # `cash_sleeve_target_pct` (computed independently, upstream of this step)
+    # stayed frozen — the two figures, plus `by_quadrant.cash_sleeve`, went out
+    # of agreement with each other with nothing surfacing it. Literal cash has
+    # its OWN floor (`literal_cash_floor_pct`) which is a different concept from
+    # a core sleeve's `sleeve_floor_pct_of_core` entirely — `_headroom("__cash__")`
+    # using the core floor as the reference point is meaningless. Excluded
+    # alongside "SGOV" now.
     ceiling_pressure = False
     ceiling_pressure_pp = 0.0
     thematic_applied: dict[str, float] = {}
@@ -7487,8 +7502,8 @@ def _build_reference_weights(
 
             reducible_names = [
                 t for t in weights
-                if t not in lifted_names and t != "SGOV" and t not in exempt_held
-                and t not in intl_targets
+                if t not in lifted_names and t not in ("SGOV", "__cash__")
+                and t not in exempt_held and t not in intl_targets
             ]
             pool1 = [t for t in reducible_names if t not in active_names]   # non-active first
             pool2 = [t for t in reducible_names if t in active_names]       # spillover only
