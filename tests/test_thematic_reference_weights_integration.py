@@ -271,3 +271,36 @@ def test_mixed_eligible_and_ineligible_entries_only_eligible_applies():
     assert out["target_weights_pct"].get("EUAD") is None
     reasons = {e["symbol"]: e["reason"] for e in out["thematic_lean"]["rejected_at_apply"]}
     assert reasons == {"EUAD": "legacy_exit"}
+
+
+# --- M5 (post-merge finding): literal cash must never fund the thematic lift -
+
+def test_literal_cash_never_drained_by_thematic_lift():
+    """M5: the M1 reduction-pool exclusion list named 'SGOV' but not the
+    '__cash__' placeholder key that holds the literal-cash buffer -- a
+    thematic lift drained literal_cash_target_pct from 1.5% to 0.096%
+    (below literal_cash_floor_pct = 0.75%) at just a 2.5pp lift, with
+    cash_sleeve_target_pct (computed upstream, independently) staying frozen
+    and by_quadrant.cash_sleeve disagreeing with both."""
+    baseline = _build(None)
+    cash_baseline = baseline["literal_cash_target_pct"]
+    sleeve_target_baseline = baseline["cash_sleeve_target_pct"]
+    for pp in (1.0, 2.5, 4.0, 8.0, 25.0):
+        out = _build({"available": True, "enabled": True, "active": [
+            {"symbol": "VDE", "applied_pct_of_equity": pp},
+        ]})
+        assert out["literal_cash_target_pct"] == cash_baseline, f"lift={pp}"
+        assert out["cash_sleeve_target_pct"] == sleeve_target_baseline, f"lift={pp}"
+        assert out["by_quadrant"]["cash_sleeve"] == sleeve_target_baseline, f"lift={pp}"
+
+
+def test_literal_cash_target_never_below_floor_across_full_lift_range():
+    floor_pct = float(CFG.get("literal_cash_floor_pct", 0.75))
+    cap = float(CFG["thematic_conviction"]["aggregate_cap_pct_of_equity"])
+    pp = 0.0
+    while pp <= cap + 4.0:
+        out = _build({"available": True, "enabled": True, "active": [
+            {"symbol": "VDE", "applied_pct_of_equity": pp},
+        ]})
+        assert out["literal_cash_target_pct"] >= floor_pct, f"lift={pp}"
+        pp += 1.0
