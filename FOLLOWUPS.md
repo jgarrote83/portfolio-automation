@@ -3,7 +3,17 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-08-14 (flex-conviction-path cycle: a SECOND flex-nomination path requiring no dated catalyst, base-rate-relative sizing, `flex_eligibility`, applicable-set rankability, Layer 2 profile split, branch `feat/20260814-flex-conviction-path`).**
+**▶ START HERE — last session 2026-08-21 (quadrant selection reachability: diagonal projection, inflation-confirmation semantics, structural tape scores, per-axis divergence eligibility, reachable accountability, inert-lean diagnostic, branch `fix/20260821-quadrant-reachability`).**
+See entry **#77** below for the full per-task design (Tasks A/C/D/B/E/F) and the
+required end-to-end probe showing exactly what decision **D-3** (entry **#78**)
+buys — at the current default the reachability fix has nothing to compose with
+(inflation side inactive, 1-of-3 sources); at the alternative it reaches Q2 as
+designed. Two more open decision/deferral items from this cycle: **#79** (D-6
+follow-on — suppress the inert lean once its live frequency is known) and
+**#80** (GDPNow within-quarter smoothing, deferred, cross-refs #54). Suite
+1291 → 1330 passed, ruff clean. **Auto-merge: NO, human review required.**
+
+**▶ Prior session 2026-08-14 (flex-conviction-path cycle: a SECOND flex-nomination path requiring no dated catalyst, base-rate-relative sizing, `flex_eligibility`, applicable-set rankability, Layer 2 profile split, branch `feat/20260814-flex-conviction-path`).**
 See entry **#70** below for the full per-task design (Tasks A0/B/C/D/E/F), the
 corrected A0 probe premise (08-11 filed real nominations — the "5-session drought"
 framing was wrong), the three unresolved decision gates (**#63** re-scoped/**#71**/
@@ -743,6 +753,58 @@ and its filter, as this gate would have required:
    `path eq 'flex_conviction'`.
 4. `_build_flex_conviction_calibration` — already correct,
    `path eq 'flex_conviction' and outcome_status eq 'resolved'`.
+
+### 78. D-3 decision gate — `re_risk_min_confirmations` 2-of-3 vs 1-of-3 for the inflation side (HIGH — sizing/sensitivity decision, cross-refs #77)
+From the 2026-08-21 quadrant-selection-reachability cycle (entry **#77**).
+Task B added a THIRD confirmation source (`market_implied_quadrant.
+structural_inflation_score`) to the inflation side's re-risk bar, but kept
+`re_risk_min_confirmations` at its existing value of 2 — now counted against
+3 possible sources instead of 2. **Empirically verified via the required
+end-to-end probe (entry #77's PR body): at `2`, the CURRENT 2026-08-21
+readings give the inflation side only 1 of 3 (breakeven/oil both below their
+own thresholds; only the tape agrees) — it does not activate at all, so
+Task A's joint (diagonal) composition never gets a second re-risk side to
+compose with, and the system stays projecting Q1 (growth-only, orthogonal).
+At `1`, the inflation side activates (Q3, re-risk) alongside the growth side
+(Q1, re-risk) and Task A composes the diagonal correctly to Q2.** This is the
+literal difference between "the reachability fix ships but is currently
+inert" and "the reachability fix actually reaches Q2 in the observed
+window." Recommendation on record (the prompt's own): lean `1`, but only
+*with* Task C's basket-momentum-exclusion fix shipped (it is) — mitigating
+factors: `confirm_sessions=2` and `max_session_delta_frac=0.10` still throttle
+any resulting lean; against: the 2-of-2 bar was partly what the 2026-08-12
+VDE whipsaw remediation leaned on (though that whipsaw's root cause — the
+stale-oil-leg bug — is separately fixed). **Genuinely open — needs Jorge's
+call before or shortly after merge; shipped at the conservative default (2)
+so merging does not silently activate a new, differently-sized live lean.**
+
+### 79. D-6 follow-on — suppress the inert lean once diagnosed frequency is known (MEDIUM — architecture decision, data-gated, cross-refs #77)
+From the 2026-08-21 quadrant-selection-reachability cycle (entry **#77**).
+Task F's inert-lean diagnostic (`transition_watch.inert`/`lean_blocked_names`/
+`lean_deployable_fraction`) is diagnose-only this cycle by explicit decision
+(D-6) — no allocation change. Once the diagnostic has run live for a while
+and the actual inert-lean frequency is known, a follow-up PR should decide
+whether an inert (or partially-inert) lean should be automatically
+suppressed (fall back to the pre-lean base allocation, or redistribute the
+lean's budget across only the DEPLOYABLE names in the projected concentrate)
+rather than merely narrated. Track the live frequency before designing the
+fix — do not guess at a suppression rule from zero observed sessions.
+
+### 80. GDPNow within-quarter smoothing / inflation de-staling candidates (MEDIUM — deliberately deferred, cross-refs #54)
+From the 2026-08-21 quadrant-selection-reachability cycle (entry **#77**) —
+explicitly out of scope for that cycle (§7), logged here per instruction
+rather than attempted inline. The raw oldest→newest GDPNow vintage path
+(±0.1 band, `_confirm_axis_direction`) over-reads early-quarter nowcast
+noise — related to, but more specific than, entry **#54**'s "growth-axis
+recency slope" deferral from the 2026-08-06 audit. Candidate de-staling
+inputs for a later cycle: the Cleveland Fed / NY Fed nowcasts (independent
+of the Atlanta Fed GDPNow this system already tracks) and the Cleveland Fed
+median/trimmed-mean CPI (a genuinely different inflation-persistence
+estimator, not just a fresher print of the same core CPI/PCE series). Do
+not implement without a specific empirical probe showing the current
+±0.1 band actually misfires on a real vintage-boundary case — the diagnosis
+here is a hypothesis, not yet independently confirmed the way this session's
+other findings (F1-F7) were.
 
 ### 58. `catalyst_score` weight tuning — gated on graded outcome rows (LOW — data-gated, do not touch early)
 From the 2026-08-10 catalyst-sleeve-funnel session (entry **#57**). `src/collector/catalyst_screen.py`'s
@@ -1952,6 +2014,166 @@ fills (or explains a deviation).
 ---
 
 ## Done
+### 77. 2026-08-21 session: Quadrant selection reachability — diagonal projection, inflation-confirmation semantics, structural tape scores, per-axis divergence eligibility, reachable accountability, inert-lean diagnostic — Done, branch `fix/20260821-quadrant-reachability` (auto-merge: NO, human review required)
+Mission: the book lost to SPY on SELECTION, not cash drag, over 2026-05-26→08-21
+(portfolio +0.33% vs SPY +1.60%; Q2 Reflation +4.82%/+3.22pp excess and Q3
+Stagflation +4.06%/+2.46pp excess carried all the alpha while the book sat in
+Q1/Q4 the whole window). This is a defect-repair cycle fixing the STRUCTURAL
+reasons the machinery could never reach Q2/Q3 — no momentum overlay, no
+probability-vector regime model (both explicitly out of scope, §7 of the
+prompt). **Renumbering note:** the originating prompt specified entries
+`#71`/`#72`, but those numbers were already in use (the 2026-08-14
+flex-conviction-path cycle's own decision gates) — used the next free
+numbers instead (`#77` main entry, `#78`/`#79`/`#80` for the decision-gate
+and deferral follow-ups) rather than overwrite existing entries.
+
+- **Task A (F1 root cause) — joint (diagonal) quadrant projection.**
+  `_project_quadrant`/`_project_quadrant_growth` each move along ONE axis
+  only, holding the other fixed — from a realized quadrant, only the two
+  ORTHOGONALLY-ADJACENT quadrants were ever reachable; the diagonal (e.g.
+  Q4→Q2) was structurally unreachable no matter how strongly both leading
+  signals agreed. New `_project_quadrant_joint` (thin `active_quadrant()`
+  wrapper) + `_build_transition_watch` now composes the diagonal when BOTH
+  sides are activatable AND BOTH resolve `re_risk` (D-2: any de-risk side
+  present bypasses composition entirely — spec §6 safety bias unchanged;
+  only-one-side-activatable is bit-identical to pre-Task-A). New config
+  `staged_fraction_re_risk_joint` (0.10, below the single-axis 0.15 per D-7 —
+  a two-axis posture change is bigger, start conservative). The existing
+  confirm/release hysteresis (`_confirm_transition_watch`, keyed on the
+  `(projected_quadrant, direction)` pair) needed NO changes — a composed pair
+  is automatically a new pair requiring its own 2-session confirmation,
+  verified by test rather than assumed.
+- **Task C (mandatory circularity guard) — structural (non-basket) tape
+  scores.** `_build_market_implied_quadrant`'s legacy `growth_score`/
+  `inflation_score` include `basket_momentum_20d`/`_60d` — literally the
+  quadrant baskets' own relative performance — so feeding them into
+  `transition_watch`/`reference_weights` would be performance-chasing
+  wearing a macro costume ("Q2 basket outperforming ⇒ inflation rising ⇒
+  lean into Q2"). New `structural_growth_score`/`structural_inflation_score`
+  (+ `structural_implied_quadrant`/`_growth`/`_inflation`/`_vote_count`/
+  `_confidence`) computed by IDENTICAL accumulation/threshold logic but with
+  parallel running totals incremented ONLY in the six per-signal-vote blocks
+  (copper/gold, XLY/XLP, DXY, breakevens, HY OAS, 2s10s) — never in the
+  basket-momentum loop — so they are basket-free BY CONSTRUCTION, not by
+  convention. Legacy fields are byte-identical (their code paths literally
+  untouched; regression-tested against captured pre-fix values). Only
+  `structural_*` may be consumed downstream for weighting (decision D-4,
+  mandatory) — basket momentum stays strictly describe-only, permanently.
+- **Task D (F5 fix) — per-axis divergence eligibility.** `_div_market_vs_
+  macro_quadrant`'s top-level `status` requires BOTH axes to jointly resolve
+  a concrete quadrant, so a decisive read on ONE axis was discarded whenever
+  the other happened to be quiet — 2026-08-21: growth flat (−0.073, inside
+  the 0.10 deadband) → quadrant "borderline" → the WHOLE divergence
+  indeterminate, discarding an inflation tape read (+0.418) running ~8x its
+  own 0.05 threshold. New ADDITIVE `axis_status: {growth, inflation}` — each
+  `{status, implied, realized, score}` computed independently from Task C's
+  `structural_*` scores vs each axis's own realized direction + staleness
+  (growth: flat `staleness_days`=7 threshold; inflation: the `_FRESHNESS_
+  MONTHLY_THRESHOLD_D`=45 monthly threshold, mirroring the existing B2
+  doctrine `_div_leading_vs_lagging_inflation` already uses for its realized
+  leg). Top-level `status` is completely unchanged (verified byte-identical
+  on every existing test) — this is what Task B's third confirmation source
+  reads.
+- **Task B (F2 fix) — inflation-side confirmation gains a third source,
+  honors OR semantics.** `divergence-config.json:leading_vs_lagging_
+  inflation` documents OR semantics (breakeven delta ≥15bp OR oil 20d move
+  ≥10%), but the CONSUMER (`_build_transition_watch`'s `_evaluate_inflation_
+  side`, via `re_risk_min_confirmations`) re-applied it as effectively AND —
+  counting exactly 2 possible sources and requiring both. 2026-08-21
+  readings: breakeven +7bp (needs 15), oil −3.5% (needs 10) — zero
+  confirmations from the original pair; the inflation side had NEVER staged
+  a re-risk lean in this regime. Added a THIRD source — `market_implied_
+  quadrant.structural_inflation_score` (Task C) sign-agreeing with the
+  leading direction and clearing its own threshold — with the confirmation
+  count now against 3 possible sources; a missing/unavailable structural
+  score shrinks the denominator to 2, never fabricates a confirmation (a
+  pre-Task-B caller with no `market_implied_quadrant` reproduces the exact
+  old 2-of-2 behavior, verified by test). `re_risk_min_confirmations`
+  KEPT AT 2 (of 3 now) pending decision **D-3** (entry **#78**) — see the
+  required end-to-end probe below for exactly what that decision buys.
+- **Task E (F7 fix) — reachable quadrant-call accountability.** The legacy
+  `lagging_sessions >= suspect_after_sessions` path requires ONE UNBROKEN
+  run of negative-streak sessions; a regime call flipping favored on/off
+  every 3-5 sessions (the observed pattern) can never survive to
+  `suspect_after_sessions` (10) even while genuinely losing every time it's
+  checked — the guardrail meant to catch a bad regime call was defeated by
+  the exact whipsaw it should detect. `suspect` is now the OR of that legacy
+  path and a NEW rolling path (`favored_sessions_N >= min_favored_sessions
+  AND trailing_excess_pp_N < suspect_excess_threshold_pp`, N =
+  `trailing_window_sessions` — a plain fixed-N-session window, independent
+  of favored-bucket continuity) plus a new never-reset, whole-series
+  `cumulative_favored_excess_pp` (the daily "is our quadrant picking adding
+  value?" scorecard). **Backward-compat gate found during implementation
+  (not in the original spec):** the rolling path is now gated on
+  `"min_favored_sessions" in cfg` being explicitly present — without this, a
+  caller passing a partial/legacy cfg dict (several pre-existing tests, and
+  any config predating this key) would silently pick up the new default
+  rolling trigger, breaking `test_nine_lagging_sessions_not_yet_suspect`.
+  Production config (`risk-limits.json`) always carries all four keys, so
+  this only affects ad-hoc partial dicts, never live behavior. Defaults
+  (window 20 / min favored 5 / threshold 0.0pp, decision D-5) accepted as a
+  starting proposal — tune after ~30 sessions of live data.
+- **Task F (F6 fix, decision D-6) — inert-lean diagnostic, DIAGNOSE ONLY.**
+  `_build_reference_weights` step 3b applies the transition_watch lean as an
+  EQUAL-WEIGHT split across the projected quadrant's concentrate names with
+  NO gate awareness. F6 probe: gate closed → Q1's concentrate (SPY/QQQ/SMH,
+  all amplifiers) is 3/3 Tier-1-rejected; Q2 (0/6)/Q3 (0/8)/Q4 (0/7) are all
+  dampers, fully buyable. The ONLY lean the pre-Task-A system could ever
+  generate from a defensive realized quadrant (the orthogonally-adjacent
+  Q1) was therefore 100% unbuyable under a closed gate — the 2026-08-19
+  report carried QQQ/SPY/SOXX references the gate forbade buying, corrupting
+  the gap tables with an unreachable target. New pure `_transition_lean_
+  diagnostics(projected_quadrant, gate_status, effective_selected)` mirrors
+  the SAME equal-weight split the lean itself applies, so a name-count
+  fraction is exactly the dollar fraction blocked. Adds `lean_gate_status`/
+  `lean_blocked_names`/`lean_deployable_fraction`/`inert` to `transition_
+  watch` (enriched post-hoc in `run()`, same pattern as other collector
+  echo-fields) + `transition_lean_inert` echoed onto `reference_weights`.
+  Prompt doctrine (project-instructions.md, sentinel-tested): an inert lean
+  MUST be named with its blocked tickers and MUST NOT be presented as a
+  closable gap. **Deliberately NOT suppressed this cycle** (decision D-6) —
+  see entry **#79** for the follow-on suppression decision, gated on live
+  inert-lean frequency.
+- **Required end-to-end probe (§5, PR body verbatim)** — 2026-08-21
+  conditions (growth falling, inflation falling, leading growth rising
+  score=0.667/confidence=medium, breakeven +7bp, oil −3.5%, structural tape
+  inflation +0.418) under both `re_risk_min_confirmations` settings:
+  - **`2` (current default):** inflation side does NOT activate (1 of 3 —
+    tape agrees, breakeven/oil don't clear their thresholds) → only the
+    growth side fires → `projected_quadrant: "Q1"`, `staged_fraction: 0.15`,
+    `composed: false`. **Task A's fix has nothing to compose with under
+    today's actual confirmation bar — Q2 stays unreached.**
+  - **`1`:** inflation side activates too (`projected_quadrant: "Q3"`,
+    `confirmations: 1/3`) alongside growth (`"Q1"`) — BOTH re-risk → Task A
+    composes the diagonal → `projected_quadrant: "Q2"`,
+    `staged_fraction: 0.10`, `composed: true`. **This is the exact,
+    empirically-measured difference decision D-3 controls.**
+- **Suite:** `PYTHONPATH=src pytest` on `master` (`21b31a8`) = **1291
+  passed**, branch tip = **1330 passed** (+39: 7 Task A + 4 Task C + 6 Task
+  D + 7 Task B + 6 Task E + 7 Task F + 2 prompt-sentinel). Every new/modified
+  test confirmed failing on pre-fix source before implementation (`git
+  stash` isolation for Tasks A/C; direct KeyError/TypeError failures for
+  D/B/E/F since each added a genuinely new field/parameter). `ruff` clean
+  throughout.
+- **CLAUDE.md** gains two architecture-decision entries: (1) `transition_
+  watch` may compose a diagonal projection when both leading sides agree on
+  re-risk (Task A); (2) only non-basket-momentum tape scores
+  (`structural_*`) may influence weights — basket momentum is permanently
+  describe-only (Task C, the circularity guard).
+- **Out of scope, confirmed untouched:** `_QUADRANT_DEFENSIVENESS` ordering,
+  the `regime_gate` rule (F8 — audited, 0/6 Q2 and 0/8 Q3 names gate-blocked,
+  not the problem), the inflation-axis oil rate-of-change overlay (F8 —
+  correct, base-effects rationale unchanged), any momentum/relative-strength
+  overlay, probability-vector regime allocation, cash-sleeve/flex-gatekeeper/
+  catalyst-screen/executor changes. GDPNow within-quarter smoothing logged
+  separately as entry **#80** rather than attempted inline.
+- **Three decision gates surfaced for Jorge, unresolved** — entry **#78**
+  (D-3, genuinely open: `re_risk_min_confirmations` 2-of-3 vs 1-of-3 — see
+  the probe above), entry **#79** (D-6 follow-on: suppress the inert lean
+  once live frequency is known), entry **#80** (GDPNow smoothing, deferred).
+  D-1/D-2/D-4/D-5/D-7 were adopted as shipped defaults per the prompt's own
+  recommendations (all implemented as described above).
+
 ### 62. 2026-08-14 session: report-to-broker fidelity, oil signal correctness, transition_watch hysteresis, thematic conviction overlay — Done, branch `feat/20260814-thematic-conviction-oil-fidelity` (auto-merge: NO, human review required)
 See the START HERE entry at the top of this file for the full per-task design summary
 (A0 probe classification, B1's exact reconstruction of the 2026-08-12 stale-oil-leg

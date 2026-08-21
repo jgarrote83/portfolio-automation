@@ -176,6 +176,7 @@ _RISK_LIMITS_DEFAULTS = {
     "transition_watch": {
         "staged_fraction_de_risk": 0.30,
         "staged_fraction_re_risk": 0.15,
+        "staged_fraction_re_risk_joint": 0.10,
         "re_risk_min_confirmations": 2,
         "confirm_sessions": 2,
         "release_sessions": 2,
@@ -188,6 +189,9 @@ _RISK_LIMITS_DEFAULTS = {
     },
     "quadrant_performance": {
         "suspect_after_sessions": 10,
+        "trailing_window_sessions": 20,
+        "min_favored_sessions": 5,
+        "suspect_excess_threshold_pp": 0.0,
     },
     "bond_signals": {
         "hy_oas_trend_bp": 10.0,
@@ -1222,6 +1226,41 @@ def _quadrant_perf_series(points: list[dict], quadrant_map: dict) -> list[dict]:
     return out
 
 
+def _cumulative_favored_excess(
+    series: list[dict], q: str, members: tuple[str, ...], spy_map: dict[str, float | None],
+) -> float:
+    """2026-08-21 quadrant-reachability audit, Task E — the daily scorecard
+    answering "is our quadrant picking adding value?": a running total, across
+    the WHOLE stored series (never reset, never windowed), of the bucket's
+    day-over-day equal-weight excess vs SPY on sessions where the bucket was
+    favored — sessions where it was NOT favored simply don't contribute.
+    Each day's contribution is the arithmetic (non-compounded) excess:
+    mean(member day-over-day %) minus SPY's day-over-day %. A day missing
+    either leg (no prior/current close for any member, or no SPY on either
+    side) contributes 0, never a fabricated value.
+    """
+    total = 0.0
+    for i in range(1, len(series)):
+        p_prev, p_cur = series[i - 1], series[i]
+        if q not in (p_cur.get("favored_bucket") or []):
+            continue
+        closes_prev = p_prev.get("closes") or {}
+        closes_cur = p_cur.get("closes") or {}
+        daily_vals = [
+            closes_cur[t] / closes_prev[t] * 100.0 - 100.0
+            for t in members if closes_prev.get(t) and closes_cur.get(t)
+        ]
+        if not daily_vals:
+            continue
+        spy_prev, spy_cur = spy_map.get(p_prev["date"]), spy_map.get(p_cur["date"])
+        if not (spy_prev and spy_cur):
+            continue
+        daily_basket_pct = sum(daily_vals) / len(daily_vals)
+        daily_spy_pct = (spy_cur / spy_prev - 1.0) * 100.0
+        total += daily_basket_pct - daily_spy_pct
+    return round(total, 3)
+
+
 def _build_quadrant_performance(
     series: list[dict], quadrant_map: dict[str, tuple[str, ...]], cfg: dict | None = None,
 ) -> dict:
@@ -1249,11 +1288,41 @@ def _build_quadrant_performance(
     not just read off today's number, so a bucket that flips favored on/off
     doesn't inherit a stale run. `suspect` fires when the bucket is favored today
     AND `lagging_sessions >= suspect_after_sessions` (config, default 10).
+
+    2026-08-21 quadrant-reachability audit, Task E (F7 fix): `suspect` is now
+    the OR of that legacy streak path and a new ROLLING path —
+    `favored_sessions_N >= min_favored_sessions AND trailing_excess_pp_N <
+    suspect_excess_threshold_pp` — which does not require favored-bucket
+    continuity, so a call that flips favored on/off every few sessions (never
+    surviving to `suspect_after_sessions`) can still trip suspect on sustained
+    rolling underperformance. `cumulative_favored_excess_pp` is a
+    never-reset, whole-series running total of day-over-day excess on favored
+    sessions only — the daily scorecard for "is our quadrant picking adding
+    value?".
     """
     if not series:
         return {"available": False, "note": "no perf series yet"}
     cfg = cfg or {}
     suspect_after = int(cfg.get("suspect_after_sessions", 10))
+    # 2026-08-21 quadrant-reachability audit, Task E (F7 fix): the legacy
+    # lagging_sessions path above requires ONE UNBROKEN run of negative-streak
+    # sessions, so a regime call that flips favored on/off every few sessions
+    # can never survive to suspect_after_sessions even while genuinely losing
+    # to SPY every time it's checked — this defeated the exact guardrail meant
+    # to catch a bad regime call. trailing_window_sessions/min_favored_sessions/
+    # suspect_excess_threshold_pp add a ROLLING path that does not require
+    # favored-bucket continuity.
+    trailing_n = int(cfg.get("trailing_window_sessions", 20))
+    min_favored_n = int(cfg.get("min_favored_sessions", 5))
+    suspect_excess_thr = float(cfg.get("suspect_excess_threshold_pp", 0.0))
+    # The rolling path is an opt-in gate on `suspect`, not just a computed
+    # field: a caller passing a partial/legacy cfg dict (e.g. pre-Task-E tests
+    # and any config predating this key) gets exactly the old suspect
+    # semantics — trailing_excess_pp_N/favored_sessions_N still compute (for
+    # visibility) but never fold into `suspect` unless the caller actually
+    # configured `min_favored_sessions`. Production config always carries all
+    # four keys (risk-limits.json), so this only affects ad-hoc partial dicts.
+    rolling_configured = "min_favored_sessions" in cfg
     dates = [p["date"] for p in series]
     today = dates[-1]
     spy_map = {p["date"]: p.get("spy_close") for p in series}
@@ -1328,11 +1397,38 @@ def _build_quadrant_performance(
                 streak_excess = None
             lagging = lagging + 1 if (streak_excess is not None and streak_excess < 0) else 0
 
+        # --- rolling window (Task E): trailing_excess_pp_N / favored_sessions_N,
+        # independent of favored-bucket continuity — a plain fixed-N-session
+        # window calc (same base semantics as ret_Nd_pct/excess_Nd_pp above:
+        # base = the window's own first point), never a streak scan, so an
+        # interior non-negative session cannot "reset" it.
+        window_pts = series[-trailing_n:] if trailing_n > 0 else []
+        trailing_excess: float | None = None
+        if len(window_pts) >= 2:
+            idx_rows_w = _quadrant_perf_series(window_pts, {q: members})
+            last_val_w = idx_rows_w[-1].get(q) if idx_rows_w else None
+            if last_val_w is not None:
+                ret_w = last_val_w - 100.0
+                spy0_w = spy_map.get(window_pts[0]["date"])
+                spyN_w = spy_map.get(window_pts[-1]["date"])
+                if spy0_w and spyN_w:
+                    trailing_excess = round(ret_w - ((spyN_w / spy0_w - 1.0) * 100.0), 3)
+        favored_sessions_n = sum(1 for p in window_pts if q in (p.get("favored_bucket") or []))
+
         favored_today_q = q in (series[-1].get("favored_bucket") or [])
         row["favored_streak"] = streak_len
         row["streak_excess_pp"] = streak_excess
         row["lagging_sessions"] = lagging
-        row["suspect"] = bool(favored_today_q and lagging >= suspect_after)
+        row[f"trailing_excess_pp_{trailing_n}"] = trailing_excess
+        row[f"favored_sessions_{trailing_n}"] = favored_sessions_n
+        row["cumulative_favored_excess_pp"] = _cumulative_favored_excess(series, q, members, spy_map)
+        rolling_suspect = bool(
+            rolling_configured
+            and favored_sessions_n >= min_favored_n
+            and trailing_excess is not None
+            and trailing_excess < suspect_excess_thr
+        )
+        row["suspect"] = bool(favored_today_q and (lagging >= suspect_after or rolling_suspect))
         buckets[q] = row
 
     spy_ret_30 = None
@@ -2834,6 +2930,7 @@ def run() -> None:
         _tw_cfg = (_load_risk_limits().get("transition_watch") or _RISK_LIMITS_DEFAULTS["transition_watch"])
         _tw_raw = _build_transition_watch(
             divergences, growth_axis, inflation_axis, _load_risk_limits(),
+            market_implied_quadrant=market_implied_quadrant,
         )
         _tw_prev = _load_transition_watch_state()
         transition_watch = _confirm_transition_watch(_tw_raw, _tw_prev, _tw_cfg)
@@ -2930,6 +3027,25 @@ def run() -> None:
         )
     except Exception:  # noqa: BLE001
         logger.exception("Reference weights build failed (non-fatal)")
+
+    # --- 2026-08-21 quadrant-reachability audit, Task F: inert-lean diagnostic --
+    # Diagnostic only (decision D-6) — no allocation change. Enriches the ALREADY-
+    # BUILT `transition_watch` dict (also the snapshot's own top-level key) and
+    # echoes a summary boolean onto reference_weights. Non-fatal.
+    try:
+        _lean_proj = transition_watch.get("projected_quadrant") if transition_watch.get("active") else None
+        _lean_diag = _transition_lean_diagnostics(
+            _lean_proj, (regime_gate or {}).get("status"), effective_selected,
+        )
+        transition_watch.update(_lean_diag)
+        reference_weights["transition_lean_inert"] = _lean_diag["inert"]
+        if _lean_diag["inert"]:
+            logger.warning(
+                "Transition lean INERT: projected=%s gate=%s blocked=%s",
+                _lean_proj, _lean_diag["lean_gate_status"], _lean_diag["lean_blocked_names"],
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Transition lean diagnostics failed (non-fatal)")
 
     # --- Session 2026-07-17, Task D: quadrant_allocation (Table A "Current" column) --
     # Non-fatal. Deterministic CURRENT-side counterpart to reference_weights.by_quadrant
@@ -6954,6 +7070,13 @@ def _build_flex_conviction(
 # HIGHER-ranked quadrant is de-risk; to a LOWER-ranked one is re-risk (spec §6 asymmetry).
 _QUADRANT_DEFENSIVENESS = {"Q1": 0, "Q2": 1, "Q3": 2, "Q4": 3}
 
+# `_build_market_implied_quadrant`'s axis thresholds — hoisted to module scope
+# (2026-08-21 audit, Task C/D) so `_div_market_vs_macro_quadrant`'s per-axis
+# eligibility (Task D) classifies a structural score with the SAME thresholds
+# the builder itself used, rather than a second, driftable copy.
+_MIQ_GROWTH_THR = 0.10
+_MIQ_INFL_THR = 0.05
+
 
 def _project_quadrant(realized_quad: str, leading_inflation_dir: str, growth_dir: str) -> str:
     """The quadrant the LEADING inflation signal projects, holding the growth axis fixed.
@@ -6991,11 +7114,56 @@ def _project_quadrant_growth(leading_growth_dir: str, realized_inflation_dir: st
     return ""
 
 
+def _transition_lean_diagnostics(
+    projected_quadrant: str | None,
+    gate_status: str | None,
+    effective_selected: dict[str, str] | None,
+) -> dict:
+    """2026-08-21 quadrant-reachability audit, Task F (F6 fix) — is the
+    transition_watch lean's projected concentrate actually BUYABLE under the
+    CURRENT deployment gate? `_build_reference_weights` step 3b applies the
+    lean as an EQUAL-WEIGHT split across the projected quadrant's concentrate
+    names (no amp/intl weighting, unlike the base allocation) — so a
+    name-count fraction here is exactly the dollar fraction the lean itself
+    would apply. Diagnostic only (decision D-6): no allocation change, no
+    suppression — this cycle only surfaces the finding.
+
+    F6 probe: with the gate closed, Q1's concentrate (SPY/QQQ/SMH) is 3/3
+    amplifier-blocked (`shared/trade_validation.py`'s V1 gate rejects any
+    amplifier buy while closed); Q2/Q3/Q4 are all dampers, 0 blocked. The
+    2026-08-19 report carried QQQ/SPY/SOXX references the gate forbade
+    buying, corrupting the gap tables with an unreachable target.
+    """
+    names = list(concentrate_names(projected_quadrant, effective_selected)) if projected_quadrant else []
+    gate_open = str(gate_status or "").lower() == "open"
+    blocked = [] if (gate_open or not names) else [
+        t for t in names if is_amplifier(t, effective_selected)
+    ]
+    deployable_fraction = round((len(names) - len(blocked)) / len(names), 4) if names else None
+    return {
+        "lean_gate_status": gate_status,
+        "lean_blocked_names": blocked,
+        "lean_deployable_fraction": deployable_fraction,
+        "inert": bool(names) and deployable_fraction == 0.0,
+    }
+
+
+def _project_quadrant_joint(growth_dir: str, inflation_dir: str) -> str:
+    """2026-08-21 quadrant-reachability audit, Task A — the DIAGONAL projection
+    neither `_project_quadrant` (inflation-only) nor `_project_quadrant_growth`
+    (growth-only) can reach on its own, since each holds the other axis fixed.
+    A thin wrapper over `active_quadrant()` so the composition rule lives in
+    ONE place. Returns "" if either leading direction isn't rising/falling.
+    """
+    return active_quadrant(growth_dir, inflation_dir)
+
+
 def _build_transition_watch(
     divergences: list[dict],
     growth_axis: dict,
     inflation_axis: dict,
     cfg: dict,
+    market_implied_quadrant: dict | None = None,
 ) -> dict:
     """Deterministic PRE-STAGING signal: when leading inflation OR leading growth disagrees
     with realized, project the quadrant it points to and emit a bounded lean for
@@ -7012,6 +7180,14 @@ def _build_transition_watch(
 
     REUSE not re-detect (§5/DRY): triggers are Phase-2 divergences — consumed here,
     never re-derived.
+
+    2026-08-21 quadrant-reachability audit, Task A: when BOTH sides are
+    activatable AND both resolve re_risk, composes the DIAGONAL quadrant
+    (`_project_quadrant_joint`) instead of picking one side's single-axis
+    projection — see that function's docstring for the root-cause rationale
+    (F1). Any de-risk side present bypasses composition entirely (spec §6
+    safety bias preserved); only-one-side-activatable is bit-identical to the
+    pre-Task-A behavior.
     """
     tw_cfg = cfg.get("transition_watch") or _RISK_LIMITS_DEFAULTS["transition_watch"]
     g = (growth_axis or {}).get("direction")
@@ -7044,6 +7220,8 @@ def _build_transition_watch(
         basis = [f"{s['name']}={s['value']}" for s in div.get("signals", [])
                  if s.get("name") in ("be_5y.delta_20d_bp", "inflation_axis.oil_20d_pct_governing")
                  and s.get("value") is not None]
+        confirmations = None
+        confirmations_of = None
         if direction == "re_risk":
             div_cfg_thr = _load_divergence_config().get("leading_vs_lagging_inflation", {})
             thr = float(div_cfg_thr.get("breakeven_delta_20d_bp", 15.0))
@@ -7052,17 +7230,32 @@ def _build_transition_watch(
             oil = next((s["value"] for s in div.get("signals", [])
                         if s.get("name") == "inflation_axis.oil_20d_pct_governing"), None)
             want_up = leading_dir == "rising"
+            # 2026-08-21 quadrant-reachability audit, Task B (F2 fix): a THIRD
+            # source — market_implied_quadrant.structural_inflation_score
+            # (Task C's basket-momentum-free tape read) — joins the original
+            # breakeven/oil pair. divergence-config.json's OR-documented
+            # detector thresholds are unchanged; this is the CONSUMER's
+            # confirmation count, now counted against 3 possible sources
+            # instead of 2. Missing/unavailable never fabricates a
+            # confirmation — it just shrinks the denominator.
+            struct_score = (market_implied_quadrant or {}).get("structural_inflation_score")
+            struct_available = struct_score is not None
             confs = sum([
                 1 if (be is not None and ((be >= thr) if want_up else (be <= -thr))) else 0,
                 1 if (oil is not None and ((oil >= oil_thr) if want_up else (oil <= -oil_thr))) else 0,
+                1 if (struct_available and ((struct_score >= _MIQ_INFL_THR) if want_up
+                                             else (struct_score <= -_MIQ_INFL_THR))) else 0,
             ])
+            confirmations = confs
+            confirmations_of = 3 if struct_available else 2
             if confs < int(tw_cfg.get("re_risk_min_confirmations", 2)):
                 return None  # below confirmation bar
             frac = float(tw_cfg.get("staged_fraction_re_risk", 0.15))
         else:
             frac = float(tw_cfg.get("staged_fraction_de_risk", 0.30))
         return {"side": "inflation", "projected_quadrant": projected, "direction": direction,
-                "staged_fraction": frac, "basis": basis,
+                "staged_fraction": frac, "basis": basis, "leading_dir": leading_dir,
+                "confirmations": confirmations, "confirmations_of": confirmations_of,
                 "defensiveness": float(_QUADRANT_DEFENSIVENESS.get(projected, 0))}
 
     def _evaluate_growth_side(div: dict) -> dict | None:
@@ -7099,7 +7292,7 @@ def _build_transition_watch(
         else:
             frac = float(tw_cfg.get("staged_fraction_de_risk", 0.30))
         return {"side": "growth", "projected_quadrant": projected, "direction": direction,
-                "staged_fraction": frac, "basis": basis,
+                "staged_fraction": frac, "basis": basis, "leading_dir": leading_dir,
                 "defensiveness": float(_QUADRANT_DEFENSIVENESS.get(projected, 0))}
 
     # Evaluate both sides.
@@ -7116,8 +7309,34 @@ def _build_transition_watch(
         # not propagate here; the transition_watch is inactive when nothing stages.
         return {**base, "status": "indeterminate"}
 
-    # When both sides fire, the more defensive projected quadrant wins (de-risk bias).
-    if len(active_sides) == 1:
+    # 2026-08-21 quadrant-reachability audit, Task A (F1 root-cause fix): each
+    # single-side projection above moves along ONE axis only, holding the other
+    # fixed — from a realized quadrant, only the two orthogonally-adjacent
+    # quadrants were ever reachable; the DIAGONAL (e.g. Q4->Q2) was structurally
+    # unreachable no matter how strongly both leading signals agreed. Compose the
+    # diagonal ONLY when BOTH sides are activatable AND both resolve re_risk
+    # (D-2: preserves the spec §6 de-risk safety bias — any de-risk side present
+    # falls through unchanged to the pre-existing most-defensive single-side
+    # tiebreak below).
+    joint_result = None
+    if (infl_result is not None and grow_result is not None
+            and infl_result["direction"] == "re_risk" and grow_result["direction"] == "re_risk"):
+        g_eff = grow_result["leading_dir"]
+        i_eff = infl_result["leading_dir"]
+        joint_quad = _project_quadrant_joint(g_eff, i_eff)
+        if joint_quad:
+            joint_result = {
+                "side": "joint", "projected_quadrant": joint_quad, "direction": "re_risk",
+                "staged_fraction": float(tw_cfg.get("staged_fraction_re_risk_joint", 0.10)),
+                "basis": list(dict.fromkeys(infl_result["basis"] + grow_result["basis"])),
+                "defensiveness": float(_QUADRANT_DEFENSIVENESS.get(joint_quad, 0)),
+            }
+
+    # When both sides fire (and no joint composition applies), the more defensive
+    # projected quadrant wins (de-risk bias).
+    if joint_result is not None:
+        best = joint_result
+    elif len(active_sides) == 1:
         best = active_sides[0]
     else:
         # Prefer the de-risk side; within same direction, the more defensive quadrant.
@@ -7136,12 +7355,18 @@ def _build_transition_watch(
         "staged_fraction": best["staged_fraction"],
         "basis": best["basis"],
         "sides": active_sides,
+        "composed": joint_result is not None,
         "status": "active",
         "rule": (
             "Bounded partial lean toward projected_quadrant staged into reference_weights "
             "as a convex blend; binding active_quadrant / regime_gate / realized axes "
             "UNCHANGED. Consumes leading_vs_lagging_inflation AND leading_vs_lagging_growth "
-            "divergences symmetrically (FOLLOWUPS #17 generalisation)."
+            "divergences symmetrically (FOLLOWUPS #17 generalisation). 2026-08-21 Task A: "
+            "when BOTH sides are activatable and BOTH resolve re_risk, composes the DIAGONAL "
+            "quadrant (active_quadrant of each side's own leading direction) instead of "
+            "picking one side's single-axis projection — the diagonal is otherwise "
+            "structurally unreachable. Any de-risk side present bypasses composition "
+            "(spec §6 safety bias unchanged)."
         ),
     }
 
@@ -8900,6 +9125,18 @@ def _build_market_implied_quadrant(
 
     Output: {implied_quadrant, confidence, vote_count, total_votes, votes, basis}.
     Describe-only — never touches reference_weights or regime_gate.
+
+    2026-08-21 quadrant-reachability audit, Task C: also emits `structural_*`
+    counterparts (`structural_growth_score`/`structural_inflation_score`/
+    `structural_implied_quadrant`/`structural_implied_growth`/
+    `structural_implied_inflation`/`structural_vote_count`/
+    `structural_confidence`) computed identically but EXCLUDING the two
+    basket_momentum_* votes — the mandatory circularity guard: the legacy
+    scores above are partly the quadrant baskets' own relative performance,
+    so feeding them into transition_watch/reference_weights would be
+    performance-chasing wearing a macro costume. ONLY the `structural_*`
+    fields may be consumed downstream for weighting (decision D-4); the
+    legacy fields above stay describe-only, byte-identical to pre-Task-C.
     """
     # Load perf series if not provided.
     if not perf_series:
@@ -8926,6 +9163,22 @@ def _build_market_implied_quadrant(
     # confidence at 'medium' regardless of populated-vote count.
     growth_signs: list[float] = []
     infl_signs: list[float] = []
+    # 2026-08-21 quadrant-reachability audit, Task C — STRUCTURAL (non-basket)
+    # running totals, mirroring the SAME per-signal increments below (never the
+    # basket-momentum loop's growth_delta/infl_delta increments above it) so
+    # `structural_growth_score`/`structural_inflation_score` are, BY
+    # CONSTRUCTION, never a function of basket_momentum_20d/60d. This is the
+    # circularity guard: `growth_up_score`/`infl_up_score` feed `reference_weights`
+    # (via transition_watch) and are themselves partly the relative performance
+    # of the quadrant baskets — feeding that back into weights would be
+    # performance-chasing wearing a macro costume. `structural_growth_score`/
+    # `structural_inflation_score` are the ONLY market_implied_quadrant fields
+    # transition_watch may consume (decision D-4) — basket momentum remains
+    # strictly describe-only.
+    structural_growth_score = 0.0
+    structural_infl_score = 0.0
+    structural_growth_signs: list[float] = []
+    structural_infl_signs: list[float] = []
 
     for window_days, weight in ((20, 0.4), (60, 0.6)):
         idx = _cutoff_idx(window_days)
@@ -8984,9 +9237,13 @@ def _build_market_implied_quadrant(
     if cg_vote == "growth":
         growth_up_score += 0.10
         growth_signs.append(1.0)
+        structural_growth_score += 0.10
+        structural_growth_signs.append(1.0)
     elif cg_vote == "stagflation":
         growth_up_score -= 0.10
         growth_signs.append(-1.0)
+        structural_growth_score -= 0.10
+        structural_growth_signs.append(-1.0)
     votes.append({"source": "copper_gold_ratio", "vote": cg_vote,
                   "as_of": cg["as_of"], "value": cg["pct_change"]})
 
@@ -8997,9 +9254,13 @@ def _build_market_implied_quadrant(
     if xl_vote == "growth":
         growth_up_score += 0.10
         growth_signs.append(1.0)
+        structural_growth_score += 0.10
+        structural_growth_signs.append(1.0)
     elif xl_vote == "defensive":
         growth_up_score -= 0.10
         growth_signs.append(-1.0)
+        structural_growth_score -= 0.10
+        structural_growth_signs.append(-1.0)
     votes.append({"source": "XLY_XLP", "vote": xl_vote,
                   "as_of": xl["as_of"], "value": xl["pct_change"]})
 
@@ -9010,10 +9271,14 @@ def _build_market_implied_quadrant(
         dxy_vote = "growth"
         growth_up_score += 0.05
         growth_signs.append(1.0)
+        structural_growth_score += 0.05
+        structural_growth_signs.append(1.0)
     elif dxy_trend == "headwind":   # USD strengthening → defensive/Q4
         dxy_vote = "defensive"
         growth_up_score -= 0.05
         growth_signs.append(-1.0)
+        structural_growth_score -= 0.05
+        structural_growth_signs.append(-1.0)
     votes.append({"source": "DXY_trend", "vote": dxy_vote})
 
     # Breakevens direction (from bond_signals)
@@ -9025,10 +9290,14 @@ def _build_market_implied_quadrant(
             be_vote = "reflation"    # rising breakevens → Q2/Q3
             infl_up_score += 0.10
             infl_signs.append(1.0)
+            structural_infl_score += 0.10
+            structural_infl_signs.append(1.0)
         elif float(be_delta) < -15.0:
             be_vote = "disinflation"  # falling → Q1/Q4
             infl_up_score -= 0.10
             infl_signs.append(-1.0)
+            structural_infl_score -= 0.10
+            structural_infl_signs.append(-1.0)
     votes.append({"source": "breakevens_20d", "vote": be_vote,
                   "value": round(be_delta, 1) if be_delta is not None else None})
 
@@ -9040,10 +9309,14 @@ def _build_market_implied_quadrant(
         hy_vote = "growth"
         growth_up_score += 0.08
         growth_signs.append(1.0)
+        structural_growth_score += 0.08
+        structural_growth_signs.append(1.0)
     elif hy_trend_val == "widening":
         hy_vote = "defensive"
         growth_up_score -= 0.08
         growth_signs.append(-1.0)
+        structural_growth_score -= 0.08
+        structural_growth_signs.append(-1.0)
     votes.append({"source": "HY_OAS_trend", "vote": hy_vote})
 
     # 2s10s steepening (steepening → growth/reflation expectation)
@@ -9057,10 +9330,14 @@ def _build_market_implied_quadrant(
                 slope_vote = "growth"    # steepening → growth
                 growth_up_score += 0.08
                 growth_signs.append(1.0)
+                structural_growth_score += 0.08
+                structural_growth_signs.append(1.0)
             elif delta_2s10 < -0.05:
                 slope_vote = "defensive"  # flattening → defensive
                 growth_up_score -= 0.08
                 growth_signs.append(-1.0)
+                structural_growth_score -= 0.08
+                structural_growth_signs.append(-1.0)
         except (TypeError, ValueError):
             pass
     votes.append({"source": "2s10s_steepening", "vote": slope_vote})
@@ -9068,8 +9345,8 @@ def _build_market_implied_quadrant(
     # --- Resolve implied quadrant from the accumulated scores ---------------
     # growth_up_score > 0 → growth rising; < 0 → falling
     # infl_up_score > 0 → inflation rising; < 0 → falling
-    GROWTH_THR = 0.10
-    INFL_THR = 0.05
+    GROWTH_THR = _MIQ_GROWTH_THR
+    INFL_THR = _MIQ_INFL_THR
 
     if growth_up_score > GROWTH_THR:
         implied_growth = "rising"
@@ -9111,6 +9388,47 @@ def _build_market_implied_quadrant(
     else:
         confidence = "none"
 
+    # --- STRUCTURAL (non-basket) resolution — 2026-08-21 audit, Task C ------
+    # Mandatory circularity guard (F4): identical accumulation/threshold logic
+    # to the legacy implied_growth/implied_infl/confidence above, but computed
+    # ONLY from `structural_growth_score`/`structural_infl_score` — which, by
+    # construction (see the running-total comment near their declaration),
+    # never include the basket_momentum_20d/60d votes. Only these `structural_*`
+    # fields may be consumed by transition_watch (decision D-4); basket
+    # momentum remains strictly describe-only.
+    if structural_growth_score > GROWTH_THR:
+        structural_implied_growth = "rising"
+    elif structural_growth_score < -GROWTH_THR:
+        structural_implied_growth = "falling"
+    else:
+        structural_implied_growth = "flat"
+
+    if structural_infl_score > INFL_THR:
+        structural_implied_infl = "rising"
+    elif structural_infl_score < -INFL_THR:
+        structural_implied_infl = "falling"
+    else:
+        structural_implied_infl = "flat"
+
+    structural_implied_q = active_quadrant(structural_implied_growth, structural_implied_infl)
+    structural_vote_count = len(structural_growth_signs) + len(structural_infl_signs)
+    structural_growth_disagree = (
+        any(s > 0 for s in structural_growth_signs) and any(s < 0 for s in structural_growth_signs)
+    )
+    structural_infl_disagree = (
+        any(s > 0 for s in structural_infl_signs) and any(s < 0 for s in structural_infl_signs)
+    )
+    structural_disagreement = structural_growth_disagree or structural_infl_disagree
+
+    if structural_vote_count >= float(_thr.get("high", 5)) and not structural_disagreement:
+        structural_confidence = "high"
+    elif structural_vote_count >= float(_thr.get("medium", 3)):
+        structural_confidence = "medium"
+    elif structural_vote_count >= float(_thr.get("low", 2)):
+        structural_confidence = "low"
+    else:
+        structural_confidence = "none"
+
     return {
         "available": True,
         "implied_quadrant": implied_q or "borderline",
@@ -9123,6 +9441,13 @@ def _build_market_implied_quadrant(
         "vote_count": vote_count,
         "total_votes": total_votes,
         "votes": votes,
+        "structural_growth_score": round(structural_growth_score, 3),
+        "structural_inflation_score": round(structural_infl_score, 3),
+        "structural_implied_quadrant": structural_implied_q or "borderline",
+        "structural_implied_growth": structural_implied_growth,
+        "structural_implied_inflation": structural_implied_infl,
+        "structural_vote_count": structural_vote_count,
+        "structural_confidence": structural_confidence,
         "note": (
             "Tape-implied quadrant from cross-asset momentum + signal votes (FOLLOWUPS #18). "
             "Describe-only — never touches reference_weights or regime_gate. "
@@ -9335,7 +9660,8 @@ def _build_divergences(
 
     # --- 6. market-implied vs macro quadrant (#18) ---------------------------
     out.append(_div_market_vs_macro_quadrant(
-        reference_weights, market_implied_quadrant, today, stale_days, cfg))
+        reference_weights, market_implied_quadrant, today, stale_days, cfg,
+        growth_axis=growth_axis, inflation_axis=inflation_axis))
 
     return out
 
@@ -9414,6 +9740,8 @@ def _div_market_vs_macro_quadrant(
     today: str,
     stale_days: int,
     cfg: dict,
+    growth_axis: dict | None = None,
+    inflation_axis: dict | None = None,
 ) -> dict:
     """Market tape-implied quadrant vs the macro active_quadrant / favored_bucket (#18).
 
@@ -9423,12 +9751,51 @@ def _div_market_vs_macro_quadrant(
     detector running in parallel — market_vs_macro_quadrant is the broader instrument;
     it catches borderline-regime mismatches where price_vs_regime goes indeterminate.
     Both describe-only; LLM adjudicates.
+
+    2026-08-21 quadrant-reachability audit, Task D (F5 fix): the top-level
+    `status` above requires BOTH axes to resolve a concrete `implied_quadrant`
+    (via `active_quadrant`), so a decisive read on ONE axis was silently
+    discarded whenever the other axis happened to be quiet (2026-08-21: growth
+    flat -> quadrant "borderline" -> the whole divergence indeterminate, even
+    though the inflation tape read ran ~8x its own threshold). `axis_status`
+    is a PURELY ADDITIVE per-axis sub-status computed straight from
+    `market_implied_quadrant`'s `structural_*` scores (Task C — basket
+    momentum is never involved) vs each axis's own realized direction +
+    staleness — independent of whatever the top-level `status` above decides.
+    `growth_axis`/`inflation_axis` are optional/trailing for backward
+    compatibility with pre-Task-D callers; omitted, every axis reads
+    indeterminate (never a false active).
     """
     base = {
         "id": "market_vs_macro_quadrant",
         "description": "Market-implied quadrant (tape momentum + cross-asset votes) vs macro regime call.",
     }
     miq = market_implied_quadrant or {}
+
+    g_dir = (growth_axis or {}).get("direction")
+    g_as_of = (growth_axis or {}).get("as_of")
+    g_age = _days_stale(g_as_of, today)
+    g_stale = g_age is not None and g_age > stale_days
+
+    i_dir = (inflation_axis or {}).get("direction")
+    i_as_of = (inflation_axis or {}).get("realized_core_as_of")
+    i_age = _days_stale(i_as_of, today)
+    i_stale = i_age is not None and i_age > _FRESHNESS_MONTHLY_THRESHOLD_D
+
+    def _axis_substatus(score, thr, realized_dir, stale) -> dict:
+        if score is None:
+            return {"status": "indeterminate", "implied": None, "realized": realized_dir, "score": None}
+        implied = "rising" if score > thr else ("falling" if score < -thr else "flat")
+        if implied == "flat" or stale or not realized_dir:
+            return {"status": "indeterminate", "implied": implied, "realized": realized_dir,
+                    "score": round(score, 3)}
+        status = "aligned" if implied == realized_dir else "active"
+        return {"status": status, "implied": implied, "realized": realized_dir, "score": round(score, 3)}
+
+    base["axis_status"] = {
+        "growth": _axis_substatus(miq.get("structural_growth_score"), _MIQ_GROWTH_THR, g_dir, g_stale),
+        "inflation": _axis_substatus(miq.get("structural_inflation_score"), _MIQ_INFL_THR, i_dir, i_stale),
+    }
 
     if not miq.get("available"):
         return {**base, "signals": [], "direction_implied": "unresolved", "status": "indeterminate",

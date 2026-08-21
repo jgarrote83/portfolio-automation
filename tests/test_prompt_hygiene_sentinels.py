@@ -169,6 +169,25 @@ _FLEX_STATE_AS_OF_STALENESS_SENTINELS = (
     "say the engine state is stale",
 )
 
+# 2026-08-21 quadrant-reachability audit, Task A: diagonal (joint) projection
+# doctrine.
+_JOINT_PROJECTION_SENTINELS = (
+    "Diagonal (joint) projection",
+    "composes the DIAGONAL quadrant",
+    "both a growth and",
+)
+
+# 2026-08-21 quadrant-reachability audit, Task F (decision D-6): inert-lean
+# diagnostic doctrine — the projected lean may be 100% unbuyable under the
+# current deployment gate; the report must say so and never present the
+# resulting gap as a closable shortfall.
+_INERT_LEAN_SENTINELS = (
+    "Inert-lean diagnostic",
+    "transition_watch.inert == true",
+    "MUST NOT",
+    "not a trade you failed to make",
+)
+
 
 def _text() -> str:
     return _PROMPT.read_text(encoding="utf-8")
@@ -300,3 +319,15 @@ def test_flex_state_as_of_staleness_doctrine_present():
     text = _text()
     for s in _FLEX_STATE_AS_OF_STALENESS_SENTINELS:
         assert s in text, f"missing flex_state.as_of staleness sentinel: {s!r}"
+
+
+def test_joint_projection_doctrine_present():
+    text = _text()
+    for s in _JOINT_PROJECTION_SENTINELS:
+        assert s in text, f"missing joint-projection sentinel: {s!r}"
+
+
+def test_inert_lean_doctrine_present():
+    text = _text()
+    for s in _INERT_LEAN_SENTINELS:
+        assert s in text, f"missing inert-lean sentinel: {s!r}"
