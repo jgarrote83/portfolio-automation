@@ -13,6 +13,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import collector.handler as ch  # noqa: E402
 from collector.handler import (  # noqa: E402
+    _lean_from_snapshot,
+    _lean_from_transition_watch,
     _load_equity_spy_series,
     _perf_point,
     _roster_closes,
@@ -171,13 +173,18 @@ def test_live_point_lean_inert_flag_propagates(monkeypatch):
 
 def test_live_point_lean_known_no_lean_when_transition_watch_inactive(monkeypatch):
     """No active lean today -- still a KNOWN state (all fields None/0.0/False),
-    never an absent key -- distinguishable from unknown pre-#17 history."""
+    never an absent key -- distinguishable from unknown pre-#17 history. The
+    fixture includes an explicit "inert": False, matching what PR #42's Task F
+    enrichment (transition_watch.update(_lean_diag)) actually stamps onto
+    EVERY confirmed transition_watch dict on the live path, active or not --
+    see the M1 remediation tests below for the (exceptional) case where that
+    enrichment never ran and "inert" is genuinely absent."""
     monkeypatch.setattr(ch, "read_perf_series", lambda: [])
     monkeypatch.setattr(ch, "list_snapshot_dates", lambda: [])
     monkeypatch.setattr(ch, "write_perf_series", lambda s: None)
     out = _load_equity_spy_series(
         "2026-08-21", 100_000.0, 620.0, None,
-        transition_watch={"active": False, "status": "indeterminate"},
+        transition_watch={"active": False, "status": "indeterminate", "inert": False},
     )
     assert out[0]["lean"] == {"projected_quadrant": None, "direction": None,
                                "staged_fraction": 0.0, "inert": False}
@@ -189,6 +196,75 @@ def test_live_point_lean_backward_compatible_when_param_omitted(monkeypatch):
     monkeypatch.setattr(ch, "write_perf_series", lambda s: None)
     out = _load_equity_spy_series("2026-08-21", 100_000.0, 620.0, None)
     assert out[0]["lean"]["projected_quadrant"] is None
+
+
+# ---------------------------------------------------------------------------
+# PR #43 remediation, Finding M1 -- a THIRD history epoch, not two.
+# `transition_watch` has existed since FOLLOWUPS #17 (~2026-07-23); PR #42's
+# Task F only started stamping `inert` onto it on 2026-08-21. A historical
+# snapshot from that ~1-month window has a real `transition_watch` block with
+# a real `projected_quadrant`, but genuinely no recorded answer to "was this
+# deployable" -- `inert` must read as UNKNOWN (None), never a fabricated
+# `False` (which the old `bool(tw.get("inert"))` silently produced, rendering
+# an inert-in-fact Q1 lean as a solid "deployed" bar on the chart).
+# ---------------------------------------------------------------------------
+
+def test_lean_from_snapshot_missing_inert_key_is_unknown():
+    """The M1 case itself: a transition_watch block from the #17-to-#42
+    window -- present, with a real projected_quadrant, but no `inert` key at
+    all (Task F hadn't been written yet)."""
+    snap = {
+        "transition_watch": {
+            "active": True, "projected_quadrant": "Q1", "direction": "re_risk",
+            "staged_fraction": 0.15, "status": "active",
+            # no "inert" key -- predates PR #42's Task F enrichment
+        },
+    }
+    lean = _lean_from_snapshot(snap)
+    assert lean["projected_quadrant"] == "Q1"
+    assert lean["inert"] is None  # must be None, never a fabricated False
+
+
+def test_lean_from_snapshot_explicit_inert_false_is_known_deployable():
+    snap = {"transition_watch": {"active": True, "projected_quadrant": "Q2",
+                                  "direction": "re_risk", "staged_fraction": 0.1,
+                                  "inert": False, "status": "active"}}
+    assert _lean_from_snapshot(snap)["inert"] is False
+
+
+def test_lean_from_snapshot_explicit_inert_true_is_known_blocked():
+    snap = {"transition_watch": {"active": True, "projected_quadrant": "Q1",
+                                  "direction": "re_risk", "staged_fraction": 0.15,
+                                  "inert": True, "status": "active"}}
+    assert _lean_from_snapshot(snap)["inert"] is True
+
+
+def test_lean_from_transition_watch_missing_inert_key_is_unknown():
+    """Covers the LIVE-path degradation too: if `_transition_lean_diagnostics`
+    ever raises (it runs inside a non-fatal try in run()), the confirmed
+    transition_watch dict reaches here with no `inert` key -- must render
+    unknown, never silently solid."""
+    tw = {"active": True, "projected_quadrant": "Q1", "direction": "re_risk",
+          "staged_fraction": 0.15, "status": "active"}
+    lean = _lean_from_transition_watch(tw)
+    assert lean["inert"] is None
+
+
+def test_lean_from_transition_watch_explicit_inert_still_bool():
+    assert _lean_from_transition_watch({"projected_quadrant": "Q2", "inert": False})["inert"] is False
+    assert _lean_from_transition_watch({"projected_quadrant": "Q1", "inert": True})["inert"] is True
+
+
+# --- regression guards (must pass both before and after) -------------------
+
+def test_pre_transition_watch_snapshot_still_whole_dict_none():
+    assert _lean_from_snapshot({"growth_axis": {"direction": "falling"}}) is None
+    assert _lean_from_snapshot({}) is None
+
+
+def test_no_active_lean_day_still_projected_quadrant_none():
+    lean = _lean_from_transition_watch({"active": False, "status": "indeterminate", "inert": False})
+    assert lean["projected_quadrant"] is None
 
 
 def test_backfill_patches_lean_onto_point_that_already_has_closes(monkeypatch):

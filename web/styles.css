@@ -126,3 +126,11 @@ tbody tr:hover { background: #1a1f2a; }
 .lean-legend .swatch-rail.inert {
   background: transparent; border: 1.5px dashed #9085e9;
 }
+/* Finding M1 (PR #43 review): a THIRD, deliberately faint treatment for
+   "a real projected quadrant, deployability never recorded" -- same alpha
+   (0.20) the leanRail plugin itself uses for this state, no border, so it
+   reads as neither "deployed" (a bold solid) nor "known blocked" (a dashed
+   outline). */
+.lean-legend .swatch-rail.unknown {
+  background: rgba(25, 158, 112, .20); border: none;
+}

@@ -206,14 +206,15 @@
   // does not exist in this repo (FOLLOWUPS -- tracked separately); reusing
   // existing hues sidesteps needing it here.
   const LEAN_RAIL_HEIGHT = 9;
-  const LEAN_RAIL_ALPHA = 0.55;  // higher than QTINT's 0.10 band tint
+  const LEAN_RAIL_ALPHA = 0.55;          // active: higher than QTINT's 0.10 band tint
+  const LEAN_RAIL_UNKNOWN_ALPHA = 0.20;  // unknown: faint -- closer to "not asserted" than to "deployed"
 
-  function _leanRailFill(q) {
-    // QCOLOR is a hex "#rrggbb" -- reuse it at LEAN_RAIL_ALPHA rather than
-    // introducing a new color.
+  function _leanRailFill(q, alpha) {
+    // QCOLOR is a hex "#rrggbb" -- reuse it at a different alpha rather than
+    // introducing a new color (B3a).
     const hex = QCOLOR[q];
     const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
-    return `rgba(${r},${g},${b},${LEAN_RAIL_ALPHA})`;
+    return `rgba(${r},${g},${b},${alpha})`;
   }
 
   const leanRail = {
@@ -228,7 +229,7 @@
       const y = area.bottom - LEAN_RAIL_HEIGHT;
       let i = 0;
       while (i < meta.length) {
-        const key = meta[i];  // "Q2|active" / "Q1|inert" / null (no lean or unknown history)
+        const key = meta[i];  // "Q2|active" / "Q1|inert" / "Q1|unknown" / null (no lean, or unknown pre-#17 history)
         let j = i;
         while (j + 1 < meta.length && meta[j + 1] === key) j++;
         if (key) {
@@ -245,8 +246,18 @@
               ctx.setLineDash([3, 2]);
               ctx.strokeRect(left, y, right - left, LEAN_RAIL_HEIGHT);
               ctx.restore();
+            } else if (state === "unknown") {
+              // 2026-08-21 PR #43 review, Finding M1: a real projected
+              // quadrant whose DEPLOYABILITY was never recorded (the
+              // FOLLOWUPS #17 -> PR #42 Task F window). The quadrant hue is
+              // kept -- the projection itself is known -- but at a faint
+              // fill with no outline, so it reads as neither "deployed"
+              // (active's bold solid) nor "known blocked" (inert's dashed
+              // outline): a third, deliberately less assertive treatment.
+              ctx.fillStyle = _leanRailFill(q, LEAN_RAIL_UNKNOWN_ALPHA);
+              ctx.fillRect(left, y, right - left, LEAN_RAIL_HEIGHT);
             } else {
-              ctx.fillStyle = _leanRailFill(q);
+              ctx.fillStyle = _leanRailFill(q, LEAN_RAIL_ALPHA);
               ctx.fillRect(left, y, right - left, LEAN_RAIL_HEIGHT);
             }
           }
@@ -306,9 +317,19 @@
                 const lean = p && p.lean;
                 if (lean && lean.projected_quadrant) {
                   const pct = `${Math.round((lean.staged_fraction || 0) * 100)}%`;
-                  lines.push(lean.inert
-                    ? `Lean: ${lean.projected_quadrant} (${lean.direction}, ${pct}) — gate-blocked, not buyable`
-                    : `Lean: ${lean.projected_quadrant} (${lean.direction}, ${pct})`);
+                  const base = `Lean: ${lean.projected_quadrant} (${lean.direction}, ${pct})`;
+                  // Finding M1 (PR #43 review): a THIRD wording for the
+                  // deployability-unknown epoch -- never reuse "gate-blocked"
+                  // for a session that was never evaluated; that asserts a
+                  // fact this data cannot support, the same class of error
+                  // as asserting "deployed."
+                  if (lean.inert == null) {
+                    lines.push(`${base} — deployability unknown (predates lean diagnostics)`);
+                  } else if (lean.inert) {
+                    lines.push(`${base} — gate-blocked, not buyable`);
+                  } else {
+                    lines.push(base);
+                  }
                 }
                 return lines;
               },
@@ -333,12 +354,19 @@
     const canvas = document.getElementById("perfChart");
     if (chart) chart.destroy();
     regimeKeys = series.map(p => (p.favored_bucket || []).join("+"));
-    // "Q2|active" / "Q1|inert" per point; null for no active lean (known or
-    // unknown history alike -- both render as blank rail, see leanRail above).
+    // "Q2|active" / "Q1|inert" / "Q1|unknown" per point; null for no active
+    // lean at all (known-no-lean or unknown pre-#17 history alike -- both
+    // render as blank rail, see leanRail above). `inert` is a THREE-way
+    // value (Finding M1, PR #43 review) -- `lean.inert == null` catches both
+    // `undefined` (field never sent) and an explicit `null` (the #17-to-#42
+    // window, deployability never recorded), deliberately NOT a bare falsy
+    // check, which would wrongly collapse "unknown" into "active" exactly
+    // like the pre-fix `lean.inert ? "inert" : "active"` did.
     leanKeys = series.map(p => {
       const lean = p.lean;
       if (!lean || !lean.projected_quadrant) return null;
-      return `${lean.projected_quadrant}|${lean.inert ? "inert" : "active"}`;
+      const state = lean.inert == null ? "unknown" : (lean.inert ? "inert" : "active");
+      return `${lean.projected_quadrant}|${state}`;
     });
     chart = new Chart(canvas, cfg);
   }
@@ -432,7 +460,8 @@
     if (!hasLeanData) { el.innerHTML = ""; return; }
     el.innerHTML =
       `<span>Bottom rail: transition lean (projected quadrant), colored by quadrant at higher opacity than the band above</span>` +
-      `<span><span class="swatch-rail inert"></span> inert — gate-blocked, not buyable</span>`;
+      `<span><span class="swatch-rail inert"></span> inert — gate-blocked, not buyable</span>` +
+      `<span><span class="swatch-rail unknown"></span> lean — deployability unknown (pre-2026-08-21 history)</span>`;
   }
 
   function renderTable(data) {

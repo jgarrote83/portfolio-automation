@@ -2134,6 +2134,39 @@ inferred from JSON. Shipped ahead of D-3 per instruction.
   three rail states render distinguishably: blank (unknown history, days
   1-10), solid orange fill (active Q2 lean, days 11-20), dashed green
   outline (inert Q1 lean, days 21-30) — see the PR body for the image.
+- **PR #43 review, Finding M1 (blocking, fixed same PR before merge) — a
+  THIRD history epoch, not two.** `transition_watch` has existed since
+  FOLLOWUPS #17 (~2026-07-23); PR #42's Task F is what started stamping
+  `inert` onto it, merging three weeks later (2026-08-21). The original
+  `bool(tw.get("inert"))` collapsed the resulting in-between epoch (block
+  present, no `inert` key) into `False` — "known deployable" — for the
+  entire #17-to-#42 window, including sessions that were in fact
+  gate-blocked (Q1 leans under a closed gate, 2026-08-19 through 08-21,
+  confirmed 3/3 amplifier-blocked per PR #42's Task F probe). That window
+  is the most recent third of the YTD chart and the direct "before"
+  picture the first live joint Q2 lean will be judged against. Fixed:
+  `_lean_from_transition_watch` now reads `inert` as `bool(tw["inert"]) if
+  "inert" in tw else None` — the SAME rule also covers a live-path
+  degradation (`_transition_lean_diagnostics` runs inside a non-fatal
+  `try`; if it ever raises, the confirmed block reaches this function
+  with no `inert` key either). `web/performance.js`'s `leanRail` plugin
+  gained a THIRD rail state (`unknown` — a faint fill at its own lower
+  opacity, no outline, keeping the quadrant hue since the projection
+  itself is known even when deployability isn't), gated on an explicit
+  `lean.inert == null` check rather than a bare falsy test (a bare test
+  is exactly the bug that produced this finding). Legend and tooltip
+  gained matching third-state wording — never reusing "gate-blocked" for
+  a session that was never evaluated, which would assert a fact the data
+  doesn't support (the same class of error as asserting "deployed").
+  **Explicitly not done, per instruction:** historical inertness was NOT
+  re-derived from `projected_quadrant` + `regime_gate.status`, even though
+  it would usually come out right — that would violate echo-never-re-derive
+  and paper over a roster state (semis `SMH`/`SOXX`) that genuinely changed
+  mid-window. `None` is the honest answer. Suite 1354→1361 (+7: 5 new M1
+  tests + 2 regression guards), `ruff check .` delta zero vs master,
+  screenshot replaced (not appended) with a 4-state version (blank / faint
+  unknown / solid active / dashed inert, all four distinguishable at a
+  glance) — see the PR body.
 - **Out of scope, confirmed untouched:** `transition_watch`/
   `quadrant_performance`/`market_implied_quadrant` COMPUTATION (this cycle
   is display-only — the one exception, `suspect_path`, is a pure echo of

@@ -635,13 +635,34 @@ def _lean_from_transition_watch(tw: dict | None) -> dict:
     not the raw target). Echo-only. A day with no active lean still gets
     this exact shape with `projected_quadrant`/`direction` None — the KNOWN
     no-lean state, distinct from UNKNOWN pre-#17 history (see
-    `_lean_from_snapshot`, which returns `None` instead of calling this)."""
+    `_lean_from_snapshot`, which returns `None` instead of calling this).
+
+    THREE epochs for `inert` specifically (PR #43 review, Finding M1):
+    (1) before FOLLOWUPS #17 (~2026-07-23) — no `transition_watch` block at
+    all — handled entirely by `_lean_from_snapshot` returning `None` before
+    this function is ever called; (2) FOLLOWUPS #17 through PR #42's Task F
+    (~2026-08-21) — `transition_watch` exists and may carry a real
+    `projected_quadrant`, but the block was never stamped with `inert` at
+    all (Task F, which added that stamping, postdates this whole window) —
+    `inert` here is `None`, meaning DEPLOYABILITY UNKNOWN, never a
+    fabricated `False`; a lean that was in fact gate-blocked must not render
+    as if it were deployed just because history predates the diagnostic.
+    (3) from Task F onward — `inert` is a real recorded `bool`. The SAME
+    three-way rule applies on the LIVE path: `_transition_lean_diagnostics`
+    runs inside a non-fatal `try` in `run()` — if it ever raises, this
+    confirmed `transition_watch` dict reaches here with no `inert` key
+    either, and must degrade to `None` exactly like historical epoch (2),
+    never silently render as deployable. `None` is never consulted by the
+    renderer when `projected_quadrant` is itself `None` (no active lean) —
+    only a REAL projected quadrant of unknown deployability needs this
+    three-way distinction.
+    """
     tw = tw or {}
     return {
         "projected_quadrant": tw.get("projected_quadrant"),
         "direction": tw.get("direction"),
         "staged_fraction": float(tw.get("staged_fraction") or 0.0),
-        "inert": bool(tw.get("inert")),
+        "inert": (bool(tw["inert"]) if "inert" in tw else None),
     }
 
 
@@ -649,7 +670,11 @@ def _lean_from_snapshot(snap: dict) -> dict | None:
     """`_lean_from_transition_watch`, sourced from a historical snapshot's
     own `transition_watch` block — `None` (never a fabricated stub) when the
     snapshot predates FOLLOWUPS #17 (2026-07-23), i.e. has no
-    `transition_watch` key at all: that is UNKNOWN history, not "no lean.\""""
+    `transition_watch` key at all: that is UNKNOWN history, not "no lean."
+    A snapshot FROM the #17-to-#42 window (block present, no `inert` key)
+    still calls through to `_lean_from_transition_watch`, which is where
+    THAT epoch's `inert: None` (deployability unknown, distinct from this
+    function's own whole-dict `None`) is produced — see Finding M1."""
     tw = (snap or {}).get("transition_watch")
     if not isinstance(tw, dict):
         return None
