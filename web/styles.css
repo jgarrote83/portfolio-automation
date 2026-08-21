@@ -98,3 +98,39 @@ tbody tr:hover { background: #1a1f2a; }
 .badge.structural { background: #3b2a20; color: #e0a24d; }
 .banner { background: #2a2510; border: 1px solid #5a4a1a; border-radius: 6px;
   padding: .6rem 1rem; margin: 0 0 1rem; }
+
+/* Regime-call accountability scorecard (2026-08-21 SWA lean-visibility cycle,
+   Task A) — a visually SEPARATE, boxed row beneath the plain basket-return
+   chips: those answer "how did the basket do?", this answers "how did our
+   picking do?" (dashed chip borders + its own label make the distinction
+   legible, not just the numbers). */
+.quad-accountability {
+  margin: 0 0 1.25rem; padding: .65rem .8rem;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+}
+.accountability-label { font-size: .8rem; color: var(--muted); margin-bottom: .5rem; }
+.accountability-row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+.accountability-row .chip { border-style: dashed; }
+/* PR #42's Task E made `suspect` reachable for the first time — it has no
+   live precedent, so this badge is deliberately loud, not subtle. */
+.badge.suspect {
+  display: inline-block; margin-left: .4rem; padding: .05rem .5rem;
+  border-radius: 999px; font-size: .78em; font-weight: 700;
+  background: #3a1414; color: #ff7a70; border: 1px solid #5c1f1f;
+  cursor: help;
+}
+.lean-legend { margin: .5rem 0 0; display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+.lean-legend .swatch-rail {
+  display: inline-block; width: 22px; height: 8px; border-radius: 2px; vertical-align: middle;
+}
+.lean-legend .swatch-rail.inert {
+  background: transparent; border: 1.5px dashed #9085e9;
+}
+/* Finding M1 (PR #43 review): a THIRD, deliberately faint treatment for
+   "a real projected quadrant, deployability never recorded" -- same alpha
+   (0.20) the leanRail plugin itself uses for this state, no border, so it
+   reads as neither "deployed" (a bold solid) nor "known blocked" (a dashed
+   outline). */
+.lean-legend .swatch-rail.unknown {
+  background: rgba(25, 158, 112, .20); border: none;
+}

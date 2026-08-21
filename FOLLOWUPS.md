@@ -3,7 +3,20 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-08-21 (quadrant selection reachability: diagonal projection, inflation-confirmation semantics, structural tape scores, per-axis divergence eligibility, reachable accountability, inert-lean diagnostic, branch `fix/20260821-quadrant-reachability`).**
+**▶ START HERE — last session 2026-08-21, later same day (SWA regime-lean visibility: transition-lean rail on the performance chart, regime-call accountability scorecard, reachable-suspect badge, branch `feat/20260821-swa-lean-visibility`).**
+See entry **#81** below for the full per-task design (Tasks A/B) — the
+instrumentation that should land BEFORE decision **D-3** resolves, so the
+first live joint lean (once it stages) is watched on the chart rather than
+inferred from JSON. Includes a real premise correction found during
+implementation (the SWA API has zero access to `risk-limits.json`, so
+`suspect_path` needed a small collector addition, not a pure passthrough)
+and a real regression the literal task spec would have missed (B1a: the
+backfill guard's naive `"closes" in existing` check would have silently
+never backfilled `lean` onto any pre-existing perf-series point). One new
+low-priority tooling gap logged as entry **#82**. Suite 1330→1354, ruff
+clean. **Auto-merge: NO, human review required.**
+
+**▶ Prior session 2026-08-21 (quadrant selection reachability: diagonal projection, inflation-confirmation semantics, structural tape scores, per-axis divergence eligibility, reachable accountability, inert-lean diagnostic, branch `fix/20260821-quadrant-reachability`) — merged, PR #42.**
 See entry **#77** below for the full per-task design (Tasks A/C/D/B/E/F) and the
 required end-to-end probe showing exactly what decision **D-3** (entry **#78**)
 buys — at the current default the reachability fix has nothing to compose with
@@ -391,6 +404,22 @@ wiped them.
 ---
 
 ## Open
+
+### 82. `scripts/validate_palette.js` referenced by `web/performance.js` but absent from the repo (LOW — tooling gap, cross-refs #81)
+`web/performance.js`'s file-header comment (originally added for the Flex
+Sleeve Performance Ledger's `SLEEVE_COLOR`, session 2026-08-10) documents a
+palette-validation standard — contrast ≥3:1 and CVD ΔE ≥8 against the panel
+surface and every existing series color — and says it was "validated with
+`scripts/validate_palette.js`." That script does not exist anywhere in this
+repo; it was referenced but never committed. The 2026-08-21 SWA
+lean-visibility cycle (entry **#81**) hit this gap directly (Task B3a) and
+deliberately sidestepped it by reusing existing QCOLOR/QTINT hues at a
+different opacity/treatment for the transition-lean rail, rather than
+introducing a new color that would need validation this script doesn't
+exist to run. Either write the script for real (a small contrast +
+CVD-simulated-ΔE checker, per the `dataviz` skill's stated method) or stop
+citing it in comments until it exists — a comment claiming a validation ran
+that cannot actually be re-run is worse than no claim at all.
 
 ### 61. Sleeve-appropriate Phase C grading — realized R-multiple + component regression, not calendar drift (MEDIUM — data-gated, cross-refs #23 + #58)
 From the 2026-08-10 Flex Sleeve Performance Ledger session (entry **#60**),
@@ -2014,6 +2043,139 @@ fills (or explains a deviation).
 ---
 
 ## Done
+### 81. 2026-08-21 session: SWA regime-lean visibility — transition-lean rail on the performance chart, regime-call accountability scorecard, reachable-suspect badge — Done, branch `feat/20260821-swa-lean-visibility` (auto-merge: NO, human review required)
+Mission: PR #42 (entry **#77**) made Q2 reachable and made the quadrant call
+accountable — neither change was visible anywhere in the UI (grep across
+`web/` found exactly one field read from anything #42 touched:
+`favored_bucket`; zero references to `quadrant_performance`,
+`transition_watch`, or `market_implied_quadrant`). The specific hazard: the
+performance chart's regime bands shade from realized axes only — once
+decision **D-3** (entry **#78**) resolves and a joint lean stages toward a
+projected quadrant, that lean would move real reference weight and real
+dollars with the chart still showing no indication anything changed. This
+cycle instruments the fix so the first live joint lean can be WATCHED, not
+inferred from JSON. Shipped ahead of D-3 per instruction.
+
+- **Task A — regime-call accountability panel.** `quadrant_performance`
+  already lands in the daily snapshot; `_attach_quadrant_accountability`
+  (`web/api/function_app.py`, mirrors `_attach_sleeve_series`'s degrade-to-
+  unchanged contract exactly) attaches a `quadrant_accountability` block to
+  the `/api/performance` response — `cumulative_favored_excess_pp`,
+  `trailing_excess_pp`, `favored_sessions`, `favored_streak`, `suspect`,
+  `suspect_path` per bucket. **Premise correction (empirically verified, not
+  assumed):** `web/api/*.py` has ZERO references to `risk-limits.json` or
+  `src/config` anywhere — it is a separate deployment with no filesystem
+  access to that config, so the ORIGINAL plan ("no collector change needed,
+  it's a passthrough") was wrong for `suspect_path` specifically: the API
+  cannot itself determine which of `suspect`'s two OR'd conditions fired
+  without the thresholds it doesn't have. Fixed with a small, justified
+  collector addition — `_build_quadrant_performance` now also emits
+  `suspect_path` (`"streak"`/`"rolling"`/`"both"`/`None`), computed from the
+  SAME two booleans `suspect` itself combines, so it can never disagree with
+  `suspect`. The trailing-window key (`trailing_excess_pp_{N}`/
+  `favored_sessions_{N}`) is discovered by prefix match, never hardcoded to
+  20, and normalized to fixed output names (`trailing_excess_pp`/
+  `favored_sessions`) with the discovered `N` surfaced once at the top level
+  (`trailing_window_sessions`) for the renderer's "8/20 sessions favored"
+  copy. The web panel (`performance.html`/`.js`) renders this as a
+  VISUALLY SEPARATE, dashed-border, boxed row beneath the existing
+  basket-return chips — those answer "how did the basket do?", this answers
+  "how did our picking do?" — with a deliberately LOUD red suspect badge
+  (PR #42's Task E made `suspect` reachable for the first time; it has no
+  live precedent) whose tooltip names which path fired without ever
+  mislabeling a rolling-path fire as a consecutive streak.
+- **Task B — the D-3 observation surface: transition-lean rail on the
+  chart.** `_perf_point` gains an optional `lean` field
+  (`{projected_quadrant, direction, staged_fraction, inert}`), stamped from
+  the CONFIRMED `transition_watch` block (post-`_confirm_transition_watch`,
+  so `staged_fraction` is the APPLIED value). **B1a (a real regression the
+  literal spec wording would have missed):** the historical backfill loop's
+  guard was `"closes" in existing: continue` — adding `lean` this way would
+  have meant NO pre-existing perf-series point ever got backfilled with a
+  lean, ever (the chart would only show the rail for sessions after
+  deploy). Fixed: the guard now checks `"closes" in existing AND "lean" in
+  existing`, and the patch branch sets `existing["lean"]` alongside the
+  fields it already patches. **B1b (never fabricate):** a snapshot
+  predating FOLLOWUPS #17 (no `transition_watch` key at all) backfills
+  `lean: None` — key PRESENT (preserving the at-most-once-more re-read
+  property) but value `None`, distinct from a KNOWN no-lean day (a dict
+  with `projected_quadrant: None` — still a real, checked value). This
+  three-state requirement (omitted / explicitly `None` / a real dict)
+  needed a sentinel default (`_LEAN_UNSET`) in `_perf_point`, since a plain
+  `None` default can't distinguish "caller didn't pass lean" from "caller
+  passed lean=None on purpose." B2: `web/api/function_app.py`'s series
+  comprehension passes `lean` through (`p.get("lean")`, tolerates absence).
+  B3: a NEW, separate `leanRail` Chart.js plugin (deliberately NOT folded
+  into the existing `regimeBands` plugin, and added ONLY to the main
+  chart's plugin list, never the sleeve panel) draws a thin ~9px rail along
+  the chart-area bottom — solid fill at higher opacity than the realized
+  band's tint for an active lean, a dashed OUTLINE (not hatching — the
+  simpler alternative the spec explicitly permitted) for an inert one, and
+  blank for no lean (known or unknown history alike). **B3a:**
+  `scripts/validate_palette.js`, referenced by this file's own header
+  comment, does not exist in the repo (logged separately as entry **#82**);
+  sidestepped by reusing the ALREADY-validated QCOLOR/QTINT hues at a
+  different opacity/treatment for the rail — no new hue introduced, so no
+  new validation is needed. B4: the tooltip footer callback gains a second
+  line — "Lean: Q2 (re_risk, 10%)", or "... — gate-blocked, not buyable"
+  when inert.
+- **Verification.** Suite 1330→1354 (24 new: 4 collector `suspect_path` +
+  9 API `_attach_quadrant_accountability` + 9 collector `lean`
+  stamping/backfill + 2 API `lean` passthrough), `ruff check .` clean (0
+  before, 0 after — delta zero). Every new/modified test confirmed FAILING
+  on post-#42 `master` source before implementation (KeyError/AttributeError/
+  assertion mismatches — see the PR body for the exact output). A real
+  before/after probe (not just the unit tests) confirmed the B1a backfill
+  guard: 1/3 pre-existing points carrying a `lean` key before the fix, 3/3
+  after, with the two previously-partial points correctly patched from their
+  snapshot's `transition_watch`. **A rendered screenshot** (a standalone
+  Playwright-driven harness loading the REAL `performance.js`/`styles.css`
+  against a synthetic 30-session payload — never a mockup) confirmed all
+  three rail states render distinguishably: blank (unknown history, days
+  1-10), solid orange fill (active Q2 lean, days 11-20), dashed green
+  outline (inert Q1 lean, days 21-30) — see the PR body for the image.
+- **PR #43 review, Finding M1 (blocking, fixed same PR before merge) — a
+  THIRD history epoch, not two.** `transition_watch` has existed since
+  FOLLOWUPS #17 (~2026-07-23); PR #42's Task F is what started stamping
+  `inert` onto it, merging three weeks later (2026-08-21). The original
+  `bool(tw.get("inert"))` collapsed the resulting in-between epoch (block
+  present, no `inert` key) into `False` — "known deployable" — for the
+  entire #17-to-#42 window, including sessions that were in fact
+  gate-blocked (Q1 leans under a closed gate, 2026-08-19 through 08-21,
+  confirmed 3/3 amplifier-blocked per PR #42's Task F probe). That window
+  is the most recent third of the YTD chart and the direct "before"
+  picture the first live joint Q2 lean will be judged against. Fixed:
+  `_lean_from_transition_watch` now reads `inert` as `bool(tw["inert"]) if
+  "inert" in tw else None` — the SAME rule also covers a live-path
+  degradation (`_transition_lean_diagnostics` runs inside a non-fatal
+  `try`; if it ever raises, the confirmed block reaches this function
+  with no `inert` key either). `web/performance.js`'s `leanRail` plugin
+  gained a THIRD rail state (`unknown` — a faint fill at its own lower
+  opacity, no outline, keeping the quadrant hue since the projection
+  itself is known even when deployability isn't), gated on an explicit
+  `lean.inert == null` check rather than a bare falsy test (a bare test
+  is exactly the bug that produced this finding). Legend and tooltip
+  gained matching third-state wording — never reusing "gate-blocked" for
+  a session that was never evaluated, which would assert a fact the data
+  doesn't support (the same class of error as asserting "deployed").
+  **Explicitly not done, per instruction:** historical inertness was NOT
+  re-derived from `projected_quadrant` + `regime_gate.status`, even though
+  it would usually come out right — that would violate echo-never-re-derive
+  and paper over a roster state (semis `SMH`/`SOXX`) that genuinely changed
+  mid-window. `None` is the honest answer. Suite 1354→1361 (+7: 5 new M1
+  tests + 2 regression guards), `ruff check .` delta zero vs master,
+  screenshot replaced (not appended) with a 4-state version (blank / faint
+  unknown / solid active / dashed inert, all four distinguishable at a
+  glance) — see the PR body.
+- **Out of scope, confirmed untouched:** `transition_watch`/
+  `quadrant_performance`/`market_implied_quadrant` COMPUTATION (this cycle
+  is display-only — the one exception, `suspect_path`, is a pure echo of
+  logic `suspect` already computed, not new computation); decision **D-3**
+  itself (this is the instrumentation that should precede it, not the
+  decision); `structural_*` scores in the UI (deferred, worth doing later);
+  `today.js`/`portfolio.js`/`history.js`/`learning.js` (verified zero
+  references to any changed block).
+
 ### 77. 2026-08-21 session: Quadrant selection reachability — diagonal projection, inflation-confirmation semantics, structural tape scores, per-axis divergence eligibility, reachable accountability, inert-lean diagnostic — Done, branch `fix/20260821-quadrant-reachability` (auto-merge: NO, human review required)
 Mission: the book lost to SPY on SELECTION, not cash drag, over 2026-05-26→08-21
 (portfolio +0.33% vs SPY +1.60%; Q2 Reflation +4.82%/+3.22pp excess and Q3
