@@ -74,6 +74,17 @@ def test_perf_point_lean_absent_when_not_passed():
     assert "lean" not in p
 
 
+def test_perf_point_carries_quadrant_map():
+    qm = {"Q1": ["SPY", "QQQ"], "Q2": ["XLI"]}
+    p = _perf_point("2026-07-02", 100_000.0, 620.0, None, quadrant_map=qm)
+    assert p["quadrant_map"] == qm
+
+
+def test_perf_point_quadrant_map_absent_when_not_passed():
+    p = _perf_point("2026-07-02", 100_000.0, 620.0, None)
+    assert "quadrant_map" not in p
+
+
 # --- _load_equity_spy_series: self-healing backfill ------------------------------
 
 def _snap(equity, spy, gld, g_dir, i_dir):
@@ -196,6 +207,55 @@ def test_live_point_lean_backward_compatible_when_param_omitted(monkeypatch):
     monkeypatch.setattr(ch, "write_perf_series", lambda s: None)
     out = _load_equity_spy_series("2026-08-21", 100_000.0, 620.0, None)
     assert out[0]["lean"]["projected_quadrant"] is None
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-21 measurement-integrity cycle, Task A2 -- the LIVE point carries
+# `quadrant_map` (today's effective membership); historical/backfilled
+# points NEVER get it computed, by explicit design (see the docstring on
+# `_load_equity_spy_series` -- reconstructing a past day's membership is the
+# defect, not the remedy).
+# ---------------------------------------------------------------------------
+
+def test_live_point_carries_passed_quadrant_map(monkeypatch):
+    monkeypatch.setattr(ch, "read_perf_series", lambda: [])
+    monkeypatch.setattr(ch, "list_snapshot_dates", lambda: [])
+    monkeypatch.setattr(ch, "write_perf_series", lambda s: None)
+    qm = {"Q1": ["SPY", "QQQ"], "Q2": ["XLI"]}
+    out = _load_equity_spy_series(
+        "2026-08-21", 100_000.0, 620.0, None, quadrant_map=qm,
+    )
+    assert out[0]["quadrant_map"] == qm
+
+
+def test_live_point_quadrant_map_absent_when_omitted(monkeypatch):
+    monkeypatch.setattr(ch, "read_perf_series", lambda: [])
+    monkeypatch.setattr(ch, "list_snapshot_dates", lambda: [])
+    monkeypatch.setattr(ch, "write_perf_series", lambda s: None)
+    out = _load_equity_spy_series("2026-08-21", 100_000.0, 620.0, None)
+    assert "quadrant_map" not in out[0]
+
+
+def test_backfill_never_computes_quadrant_map_for_historical_points(monkeypatch):
+    """Explicit design guard: a historical point patched by the self-healing
+    backfill (closes/favored_bucket/lean all present) must NEVER gain a
+    `quadrant_map` key -- this cycle deliberately does not attempt to
+    reconstruct historical membership, even though the snapshot is being
+    read anyway for other fields."""
+    partially_hydrated = _perf_point("2026-06-01", 100_000.0, 600.0, None,
+                                      closes={"GLD": 300.0}, favored=["Q4"])
+    monkeypatch.setattr(ch, "read_perf_series", lambda: [partially_hydrated])
+    monkeypatch.setattr(ch, "list_snapshot_dates", lambda: ["2026-06-01"])
+    monkeypatch.setattr(ch, "read_snapshot", lambda d: {
+        "paper_account": {"equity": 100_000.0, "cash": None},
+        "prices": {"SPY": {"c": 600.0}, "GLD": {"c": 300.0}},
+        "growth_axis": {"direction": "falling"},
+        "inflation_axis": {"direction": "falling"},
+    })
+    monkeypatch.setattr(ch, "write_perf_series", lambda s: None)
+    out = _load_equity_spy_series("2026-06-02", None, None, None)
+    by_date = {p["date"]: p for p in out}
+    assert "quadrant_map" not in by_date["2026-06-01"]
 
 
 # ---------------------------------------------------------------------------
@@ -349,47 +409,129 @@ def test_backfill_lean_patch_is_at_most_once(monkeypatch):
 
 
 # --- API _quadrant_series ---------------------------------------------------------
+# 2026-08-21 measurement-integrity cycle, Task A -- three defects fixed, all of
+# which previously biased basket returns UPWARD:
+#   A1: a member lacking a price at the window's FIRST point is now excluded
+#       from that window's index entirely (never based-in retroactively).
+#   A2: the window prefers `points[0]`'s OWN recorded `quadrant_map` (the
+#       day's actual effective membership) over today's current config.
+#   A3: the member set is FIXED for the window (by A1) -- any day missing ANY
+#       fixed member gaps the WHOLE day for that quadrant, never a partial
+#       average over fewer members (which silently changes the divisor).
+# `_quadrant_series` now returns `(rows, coverage, meta)` -- coverage is a
+# per-point/per-quadrant `{members_priced, members_expected}` list; meta is
+# the one-time `quadrant_index_meta` block (membership_basis +
+# members_used/members_dropped/window_start per quadrant).
 
 def test_quadrant_index_equal_weight():
+    """Unaffected by A1/A2/A3: both members present at window start and
+    throughout -- same numeric result as before, new return shape."""
     pts = [
         {"closes": {"A": 100.0, "B": 200.0}},
         {"closes": {"A": 110.0, "B": 190.0}},  # +10% and -5% -> +2.5%
     ]
-    out = swa_api._quadrant_series(pts, {"Q1": ["A", "B"]})
-    assert out[0]["Q1"] == 100.0
-    assert out[1]["Q1"] == 102.5
+    rows, coverage, meta = swa_api._quadrant_series(pts, {"Q1": ["A", "B"]})
+    assert rows[0]["Q1"] == 100.0
+    assert rows[1]["Q1"] == 102.5
+    assert meta["Q1"]["members_used"] == ["A", "B"]
+    assert meta["Q1"]["members_dropped"] == []
+    assert coverage[1]["Q1"] == {"members_priced": 2, "members_expected": 2}
 
 
 def test_quadrant_index_none_when_no_members_priced():
     pts = [{"closes": {"A": 100.0}}, {"closes": {"A": 101.0}}]
-    out = swa_api._quadrant_series(pts, {"Q2": ["X", "Y"]})
-    assert out == [{"Q2": None}, {"Q2": None}]
+    rows, coverage, meta = swa_api._quadrant_series(pts, {"Q2": ["X", "Y"]})
+    assert rows == [{"Q2": None}, {"Q2": None}]
+    assert meta["Q2"]["members_used"] == []
+    assert sorted(meta["Q2"]["members_dropped"]) == ["X", "Y"]
 
 
-def test_late_appearing_member_bases_at_first_appearance():
-    # B has no close on day 0; its base is day 1's 50.0, so day 2 it contributes
-    # +10% rather than a spurious level shift.
+def test_member_missing_at_window_start_excluded_not_backdated():
+    """A1: B has no close on day 0 -- it is DROPPED from the whole window
+    (never based-in on day 1 as the old behavior did). A and C remain (>=2),
+    so the index is computed from them; B never contributes, even once priced."""
     pts = [
-        {"closes": {"A": 100.0}},
-        {"closes": {"A": 100.0, "B": 50.0}},
-        {"closes": {"A": 100.0, "B": 55.0}},
+        {"closes": {"A": 100.0, "C": 200.0}},               # B absent at window start
+        {"closes": {"A": 100.0, "B": 50.0, "C": 210.0}},    # B appears -- still excluded
+        {"closes": {"A": 100.0, "B": 55.0, "C": 220.0}},
     ]
-    out = swa_api._quadrant_series(pts, {"Q1": ["A", "B"]})
-    assert out[0]["Q1"] == 100.0
-    assert out[1]["Q1"] == 100.0            # (100 + 100) / 2
-    assert out[2]["Q1"] == 105.0            # (100 + 110) / 2
+    rows, coverage, meta = swa_api._quadrant_series(pts, {"Q1": ["A", "B", "C"]})
+    assert meta["Q1"]["members_used"] == ["A", "C"]
+    assert meta["Q1"]["members_dropped"] == ["B"]
+    assert rows[0]["Q1"] == 100.0
+    assert rows[1]["Q1"] == 102.5   # (100 + 105) / 2 -- B's 50.0 never enters this
+    assert rows[2]["Q1"] == 105.0   # (100 + 110) / 2
+    assert coverage[1]["Q1"] == {"members_priced": 2, "members_expected": 2}
 
 
-def test_member_missing_a_day_is_skipped_that_day():
+def test_single_usable_member_quadrant_is_none_for_whole_window():
+    """A one-name 'basket' is not a basket -- None for every point, even
+    though the single member is priced every single day."""
+    pts = [{"closes": {"GLD": 100.0}}, {"closes": {"GLD": 108.0}}]
+    rows, coverage, meta = swa_api._quadrant_series(pts, {"Q3": ["GLD"]})
+    assert rows == [{"Q3": None}, {"Q3": None}]
+    assert meta["Q3"]["members_used"] == ["GLD"]   # priced, just not enough on its own
+    assert meta["Q3"]["members_dropped"] == []
+
+
+def test_member_missing_mid_window_gaps_whole_day_not_partial_average():
+    """A3: A and B are both usable (both priced at window start). B goes
+    missing on day 1 -- the WHOLE quadrant is None that day (a gap), never a
+    partial average over A alone (which would silently change the divisor
+    and bias the reading toward whichever member happened to still be priced).
+    Day 2 recovers once both are priced again."""
     pts = [
         {"closes": {"A": 100.0, "B": 200.0}},
-        {"closes": {"A": 104.0}},            # B unpriced -> average over A only
+        {"closes": {"A": 104.0}},                 # B unpriced this day only
+        {"closes": {"A": 108.0, "B": 210.0}},
     ]
-    out = swa_api._quadrant_series(pts, {"Q1": ["A", "B"]})
-    assert out[1]["Q1"] == 104.0
+    rows, coverage, meta = swa_api._quadrant_series(pts, {"Q1": ["A", "B"]})
+    assert rows[0]["Q1"] == 100.0
+    assert rows[1]["Q1"] is None
+    assert rows[2]["Q1"] == round((108.0 + 105.0) / 2, 3)
+    assert coverage[1]["Q1"] == {"members_priced": 1, "members_expected": 2}
+    assert coverage[0]["Q1"] == {"members_priced": 2, "members_expected": 2}
 
 
-def test_overlapping_membership_both_quadrants():
-    pts = [{"closes": {"GLD": 100.0}}, {"closes": {"GLD": 108.0}}]
-    out = swa_api._quadrant_series(pts, {"Q3": ["GLD"], "Q4": ["GLD"]})
-    assert out[1]["Q3"] == 108.0 and out[1]["Q4"] == 108.0
+def test_overlapping_membership_both_quadrants_with_two_members_each():
+    pts = [
+        {"closes": {"GLD": 100.0, "TLT": 50.0}},
+        {"closes": {"GLD": 108.0, "TLT": 55.0}},
+    ]
+    rows, coverage, meta = swa_api._quadrant_series(
+        pts, {"Q3": ["GLD", "TLT"], "Q4": ["GLD", "TLT"]})
+    expected = round((108.0 + 110.0) / 2, 3)
+    assert rows[1]["Q3"] == expected and rows[1]["Q4"] == expected
+
+
+# --- A2: per-point quadrant_map preference + membership_basis disclosure ---
+
+def test_uses_points_own_quadrant_map_when_present():
+    """The window's own recorded membership at day 0 (`quadrant_map`) is
+    preferred over the CURRENT fallback map passed in -- the whole point of
+    A2 (avoid applying today's post-switch roster to yesterday's index)."""
+    pts = [
+        {"closes": {"A": 100.0, "B": 200.0, "SOXX": 300.0},
+         "quadrant_map": {"Q1": ["A", "B"]}},   # day 0's OWN actual membership
+        {"closes": {"A": 110.0, "B": 190.0, "SOXX": 330.0}},
+    ]
+    # Fallback (today's current config) would include SOXX -- must be ignored.
+    rows, coverage, meta = swa_api._quadrant_series(pts, {"Q1": ["A", "B", "SOXX"]})
+    assert meta["membership_basis"] == "as_of"
+    assert meta["Q1"]["members_used"] == ["A", "B"]
+    assert rows[1]["Q1"] == 102.5
+
+
+def test_falls_back_to_current_map_when_point_lacks_own_map_and_discloses():
+    pts = [
+        {"closes": {"A": 100.0, "B": 200.0}},   # no "quadrant_map" key -- predates A2
+        {"closes": {"A": 110.0, "B": 190.0}},
+    ]
+    rows, coverage, meta = swa_api._quadrant_series(pts, {"Q1": ["A", "B"]})
+    assert meta["membership_basis"] == "current_map_applied_retroactively"
+    assert rows[1]["Q1"] == 102.5   # still computes -- contaminated, but disclosed
+
+
+def test_empty_points_returns_empty_everything():
+    rows, coverage, meta = swa_api._quadrant_series([], {"Q1": ["A"]})
+    assert rows == [] and coverage == [] and meta == {}

@@ -77,6 +77,7 @@
     if (!series.length) { el.innerHTML = ""; return; }
     const last = series[series.length - 1];
     const spyRet = last.spy_norm != null ? last.spy_norm - 100 : null;
+    const meta = data.quadrant_index_meta || null;
     const rows = QUADS
       .map(q => ({ q, ret: last.quadrants[q] != null ? last.quadrants[q] - 100 : null }))
       .filter(r => r.ret != null);
@@ -84,13 +85,30 @@
     const best = rows.reduce((a, b) => (b.ret > a.ret ? b : a)).q;
     el.innerHTML = rows.map(({ q, ret }) => {
       const alpha = spyRet != null ? ret - spyRet : null;
-      return `<span class="chip${q === best ? " best" : ""}" title="${QLABEL[q]} equal-weight basket, this window">` +
+      // 2026-08-21 measurement-integrity cycle, Task A: disclose a dropped
+      // member (never hide it) directly in the chip's own tooltip.
+      const qMeta = meta && meta[q];
+      const dropped = qMeta && qMeta.members_dropped && qMeta.members_dropped.length
+        ? ` -- excludes ${qMeta.members_dropped.join("/")} (no price at window start)`
+        : "";
+      return `<span class="chip${q === best ? " best" : ""}" title="${QLABEL[q]} equal-weight basket, this window${dropped}">` +
         `<span class="swatch" style="background:${QCOLOR[q]}"></span>` +
         `${QLABEL[q]}${q === best ? " ★" : ""} ` +
         `<strong class="${cls(ret)}">${fmtPct(ret)}</strong>` +
         `<span class="muted"> (α ${fmtPct(alpha)})</span></span>`;
     }).join("") +
-      `<span class="muted bandnote">Shaded bands = favored quadrant(s) that day; ★ = best in window.</span>`;
+      `<span class="muted bandnote">Shaded bands = favored quadrant(s) that day; ★ = best in window. ` +
+      `These baskets carry no cash, flex, or international sleeve -- not an achievable alternative to the book.</span>` +
+      // 2026-08-21 measurement-integrity cycle, Task A2: disclose the
+      // look-ahead when the window's basket composition could not be
+      // anchored to its OWN first day's recorded membership (predates the
+      // quadrant_map stamping feature) -- never silently apply today's
+      // roster to history without saying so.
+      (meta && meta.membership_basis === "current_map_applied_retroactively"
+        ? `<span class="muted bandnote" style="display:block">⚠ Basket composition for this window uses TODAY's current roster ` +
+          `applied retroactively (no per-day membership recorded yet for the window start) -- a look-ahead toward whichever ` +
+          `incumbent is currently selected.</span>`
+        : "");
   }
 
   // Regime-call accountability scorecard (2026-08-21 SWA lean-visibility

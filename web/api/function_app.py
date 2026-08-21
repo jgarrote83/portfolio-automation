@@ -631,32 +631,85 @@ _WINDOW_DAYS = {
 }
 
 
-def _quadrant_series(points: list[dict], quadrant_map: dict) -> list[dict]:
+def _quadrant_series(points: list[dict], quadrant_map: dict) -> tuple[list[dict], list[dict], dict]:
     """Equal-weight buy-and-hold index (window start = 100) per quadrant basket.
 
-    Pure over the cache points (each carrying `closes`: {ticker: close}). A
-    member's base is its first close inside the window; a day's quadrant index
-    is the mean of member normalized closes available that day. A member with
-    no base yet contributes nothing (late-appearing tickers can't distort the
-    index retroactively); a quadrant with no members priced that day is None.
+    Pure over the cache points (each carrying `closes`: {ticker: close}, and
+    optionally its own `quadrant_map`). Returns `(rows, coverage, meta)`:
+    `rows[i][q]` is the index value or `None`; `coverage[i][q]` is
+    `{members_priced, members_expected}`; `meta` is the ONE-TIME
+    `quadrant_index_meta` block (`membership_basis` + per-quadrant
+    `members_used`/`members_dropped`/`window_start`).
+
+    2026-08-21 measurement-integrity cycle, Task A — three defects fixed, all
+    of which previously biased basket returns UPWARD:
+
+    A1 — a member lacking a price at the window's FIRST point is excluded
+    from that window's index ENTIRELY (never based-in retroactively once it
+    happens to appear later — the old behavior let a late-appearing ticker
+    enter at 100 without bearing the window's earlier drawdown). The member
+    set is therefore FIXED for the whole window, decided once from the first
+    point. A quadrant left with fewer than 2 usable members is `None` for
+    every point in the window — a one-name "basket" is not a basket.
+
+    A2 — the window prefers the first point's OWN recorded `quadrant_map`
+    (stamped by the collector at that day's effective role-selection
+    resolution) over `quadrant_map` (today's CURRENT config, passed in as
+    the fallback). Applying today's post-switch roster to yesterday's index
+    is a look-ahead biased toward whichever incumbent is currently winning.
+    `meta["membership_basis"]` is `"as_of"` when the first point carried its
+    own map, `"current_map_applied_retroactively"` when it didn't (the point
+    predates this feature — deliberately NOT backfilled by re-deriving from
+    a roster file; fallback + disclosure is the correct answer for history
+    that never recorded its own membership).
+
+    A3 — the member set is fixed (by A1), so a day missing ANY fixed member
+    gaps the WHOLE quadrant that day (`None`), never a partial average over
+    the remaining members — the old behavior silently changed the divisor
+    day to day, so a strong performer's temporary absence produced a dip
+    and snap-back that was a pure artifact of coverage, not performance.
     """
+    if not points:
+        return [], [], {}
+
+    first = points[0]
+    first_closes = first.get("closes") or {}
+    own_map = first.get("quadrant_map")
+    effective_map = own_map if isinstance(own_map, dict) else (quadrant_map or {})
+    membership_basis = "as_of" if isinstance(own_map, dict) else "current_map_applied_retroactively"
+
+    used_by_q: dict[str, list[str]] = {}
     bases: dict[str, float] = {}
-    out: list[dict] = []
+    meta: dict = {"membership_basis": membership_basis}
+    for q, members in effective_map.items():
+        used = [t for t in members if first_closes.get(t)]
+        dropped = [t for t in members if t not in used]
+        for t in used:
+            bases[t] = float(first_closes[t])
+        used_by_q[q] = used
+        meta[q] = {
+            "members_used": used,
+            "members_dropped": dropped,
+            "window_start": first.get("date"),
+        }
+
+    rows: list[dict] = []
+    coverage: list[dict] = []
     for p in points:
         closes = p.get("closes") or {}
-        for t, c in closes.items():
-            if c and t not in bases:
-                bases[t] = float(c)
         row: dict = {}
-        for q, members in (quadrant_map or {}).items():
-            vals = [
-                float(closes[t]) / bases[t] * 100.0
-                for t in members
-                if closes.get(t) and bases.get(t)
-            ]
-            row[q] = round(sum(vals) / len(vals), 3) if vals else None
-        out.append(row)
-    return out
+        cov_row: dict = {}
+        for q, used in used_by_q.items():
+            priced = [t for t in used if closes.get(t)]
+            cov_row[q] = {"members_priced": len(priced), "members_expected": len(used)}
+            if len(used) < 2 or len(priced) < len(used):
+                row[q] = None
+            else:
+                vals = [float(closes[t]) / bases[t] * 100.0 for t in used]
+                row[q] = round(sum(vals) / len(vals), 3)
+        rows.append(row)
+        coverage.append(cov_row)
+    return rows, coverage, meta
 
 
 def _sleeve_series(points: list[dict]) -> list[dict]:
@@ -869,6 +922,12 @@ def performance(req: func.HttpRequest) -> func.HttpResponse:
                 "spy_close": p.get("spy_close"),
                 "favored_bucket": p.get("favored_bucket") or [],
                 "lean": p.get("lean"),
+                # Task D (2026-08-21 measurement-integrity cycle): `_perf_point`
+                # has always written `cash_pct` -- nothing downstream ever read
+                # it (grep across web/ returned zero hits) even though cash is
+                # a deliberate strategic position in this book. Absent -> None,
+                # no exception (mirrors every other field here).
+                "cash_pct": p.get("cash_pct"),
             } for p in pts]
             if series:
                 p0 = series[0]["portfolio_value"]
@@ -883,9 +942,12 @@ def performance(req: func.HttpRequest) -> func.HttpResponse:
                         if s0 and pt["spy_close"] else None
                     )
             qmap = qcfg.get("quadrants") or {}
+            quadrant_index_meta = None
             if qmap:
-                for pt, row in zip(series, _quadrant_series(pts, qmap)):
+                rows, coverage, quadrant_index_meta = _quadrant_series(pts, qmap)
+                for pt, row, cov in zip(series, rows, coverage):
                     pt["quadrants"] = row
+                    pt["quadrant_coverage"] = cov
 
             latest_date, snap = _latest_snapshot()
             pf = (snap or {}).get("portfolio") or {}
@@ -901,6 +963,7 @@ def performance(req: func.HttpRequest) -> func.HttpResponse:
                 "holdings": holdings,
                 "balances": balances,
                 "quadrant_config": qcfg or None,
+                "quadrant_index_meta": quadrant_index_meta,
             }
             _attach_sleeve_series(payload, cutoff_str)
             _attach_quadrant_accountability(payload, snap)
