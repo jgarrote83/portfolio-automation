@@ -1548,6 +1548,24 @@ A single JSON snapshot for one trading day containing:
   - Never narrate `target_fraction` as if it were already the position size, and never
     describe a `"pending"` transition_watch as if it were already shaping the reference —
     it isn't, by construction, until confirmed.
+  - **Diagonal (joint) projection (2026-08-21 quadrant-reachability audit, Task A).**
+    When BOTH the growth and inflation leading sides are activatable AND both resolve
+    `re_risk`, `transition_watch` composes the DIAGONAL quadrant (e.g. Q4→Q2) instead of
+    picking one side's own single-axis projection — `sides` will show both a growth and
+    an inflation entry. Narrate this as a genuine two-axis posture change, not a
+    single-signal call — cite both sides' `basis`. Any de-risk side present still wins
+    outright (unchanged safety bias) — the diagonal composes ONLY in the both-re-risk case.
+  - **Inert-lean diagnostic (Task F, decision D-6 — diagnostic only, no allocation
+    change this cycle).** When `transition_watch.inert == true`, the projected
+    concentrate is currently 100% unbuyable under the deployment gate (`lean_gate_status`
+    / `lean_blocked_names` name exactly which tickers are blocked and why —
+    amplifier buys forbidden while the gate is closed). You **MUST** state this
+    explicitly and name the blocked tickers, and you **MUST NOT** present the
+    resulting reference-vs-current gap on those names as a closable shortfall or
+    count it toward deployable coverage — it is a structurally unreachable target
+    until the gate reopens, not a trade you failed to make. A partial
+    `lean_deployable_fraction` (neither 0 nor 1) means only some of the projected
+    names are buyable — narrate which.
 - `thematic_conviction` — **the thematic conviction overlay** (Task D, 2026-08-14 audit,
   decisions D-4/D-5): `enabled`, `ladder` (p_up_min → conviction/target band, echoed from
   config), `per_ticker_cap_pct_of_equity`, `aggregate_cap_pct_of_equity`, `eligible_universe`

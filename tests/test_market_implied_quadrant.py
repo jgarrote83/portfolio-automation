@@ -228,11 +228,86 @@ def test_confidence_capped_at_medium_on_axis_disagreement():
 
 
 # ---------------------------------------------------------------------------
+# 2026-08-21 quadrant-reachability audit, Task C: structural_* (non-basket)
+# scores — the circularity guard. Basket momentum must never contribute to
+# structural_growth_score/structural_inflation_score.
+# ---------------------------------------------------------------------------
+
+def test_structural_scores_exclude_basket_momentum():
+    """Strong Q2 basket momentum alone (no per-signal votes at all) drives the
+    LEGACY inflation_score way off zero, but must leave structural_vote_count
+    at 0 and structural_confidence at 'none' — proof the structural fields
+    never see the basket contribution."""
+    series = _rising_series(25, q2_boost=20.0)
+    result = _build_market_implied_quadrant(series, {}, {}, {}, _SERIES_TODAY)
+    assert result["inflation_score"] != 0.0
+    assert result["structural_growth_score"] == 0.0
+    assert result["structural_inflation_score"] == 0.0
+    assert result["structural_vote_count"] == 0
+    assert result["structural_confidence"] == "none"
+    assert result["structural_implied_quadrant"] == "borderline"
+
+
+def test_legacy_fields_unchanged_by_structural_addition():
+    """Regression guard: adding structural_* fields must not perturb the
+    legacy growth_score/inflation_score/confidence on a rich fixture (5
+    agreeing votes, high confidence) — these values were captured by running
+    this exact fixture against pre-Task-C source."""
+    series = _rising_series(25, q2_boost=20.0)
+    cache = _cc(cper=_rising_closes(100.0), gld=_flat_closes(50.0),
+                xly=_rising_closes(80.0), xlp=_flat_closes(40.0))
+    rr = {"dxy_tailwind_for_intl": "tailwind"}
+    result = _build_market_implied_quadrant(series, {}, {}, rr, _SERIES_TODAY, close_cache=cache)
+    assert result["growth_score"] == 329.792
+    assert result["inflation_score"] == 328.643
+    assert result["confidence"] == "high"
+
+
+def test_structural_confidence_capped_at_medium_on_disagreement():
+    """4 growth-axis structural votes (copper/gold, XLY/XLP, HY_OAS all
+    growth-positive; DXY growth-negative -> disagreement) + 1 inflation-axis
+    structural vote (breakevens) = structural_vote_count 5, which without
+    disagreement would earn 'high' -- must cap at 'medium'."""
+    series = _flat_series(25)
+    cache = _cc(cper=_rising_closes(100.0), gld=_flat_closes(50.0),
+                xly=_rising_closes(80.0), xlp=_flat_closes(40.0))
+    bond = {"credit": {"hy_oas": {"trend_4w": "tightening"}},
+            "breakevens": {"be_5y": {"delta_20d_bp": 20.0}}}
+    rr = {"dxy_tailwind_for_intl": "headwind"}   # disagrees with the other 3 growth votes
+    result = _build_market_implied_quadrant(series, {}, bond, rr, TODAY, close_cache=cache)
+    assert result["structural_vote_count"] == 5
+    assert result["structural_confidence"] == "medium"
+
+
+def test_structural_implied_quadrant_from_structural_scores_only():
+    """A fixture with strong basket momentum toward Q2 but structural votes
+    pointing toward Q4 (growth negative, inflation negative) must resolve
+    structural_implied_quadrant to Q4, not the basket-driven Q2 the legacy
+    implied_quadrant would show."""
+    series = _rising_series(25, q2_boost=20.0)
+    bond = {"credit": {"hy_oas": {"trend_4w": "widening"}},
+            "breakevens": {"be_5y": {"delta_20d_bp": -20.0}}}
+    rr = {"dxy_tailwind_for_intl": "headwind"}
+    result = _build_market_implied_quadrant(series, {}, bond, rr, _SERIES_TODAY)
+    assert result["structural_implied_growth"] == "falling"
+    assert result["structural_implied_inflation"] == "falling"
+    assert result["structural_implied_quadrant"] == "Q4"
+    assert result["implied_quadrant"] != result["structural_implied_quadrant"]
+
+
+# ---------------------------------------------------------------------------
 # _div_market_vs_macro_quadrant
 # ---------------------------------------------------------------------------
 
 def _miq(implied: str, confidence: str = "high") -> dict:
     return {"available": True, "implied_quadrant": implied, "confidence": confidence}
+
+
+def _miq_structural(growth_score=None, infl_score=None, **kw) -> dict:
+    m = _miq(**kw) if kw else {"available": True}
+    m["structural_growth_score"] = growth_score
+    m["structural_inflation_score"] = infl_score
+    return m
 
 
 def test_div_miq_fires_on_macro_mismatch():
@@ -286,6 +361,88 @@ def test_div_miq_more_defensive_direction():
     d = _div_market_vs_macro_quadrant(ref, _miq("Q4"), TODAY, 7, CFG)
     assert d["status"] == "active"
     assert d["direction_implied"] == "more_defensive"
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-21 quadrant-reachability audit, Task D: per-axis divergence
+# eligibility (`axis_status`). Additive only — the top-level `status` above
+# must never change because of this block.
+# ---------------------------------------------------------------------------
+
+def test_axis_status_growth_flat_inflation_active_top_level_unaffected():
+    """2026-08-21 case: growth structural score -0.073 (inside the 0.10
+    deadband -> flat/indeterminate) while inflation structural score +0.418
+    clears its 0.05 threshold and disagrees with realized falling inflation.
+    Top-level `status` stays indeterminate (low confidence) -- unchanged --
+    but axis_status.inflation must not be discarded just because growth is
+    quiet (F5's exact failure mode)."""
+    ref = {"active_quadrant": "", "favored_bucket": []}
+    miq = _miq_structural(growth_score=-0.073, infl_score=0.418, implied="borderline", confidence="low")
+    growth_axis = {"direction": "falling", "as_of": TODAY}
+    inflation_axis = {"direction": "falling", "realized_core_as_of": TODAY}
+    d = _div_market_vs_macro_quadrant(
+        ref, miq, TODAY, 7, CFG, growth_axis=growth_axis, inflation_axis=inflation_axis)
+    assert d["status"] == "indeterminate"
+    axis = d["axis_status"]
+    assert axis["growth"]["status"] == "indeterminate"
+    assert axis["inflation"]["status"] == "active"
+    assert axis["inflation"]["implied"] == "rising"
+    assert axis["inflation"]["realized"] == "falling"
+
+
+def test_axis_status_both_axes_active_when_disagreeing():
+    ref = {"active_quadrant": "Q4", "favored_bucket": []}
+    miq = _miq_structural(growth_score=0.30, infl_score=0.418, implied="Q2", confidence="high")
+    growth_axis = {"direction": "falling", "as_of": TODAY}
+    inflation_axis = {"direction": "falling", "realized_core_as_of": TODAY}
+    d = _div_market_vs_macro_quadrant(
+        ref, miq, TODAY, 7, CFG, growth_axis=growth_axis, inflation_axis=inflation_axis)
+    axis = d["axis_status"]
+    assert axis["growth"]["status"] == "active"
+    assert axis["inflation"]["status"] == "active"
+
+
+def test_axis_status_agreeing_axis_is_aligned_not_active():
+    ref = {"active_quadrant": "Q1", "favored_bucket": []}
+    miq = _miq_structural(growth_score=0.30, infl_score=0.0, implied="Q1", confidence="high")
+    growth_axis = {"direction": "rising", "as_of": TODAY}   # agrees with structural "rising"
+    inflation_axis = {"direction": "falling", "realized_core_as_of": TODAY}
+    d = _div_market_vs_macro_quadrant(
+        ref, miq, TODAY, 7, CFG, growth_axis=growth_axis, inflation_axis=inflation_axis)
+    assert d["axis_status"]["growth"]["status"] == "aligned"
+
+
+def test_axis_status_stale_inputs_never_false_active():
+    """Growth's realized as_of >7d stale (flat threshold); inflation's
+    realized_core_as_of >45d stale (monthly threshold, mirroring the B2
+    doctrine `_div_leading_vs_lagging_inflation` already uses) -- both must
+    read indeterminate even though both structural scores are decisive and
+    disagree with realized."""
+    ref = {"active_quadrant": "Q4", "favored_bucket": []}
+    miq = _miq_structural(growth_score=0.30, infl_score=0.418, implied="Q2", confidence="high")
+    growth_axis = {"direction": "falling", "as_of": "2026-06-01"}
+    inflation_axis = {"direction": "falling", "realized_core_as_of": "2026-06-01"}
+    d = _div_market_vs_macro_quadrant(
+        ref, miq, TODAY, 7, CFG, growth_axis=growth_axis, inflation_axis=inflation_axis)
+    assert d["axis_status"]["growth"]["status"] == "indeterminate"
+    assert d["axis_status"]["inflation"]["status"] == "indeterminate"
+
+
+def test_axis_status_present_even_without_axis_params_backward_compat():
+    ref = {"active_quadrant": "Q4", "favored_bucket": []}
+    d = _div_market_vs_macro_quadrant(ref, _miq("Q2"), TODAY, 7, CFG)
+    assert "axis_status" in d
+    assert d["axis_status"]["growth"]["status"] == "indeterminate"
+    assert d["axis_status"]["inflation"]["status"] == "indeterminate"
+
+
+def test_axis_status_present_when_miq_unavailable():
+    """Purely additive — even the early-return unavailable path must carry
+    axis_status (indeterminate, never a crash)."""
+    ref = {"active_quadrant": "Q4", "favored_bucket": []}
+    d = _div_market_vs_macro_quadrant(ref, {"available": False}, TODAY, 7, CFG)
+    assert d["axis_status"]["growth"]["status"] == "indeterminate"
+    assert d["axis_status"]["inflation"]["status"] == "indeterminate"
 
 
 # ---------------------------------------------------------------------------

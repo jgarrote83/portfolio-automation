@@ -4,7 +4,7 @@
   "leading_vs_lagging_inflation": {
     "breakeven_delta_20d_bp": 15.0,
     "oil_20d_pct": 10.0,
-    "_note": "Leading-inflation move counts as a signal when the 5y breakeven 20d delta is >= this many bp in magnitude, OR WTI's 20d move is >= this pct in magnitude. Fires when the leading direction disagrees with the realized inflation-axis direction (e.g. breakevens + oil falling while realized core is flat/sticky)."
+    "_note": "Leading-inflation move counts as a signal when the 5y breakeven 20d delta is >= this many bp in magnitude, OR WTI's 20d move is >= this pct in magnitude. Fires when the leading direction disagrees with the realized inflation-axis direction (e.g. breakevens + oil falling while realized core is flat/sticky). IMPORTANT (2026-08-21 quadrant-reachability audit, Task B, finding F2): this detector's own trigger is OR (either signal alone activates the DIVERGENCE). The DOWNSTREAM CONSUMER -- transition_watch's re-risk confirmation bar (risk-limits.json:transition_watch.re_risk_min_confirmations) -- is a SEPARATE, independent gate that counts how many of the (now three, Task B) sources agree before STAGING a re-risk lean; it has always effectively required 2-of-N, which is stricter than this detector's own OR. Do not conflate the two: a divergence firing active here does not by itself mean transition_watch's re-risk side will stage."
   },
 
   "credit_complacency": {
