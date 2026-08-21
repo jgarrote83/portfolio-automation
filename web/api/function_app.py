@@ -729,6 +729,71 @@ def _attach_sleeve_series(payload: dict, cutoff_str: str) -> None:
         payload["sleeve_closed_trade_count_total"] = 0
 
 
+def _attach_quadrant_accountability(payload: dict, snap: dict | None) -> None:
+    """Best-effort attach of the regime-call accountability scorecard
+    (`quadrant_performance`, PR #42 Task E) to a performance response.
+    Mirrors the `_attach_sleeve_series` contract exactly: an absent/malformed
+    block must yield the response UNCHANGED except `quadrant_accountability`
+    itself degrading to `{"available": False}` — never an exception, never a
+    fabricated value. Echoes only — never recomputes an excess or a suspect
+    flag; this API has no access to `risk-limits.json` (a separate
+    deployment) so it cannot re-derive thresholds even if it wanted to.
+
+    `trailing_window_sessions` is DISCOVERED from the bucket's own key names
+    (`trailing_excess_pp_{N}` / `favored_sessions_{N}`) rather than hardcoded,
+    so a future change to `risk-limits.json:quadrant_performance.
+    trailing_window_sessions` does not silently blank this panel. The
+    per-bucket output normalizes those dynamically-named keys to fixed names
+    (`trailing_excess_pp` / `favored_sessions`) — the discovered `N` is
+    surfaced once at the top level (`trailing_window_sessions`) for the
+    renderer's copy (e.g. "8/20 sessions favored").
+    """
+    payload["quadrant_accountability"] = {"available": False}
+    try:
+        qp = (snap or {}).get("quadrant_performance") or {}
+        buckets_in = qp.get("buckets")
+        if not qp.get("available") or not isinstance(buckets_in, dict):
+            return
+
+        trailing_n: str | None = None
+        for b in buckets_in.values():
+            if not isinstance(b, dict):
+                continue
+            for k in b:
+                if k.startswith("trailing_excess_pp_") and k[len("trailing_excess_pp_"):].isdigit():
+                    trailing_n = k[len("trailing_excess_pp_"):]
+                    break
+            if trailing_n:
+                break
+        if trailing_n is None:
+            return
+
+        buckets_out: dict = {}
+        for q, b in buckets_in.items():
+            if not isinstance(b, dict):
+                continue
+            buckets_out[q] = {
+                "cumulative_favored_excess_pp": b.get("cumulative_favored_excess_pp"),
+                "trailing_excess_pp": b.get(f"trailing_excess_pp_{trailing_n}"),
+                "favored_sessions": b.get(f"favored_sessions_{trailing_n}"),
+                "favored_streak": b.get("favored_streak"),
+                "suspect": bool(b.get("suspect")),
+                "suspect_path": b.get("suspect_path"),
+            }
+        if not buckets_out:
+            return
+
+        payload["quadrant_accountability"] = {
+            "available": True,
+            "as_of": qp.get("as_of"),
+            "trailing_window_sessions": int(trailing_n),
+            "buckets": buckets_out,
+        }
+    except Exception:  # noqa: BLE001
+        log.exception("quadrant accountability attach failed (non-fatal)")
+        payload["quadrant_accountability"] = {"available": False}
+
+
 def _holdings_from(positions: list, balances: dict, prices: dict) -> list[dict]:
     """Current holdings valuation rows (shared by the cache + legacy paths)."""
     holdings = []
@@ -803,6 +868,7 @@ def performance(req: func.HttpRequest) -> func.HttpResponse:
                 "portfolio_value": p.get("equity"),
                 "spy_close": p.get("spy_close"),
                 "favored_bucket": p.get("favored_bucket") or [],
+                "lean": p.get("lean"),
             } for p in pts]
             if series:
                 p0 = series[0]["portfolio_value"]
@@ -837,6 +903,7 @@ def performance(req: func.HttpRequest) -> func.HttpResponse:
                 "quadrant_config": qcfg or None,
             }
             _attach_sleeve_series(payload, cutoff_str)
+            _attach_quadrant_accountability(payload, snap)
             return _json(payload)
 
         # ── Legacy fallback (cache not yet populated): full snapshot scan.
@@ -904,6 +971,7 @@ def performance(req: func.HttpRequest) -> func.HttpResponse:
             "balances": latest_balances,
         }
         _attach_sleeve_series(payload, cutoff_str)
+        _attach_quadrant_accountability(payload, snap if all_names else None)
         return _json(payload)
     except Exception as e:
         log.exception("performance failed")

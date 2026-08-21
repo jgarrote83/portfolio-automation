@@ -317,3 +317,54 @@ def test_cumulative_favored_excess_sign_correct_when_lagging():
     series = _daily_series(rows)
     out = _build_quadrant_performance(series, {"Q3": ("GLD",)}, _QP_CFG)
     assert out["buckets"]["Q3"]["cumulative_favored_excess_pp"] < 0
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-21 SWA lean-visibility cycle, Task A (premise correction): the SWA
+# API (`web/api/function_app.py`) is a SEPARATE deployment with NO access to
+# `risk-limits.json` (verified: zero references to it or `src/config`
+# anywhere in `web/api/*.py`), so it cannot itself determine which suspect
+# path fired without re-deriving thresholds it doesn't have. `suspect_path`
+# is computed HERE, once, from the same two booleans `suspect` itself already
+# combines -- so it can never disagree with `suspect`, and the API only ever
+# echoes it.
+# ---------------------------------------------------------------------------
+
+def test_suspect_path_streak_only():
+    series = _daily_series(_losing_streak_rows(11))   # lagging=10, legacy fires
+    cfg = {"suspect_after_sessions": 10}               # rolling NOT configured
+    out = _build_quadrant_performance(series, {"Q3": ("GLD",)}, cfg)
+    b = out["buckets"]["Q3"]
+    assert b["suspect"] is True
+    assert b["suspect_path"] == "streak"
+
+
+def test_suspect_path_rolling_only():
+    series = _daily_series(_whipsaw_rolling_suspect_rows())  # lagging<=3, rolling fires
+    out = _build_quadrant_performance(series, {"Q3": ("GLD",)}, _QP_CFG)
+    b = out["buckets"]["Q3"]
+    assert b["suspect"] is True
+    assert b["lagging_sessions"] < _QP_CFG["suspect_after_sessions"]
+    assert b["suspect_path"] == "rolling"
+
+
+def test_suspect_path_both():
+    """A long enough monotonic losing streak trips BOTH the legacy streak
+    (lagging >= 10) and the rolling window (favored_sessions_20 >= 5 AND
+    trailing_excess_pp_20 < 0) simultaneously."""
+    series = _daily_series(_losing_streak_rows(21))   # lagging=20, favored every day
+    out = _build_quadrant_performance(series, {"Q3": ("GLD",)}, _QP_CFG)
+    b = out["buckets"]["Q3"]
+    assert b["lagging_sessions"] >= _QP_CFG["suspect_after_sessions"]
+    assert b["favored_sessions_20"] >= _QP_CFG["min_favored_sessions"]
+    assert b["trailing_excess_pp_20"] < 0
+    assert b["suspect"] is True
+    assert b["suspect_path"] == "both"
+
+
+def test_suspect_path_none_when_not_suspect():
+    series = _daily_series([(i, 100.0, 100.0, []) for i in range(5, -1, -1)])
+    out = _build_quadrant_performance(series, {"Q3": ("GLD",)}, _QP_CFG)
+    b = out["buckets"]["Q3"]
+    assert b["suspect"] is False
+    assert b["suspect_path"] is None

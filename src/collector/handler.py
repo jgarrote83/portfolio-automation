@@ -628,6 +628,34 @@ def _stamp_trade_outcomes(fmp: FMPClient) -> None:
 # Phase C §4 — performance scoreboard (account equity vs fully-invested SPY)
 # ---------------------------------------------------------------------------
 
+def _lean_from_transition_watch(tw: dict | None) -> dict:
+    """2026-08-21 SWA lean-visibility cycle, Task B — the perf-point `lean`
+    shape, extracted from a CONFIRMED `transition_watch` block (post-
+    `_confirm_transition_watch`, so `staged_fraction` is the APPLIED value,
+    not the raw target). Echo-only. A day with no active lean still gets
+    this exact shape with `projected_quadrant`/`direction` None — the KNOWN
+    no-lean state, distinct from UNKNOWN pre-#17 history (see
+    `_lean_from_snapshot`, which returns `None` instead of calling this)."""
+    tw = tw or {}
+    return {
+        "projected_quadrant": tw.get("projected_quadrant"),
+        "direction": tw.get("direction"),
+        "staged_fraction": float(tw.get("staged_fraction") or 0.0),
+        "inert": bool(tw.get("inert")),
+    }
+
+
+def _lean_from_snapshot(snap: dict) -> dict | None:
+    """`_lean_from_transition_watch`, sourced from a historical snapshot's
+    own `transition_watch` block — `None` (never a fabricated stub) when the
+    snapshot predates FOLLOWUPS #17 (2026-07-23), i.e. has no
+    `transition_watch` key at all: that is UNKNOWN history, not "no lean.\""""
+    tw = (snap or {}).get("transition_watch")
+    if not isinstance(tw, dict):
+        return None
+    return _lean_from_transition_watch(tw)
+
+
 def _load_equity_spy_series(
     today: str,
     equity: float | None,
@@ -636,6 +664,7 @@ def _load_equity_spy_series(
     prices: dict | None = None,
     growth_axis: dict | None = None,
     inflation_axis: dict | None = None,
+    transition_watch: dict | None = None,
 ) -> list[dict]:
     """Compact, self-healing (date, equity, spy_close, cash_pct) series.
 
@@ -651,6 +680,17 @@ def _load_equity_spy_series(
     (the day's quadrant read) for the web quadrant-vs-SPY chart. Points written
     before those fields existed are re-hydrated from their snapshot once (same
     at-most-once-more property as the original backfill).
+
+    2026-08-21 SWA lean-visibility cycle, Task B: each point also carries
+    `lean` (see `_lean_from_transition_watch`/`_lean_from_snapshot`) — the
+    confirmed `transition_watch` projection for that session, for the
+    performance chart's lean rail. The re-hydration guard now ALSO checks for
+    `"lean"` (not just `"closes"`) so a point written before this field
+    existed is patched too — checking `"closes"` alone would silently never
+    backfill `lean` onto any pre-existing point. `lean` is `None` (key
+    present, value `None`) rather than absent once checked, to preserve the
+    at-most-once-more re-read property for pre-#17 dates that will never
+    have a lean to find.
     """
     series = read_perf_series()
     by_date = {p.get("date"): p for p in series}
@@ -660,7 +700,7 @@ def _load_equity_spy_series(
         if d >= today:
             continue
         existing = by_date.get(d)
-        if existing is not None and "closes" in existing:
+        if existing is not None and "closes" in existing and "lean" in existing:
             continue
         try:
             snap = read_snapshot(d)
@@ -671,10 +711,13 @@ def _load_equity_spy_series(
             ((snap.get("growth_axis") or {}).get("direction")),
             ((snap.get("inflation_axis") or {}).get("direction")),
         )
+        lean = _lean_from_snapshot(snap)
         if existing is not None:
-            # v1 point predating the quadrant fields — patch in place.
+            # v1/partial point predating one or both of the quadrant/lean
+            # fields — patch in place.
             existing["closes"] = closes
             existing["favored_bucket"] = fav
+            existing["lean"] = lean
             changed = True
             continue
         eq = (snap.get("paper_account") or {}).get("equity")
@@ -682,7 +725,7 @@ def _load_equity_spy_series(
         if eq is None or sp is None:
             continue
         csh = (snap.get("paper_account") or {}).get("cash")
-        point = _perf_point(d, eq, sp, csh, closes=closes, favored=fav)
+        point = _perf_point(d, eq, sp, csh, closes=closes, favored=fav, lean=lean)
         series.append(point)
         by_date[d] = point
         changed = True
@@ -695,6 +738,7 @@ def _load_equity_spy_series(
                 (growth_axis or {}).get("direction"),
                 (inflation_axis or {}).get("direction"),
             ),
+            lean=_lean_from_transition_watch(transition_watch),
         )
         existing = by_date.get(today)
         if existing != point:
@@ -1037,10 +1081,20 @@ def _roster_closes(prices: dict | None) -> dict:
     return out
 
 
+# Sentinel distinct from `None` so `_perf_point(..., lean=None)` can mean
+# "checked, no lean data available" (key present, value None — the pre-#17
+# unknown-history case) while an OMITTED `lean` argument means "caller
+# doesn't use this feature at all" (key absent entirely) — `closes`/`favored`
+# have no such three-way need (a snapshot always has prices/axes), but `lean`
+# does (transition_watch didn't exist before FOLLOWUPS #17).
+_LEAN_UNSET = object()
+
+
 def _perf_point(
     d: str, equity, spy_close, cash,
     closes: dict | None = None,
     favored: list | None = None,
+    lean: dict | None = _LEAN_UNSET,
 ) -> dict:
     eq = round(float(equity), 2)
     point = {
@@ -1053,6 +1107,8 @@ def _perf_point(
         point["closes"] = closes
     if favored is not None:
         point["favored_bucket"] = favored
+    if lean is not _LEAN_UNSET:
+        point["lean"] = lean
     return point
 
 
@@ -1299,6 +1355,14 @@ def _build_quadrant_performance(
     never-reset, whole-series running total of day-over-day excess on favored
     sessions only — the daily scorecard for "is our quadrant picking adding
     value?".
+
+    2026-08-21 SWA lean-visibility cycle, Task A: `suspect_path`
+    (`"streak"`/`"rolling"`/`"both"`/`None`) records WHICH of the two OR'd
+    conditions above actually fired, computed from the same two booleans
+    `suspect` itself combines — never a second independent check. Added
+    because the SWA API (a separate deployment with no access to
+    `risk-limits.json`) cannot otherwise determine which path fired without
+    re-deriving thresholds it doesn't have.
     """
     if not series:
         return {"available": False, "note": "no perf series yet"}
@@ -1422,13 +1486,27 @@ def _build_quadrant_performance(
         row[f"trailing_excess_pp_{trailing_n}"] = trailing_excess
         row[f"favored_sessions_{trailing_n}"] = favored_sessions_n
         row["cumulative_favored_excess_pp"] = _cumulative_favored_excess(series, q, members, spy_map)
+        legacy_fired = bool(lagging >= suspect_after)
         rolling_suspect = bool(
             rolling_configured
             and favored_sessions_n >= min_favored_n
             and trailing_excess is not None
             and trailing_excess < suspect_excess_thr
         )
-        row["suspect"] = bool(favored_today_q and (lagging >= suspect_after or rolling_suspect))
+        row["suspect"] = bool(favored_today_q and (legacy_fired or rolling_suspect))
+        # 2026-08-21 SWA lean-visibility cycle, Task A: which path fired,
+        # computed from the SAME two booleans `suspect` itself combines (never
+        # a second independent computation) — the SWA API has no access to
+        # `risk-limits.json` and so cannot re-derive this from raw thresholds;
+        # it can only echo what the collector determined here.
+        if not row["suspect"]:
+            row["suspect_path"] = None
+        elif legacy_fired and rolling_suspect:
+            row["suspect_path"] = "both"
+        elif legacy_fired:
+            row["suspect_path"] = "streak"
+        else:
+            row["suspect_path"] = "rolling"
         buckets[q] = row
 
     spy_ret_30 = None
@@ -3328,6 +3406,7 @@ def run() -> None:
         series = _load_equity_spy_series(
             today, today_equity, today_spy, today_cash,
             prices=prices, growth_axis=growth_axis, inflation_axis=inflation_axis,
+            transition_watch=transition_watch,
         )
         performance = _build_performance(series)
         # Publish the quadrant basket membership for the web chart (the SWA API

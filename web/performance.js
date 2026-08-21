@@ -31,6 +31,7 @@
   let chart = null;
   let sleeveChart = null;
   let regimeKeys = [];  // per-point favored-bucket key, set before chart build
+  let leanKeys = [];    // per-point transition-lean key, set before chart build
 
   async function load(windowKey) {
     const summaryEl = document.getElementById("perf-summary");
@@ -42,7 +43,9 @@
       renderTable(data);
       renderSummary(data);
       renderQuadSummary(data);
+      renderQuadAccountability(data);
       renderSleeveSummary(data);
+      renderLeanLegend(data);
     } catch (e) {
       summaryEl.textContent = `Error: ${e.message}`;
     }
@@ -90,6 +93,55 @@
       `<span class="muted bandnote">Shaded bands = favored quadrant(s) that day; ★ = best in window.</span>`;
   }
 
+  // Regime-call accountability scorecard (2026-08-21 SWA lean-visibility
+  // cycle, Task A) — deliberately a SEPARATE panel from renderQuadSummary
+  // above. That one answers "how did the basket do?"; this one answers "how
+  // did OUR PICKING do?" (excess earned only on sessions the quadrant was
+  // favored — a basket can return strongly while our picking of it still
+  // lost, if it was favored at the wrong times). Echoes
+  // `data.quadrant_accountability` verbatim -- never recomputes an excess or
+  // a suspect flag client-side.
+  function suspectTitle(path, n) {
+    if (path === "both") {
+      return `Lagged SPY on a long consecutive run of sessions AND over the trailing ${n} sessions — both triggers fired.`;
+    }
+    if (path === "streak") {
+      return "Lagged SPY every session checked, consecutively, long enough to flag (legacy streak rule).";
+    }
+    if (path === "rolling") {
+      return `Favored on enough of the trailing ${n} sessions with negative excess over that window (rolling rule) — not necessarily one unbroken losing streak.`;
+    }
+    return "";
+  }
+
+  function renderQuadAccountability(data) {
+    const el = document.getElementById("quad-accountability");
+    if (!el) return;
+    const qa = data.quadrant_accountability;
+    if (!qa || !qa.available) { el.innerHTML = ""; return; }
+    const n = qa.trailing_window_sessions;
+    const chips = QUADS.filter(q => qa.buckets[q]).map(q => {
+      const b = qa.buckets[q];
+      const cum = b.cumulative_favored_excess_pp;
+      const trail = b.trailing_excess_pp;
+      const fs = b.favored_sessions;
+      const favText = (fs != null && n != null) ? `${fs}/${n} sessions favored` : "—";
+      const badge = b.suspect
+        ? `<span class="badge suspect" title="${suspectTitle(b.suspect_path, n)}">⚠ suspect</span>`
+        : "";
+      return `<span class="chip accountability" title="${QLABEL[q]} — excess vs SPY earned only on sessions this quadrant was favored">` +
+        `<span class="swatch" style="background:${QCOLOR[q]}"></span>` +
+        `${QLABEL[q]} <strong class="${cls(cum)}">${fmtPct(cum)}</strong>` +
+        `<span class="muted"> (trail ${fmtPct(trail)}, ${favText})</span>` +
+        badge +
+        `</span>`;
+    });
+    if (!chips.length) { el.innerHTML = ""; return; }
+    el.innerHTML =
+      `<div class="accountability-label">Regime-call scorecard — excess vs SPY earned only on sessions this quadrant was favored (did picking it add value?)</div>` +
+      `<div class="accountability-row">${chips.join("")}</div>`;
+  }
+
   // Background shading by the day's favored quadrant bucket. Contiguous days
   // with the same bucket become one band; a two-quadrant (borderline) bucket
   // splits the band into stacked half-height tints. Drawn before gridlines so
@@ -124,6 +176,78 @@
               ctx.font = "10px -apple-system, 'Segoe UI', sans-serif";
               ctx.textAlign = "center";
               ctx.fillText(key.replace("+", "/"), (left + right) / 2, area.top + 11);
+            }
+          }
+        }
+        i = j + 1;
+      }
+    },
+  };
+
+  // Transition-lean rail (2026-08-21 SWA lean-visibility cycle, Task B) —
+  // the D-3 observation surface: once decision D-3 resolves and a joint lean
+  // stages toward a projected quadrant, this is where it becomes visible
+  // rather than inferred from JSON. A SEPARATE plugin (not folded into
+  // regimeBands) so it is added ONLY to the main chart, never the sleeve
+  // panel below, and so the realized band's own logic stays untouched.
+  //
+  // Deliberately a THIN RAIL along the chart-area bottom, not a second
+  // full-height tint layer -- regimeBands already splits the full height
+  // into stacked strips for a two-quadrant favored bucket, and a second
+  // full-height overlay on top of that would make the realized band
+  // unreadable. The rail is drawn on its OWN visual track so a
+  // realized-Q4 / projected-Q2 session reads unambiguously as two different
+  // quadrants, never as one blended color.
+  //
+  // Color note (B3a): reuses the EXISTING QCOLOR/QTINT hues already
+  // validated for this panel (see the file-header comment) at a different
+  // opacity/treatment -- no new hue is introduced, so no new palette
+  // validation is required. `scripts/validate_palette.js` referenced there
+  // does not exist in this repo (FOLLOWUPS -- tracked separately); reusing
+  // existing hues sidesteps needing it here.
+  const LEAN_RAIL_HEIGHT = 9;
+  const LEAN_RAIL_ALPHA = 0.55;  // higher than QTINT's 0.10 band tint
+
+  function _leanRailFill(q) {
+    // QCOLOR is a hex "#rrggbb" -- reuse it at LEAN_RAIL_ALPHA rather than
+    // introducing a new color.
+    const hex = QCOLOR[q];
+    const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+    return `rgba(${r},${g},${b},${LEAN_RAIL_ALPHA})`;
+  }
+
+  const leanRail = {
+    id: "leanRail",
+    beforeDraw(c) {
+      const meta = leanKeys;
+      const area = c.chartArea;
+      const x = c.scales && c.scales.x;
+      if (!meta.length || !area || !x) return;
+      const ctx = c.ctx;
+      const step = meta.length > 1 ? x.getPixelForValue(1) - x.getPixelForValue(0) : 0;
+      const y = area.bottom - LEAN_RAIL_HEIGHT;
+      let i = 0;
+      while (i < meta.length) {
+        const key = meta[i];  // "Q2|active" / "Q1|inert" / null (no lean or unknown history)
+        let j = i;
+        while (j + 1 < meta.length && meta[j + 1] === key) j++;
+        if (key) {
+          const [q, state] = key.split("|");
+          if (QCOLOR[q]) {
+            const left  = Math.max(area.left,  x.getPixelForValue(i) - step / 2);
+            const right = Math.min(area.right, x.getPixelForValue(j) + step / 2);
+            if (state === "inert") {
+              // Hatched/outlined, never solid -- reference weight pointed at
+              // gate-blocked names is not deployed exposure.
+              ctx.save();
+              ctx.strokeStyle = QCOLOR[q];
+              ctx.lineWidth = 1.5;
+              ctx.setLineDash([3, 2]);
+              ctx.strokeRect(left, y, right - left, LEAN_RAIL_HEIGHT);
+              ctx.restore();
+            } else {
+              ctx.fillStyle = _leanRailFill(q);
+              ctx.fillRect(left, y, right - left, LEAN_RAIL_HEIGHT);
             }
           }
         }
@@ -176,8 +300,17 @@
               },
               footer: (items) => {
                 const p = series[items[0] && items[0].dataIndex];
+                const lines = [];
                 const b = p && p.favored_bucket;
-                return b && b.length ? `Favored: ${b.join("/")}` : "";
+                if (b && b.length) lines.push(`Favored: ${b.join("/")}`);
+                const lean = p && p.lean;
+                if (lean && lean.projected_quadrant) {
+                  const pct = `${Math.round((lean.staged_fraction || 0) * 100)}%`;
+                  lines.push(lean.inert
+                    ? `Lean: ${lean.projected_quadrant} (${lean.direction}, ${pct}) — gate-blocked, not buyable`
+                    : `Lean: ${lean.projected_quadrant} (${lean.direction}, ${pct})`);
+                }
+                return lines;
               },
             },
           },
@@ -194,12 +327,19 @@
           },
         },
       },
-      plugins: [regimeBands],
+      plugins: [regimeBands, leanRail],
     };
 
     const canvas = document.getElementById("perfChart");
     if (chart) chart.destroy();
     regimeKeys = series.map(p => (p.favored_bucket || []).join("+"));
+    // "Q2|active" / "Q1|inert" per point; null for no active lean (known or
+    // unknown history alike -- both render as blank rail, see leanRail above).
+    leanKeys = series.map(p => {
+      const lean = p.lean;
+      if (!lean || !lean.projected_quadrant) return null;
+      return `${lean.projected_quadrant}|${lean.inert ? "inert" : "active"}`;
+    });
     chart = new Chart(canvas, cfg);
   }
 
@@ -278,6 +418,21 @@
       plugins: [regimeBands],
     };
     sleeveChart = new Chart(canvas, cfg);
+  }
+
+  // Static legend for the leanRail track (Task B4) — shown whenever the
+  // series carries the `lean` field at all (even if every value is null in
+  // the current window), same convention as the always-shown bandnote caption
+  // above the main chips row.
+  function renderLeanLegend(data) {
+    const el = document.getElementById("lean-legend");
+    if (!el) return;
+    const series = data.series || [];
+    const hasLeanData = series.some(p => "lean" in p);
+    if (!hasLeanData) { el.innerHTML = ""; return; }
+    el.innerHTML =
+      `<span>Bottom rail: transition lean (projected quadrant), colored by quadrant at higher opacity than the band above</span>` +
+      `<span><span class="swatch-rail inert"></span> inert — gate-blocked, not buyable</span>`;
   }
 
   function renderTable(data) {
