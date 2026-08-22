@@ -57,3 +57,8 @@ _snap.json
 
 # Claude Code private working memory (not part of the repo)
 memory/
+
+# ALFRED backtest harness local vintage cache (FOLLOWUPS #23, scripts/alfred_cache.py)
+# -- decision J-4: offline-only local research data, never committed or put in
+# production blob storage.
+scripts/.alfred_cache/

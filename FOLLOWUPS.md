@@ -3,7 +3,37 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-08-21, fourth cycle that day (axis correctness: growth-axis peak-drawdown rollover detection, inflation-quality FRED diagnostics, GDPNow-smoothing probe, branch `fix/20260821-axis-correctness`).**
+**▶ START HERE — last session 2026-08-22 (ALFRED point-in-time backtest harness, branch `feat/20260821-alfred-backtest-harness`).**
+Builds FOLLOWUPS **#23**'s harness — the gate on the entire signal track — and
+tunes NOTHING (deliberately). Five tasks, all offline in `scripts/`, zero
+collector/runtime imports (verified by grep): **A** `alfred_cache.py`
+(idempotent/resumable local ALFRED vintage cache, gitignored per J-4); **B**
+`point_in_time.py` (`macro_data_as_of` — publication-lag + latest-vintage-wins
+reconstruction; the headline correctness test shows a payrolls print
+reconstructing to its ORIGINAL value at an as_of before a later revision);
+**C** `replay_axes.py` (stateful day-by-day replay — the N=2 confirmation
+hysteresis is CHAINED forward, never evaluated per-date independently, which
+would silently erase the exact lag this harness exists to measure); **D**
+`replay_parity.py` (parity check + turn lag table, gated on `scripts/config/
+regime-turns.json` — 3 NBER-dated growth turns + 1 BLS-dated core-CPI-peak
+inflation turn, pre-registered before any scoring; the 2007-08 turn is
+expected to be unreconstructable since GDPNow didn't exist before 2011 —
+determined empirically at run time, never assumed); **E** `admission.py`
+(the pre-registered signal-admission rule, `scripts/config/admission-rule.
+json`, decision J-2) — baseline metrics only, **no candidate signal scored
+in this PR**. Extracted one small pure helper (`_quarter_bounds`) out of the
+collector's `run()` so the harness reuses the SAME quarter-boundary
+arithmetic instead of duplicating it (verified behavior-preserving). **Could
+not run against real ALFRED/Azure data this session** (no live FRED key; same
+tenant-access constraint as recent sessions) — every acceptance criterion is
+verified against synthetic fixtures + an end-to-end synthetic worked example
+in the PR body; `scripts/run_baseline.py` is committed for Jorge to run for
+real. New entry **#87** (first real admission cycle, data-gated on this
+running for real + decision D-3/#78). Suite 1414→1479, ruff clean, every new
+test confirmed failing on pre-fix/pre-existence source. **Auto-merge: NO,
+human review required.**
+
+**▶ Prior session 2026-08-21, fourth cycle that day (axis correctness: growth-axis peak-drawdown rollover detection, inflation-quality FRED diagnostics, GDPNow-smoothing probe, branch `fix/20260821-axis-correctness`).**
 Three tasks. **A** — fixes entry **#54** for real: `_build_growth_axis`'s
 head-to-tail slope couldn't see an interior peak/trough, misreading a rolled-over
 trajectory as still "rising" (both of #54's live 08-03/04 and 08-05 incidents).
@@ -956,6 +986,35 @@ be validated against history rather than against this cycle's few outcomes.
 Learning Loop's `evidence_n >= 10` bar for parameter-class proposals), a
 before/after comparison on graded rows, and — per the Learning Loop's own
 proposer≠approver invariant — a human-reviewed PR, never an autonomous edit.
+**Update 2026-08-22:** prerequisite (b), the #23 harness, is now BUILT
+(`feat/20260821-alfred-backtest-harness`) — this entry remains gated on (a)
+(graded flex outcomes) and on #23 actually being run against real data (still
+open, see #23's own entry), not on the harness's existence.
+
+### 87. First signal-admission cycle — score a real candidate against the #23 harness (MEDIUM — data-gated on #23 running against real data)
+From the 2026-08-22 ALFRED backtest harness build (entry **#23**), split out
+deliberately rather than folded in — that PR's own scope explicitly excludes
+scoring any candidate, so the admission rule (`scripts/admission.py`,
+thresholds pre-registered in `scripts/config/admission-rule.json` per decision
+J-2) has never been exercised against a real signal. The natural first
+candidate is **#19's flexible CPI** as a 4th `transition_watch` inflation-side
+confirmation source (see entry **#86**, itself blocked on decision D-3/#78) —
+picked because it is the most-discussed pending addition with a concrete,
+already-implemented alternative-denominator design waiting on exactly this
+gate.
+- **Prereqs (all must be true before this is picked up):** #23's harness run
+  against REAL ALFRED + real stored-snapshot data (not yet done — see #23's
+  own entry) with a genuine, non-synthetic baseline `median_lag_days` /
+  `false_flips_per_year` per axis; decision D-3/#78 resolved (the admission
+  test needs a stable denominator to compare against); the candidate itself
+  implemented behind a flag or as an alternate `_evaluate_inflation_side`
+  path scoreable without shipping it live.
+- **Acceptance:** `admission.admit(baseline, candidate)` called with REAL
+  metrics from both configurations, the decision (and both metric dicts)
+  recorded verbatim in this file or a dedicated decision doc, and — whichever
+  way it resolves — the candidate is either wired in for real (admit=True) or
+  explicitly left out with the numbers on record (admit=False), never a
+  silent non-decision.
 
 ### 59. Overnight/sector read-through investigation — gated on #34 + the `catalyst_screen` ledger (LOW — data-gated)
 From the 2026-08-10 catalyst-sleeve-funnel session (entry **#57**). Once (a)
@@ -1586,25 +1645,59 @@ driver.
   weights vary smoothly with P in tests; today's binary outputs reproduce as the
   degenerate case (P concentrated on one quadrant).
 
-### 23. ALFRED point-in-time backtest harness + signal-admission rule (HIGH value — gates the whole track)
+### 23. ALFRED point-in-time backtest harness + signal-admission rule ✅ HARNESS BUILT 2026-08-22 (branch `feat/20260821-alfred-backtest-harness`) — *using* it remains open
 The system cannot improve classifier lag it cannot measure. #12 measures forward from
 inception only; without point-in-time reconstruction every proposed signal is vibes —
 and revised data makes naive backtests lie (payrolls revisions especially).
-- **Design:** offline script(s) in `scripts/` (NOT the collector) using FRED's ALFRED
-  realtime parameters (`fred.get_series_vintages` already exists) to reconstruct, for
-  each historical date, what `growth_axis` / `inflation_axis` / `active_quadrant`
-  *would have said with only the data known that day*. Score median flip lag (days) vs
-  the known regime turns: 2007–08, Feb–Mar 2020, the 2020–21 reflation, the 2022
-  stagflation flip, the 2023 disinflation. **Pre-registered admission rule: no new
-  signal enters a composite unless it demonstrably reduces median point-in-time flip
-  lag without materially increasing false flips.** Output feeds the #13 monthly review
-  as its yardstick; also produces the calibration data #22 needs. Market-derived inputs
-  (#18) need point-in-time prices — FMP historical EOD suffices (prices aren't
-  revised).
-- **Prereqs:** none to build the harness; it becomes the gate for tuning #17/#18/#22
-  and for #13 amendment proposals touching classifier params. **Acceptance:** harness
-  reproduces the current axes on recent live dates (parity check) and emits a lag table
-  for ≥3 historical turns.
+
+**Built, offline-only, zero collector/runtime imports (verified by grep):**
+`scripts/alfred_cache.py` (Task A — idempotent/resumable local vintage cache, one
+`get_series_vintages` fetch per series spanning the whole window, gitignored per
+decision J-4), `scripts/point_in_time.py` (Task B — `macro_data_as_of`: publication-lag
++ latest-vintage-wins + correct ordering per input-shape convention; GDPNow's two
+vintage keys are NOT collapsed to latest-wins like a standard series, since every row
+for the same observation date is a genuinely distinct sequential nowcast), `scripts/
+replay_axes.py` (Task C — stateful day-by-day replay chaining `_confirm_axis_direction`
+forward, NEVER evaluating dates independently), `scripts/replay_parity.py` (Task D —
+parity check + turn lag table + false-flip rate), `scripts/config/regime-turns.json` +
+`scripts/config/admission-rule.json` (pre-registered BEFORE any scoring, decisions J-1
+through J-4), `scripts/admission.py` (Task E — `admit()`, a pure function of two metric
+dicts). Reuses the production classifier throughout (`_build_growth_axis`,
+`_build_inflation_axis`, `_confirm_axis_direction`, `active_quadrant` imported directly,
+never reimplemented) — a small pure `_quarter_bounds` helper was extracted from `run()`'s
+inline arithmetic specifically so the harness could reuse it instead of duplicating it
+(verified behavior-preserving).
+
+**Headline correctness property demonstrated** (the reason this harness exists at
+all): a synthetic PAYEMS observation reconstructs to its ORIGINAL print at an `as_of`
+before a later revision published, and to the fully-revised value after — see
+`tests/test_point_in_time.py::test_payrolls_revision_reconstructs_original_value_before_revision`
+and the PR body's printed demonstration.
+
+**Could not run against real ALFRED/production data this session** — no live
+`FRED_API_KEY` and the same Azure-tenant-access constraint documented elsewhere in this
+file (this session's `az` context is `QuirchFoodsSubscription`, not the
+`EasyGridsProduction` subscription the real storage account lives in). All acceptance
+criteria are verified against SYNTHETIC data (unit tests + an end-to-end worked
+example in the PR body finding the 2020 COVID-crash and reflation turns with sensible,
+non-zero lag and zero false flips); `scripts/run_baseline.py` is committed, ready for
+Jorge to run for real once `alfred_cache.py` has built a real cache. **2007-08 is
+expected (not yet empirically confirmed) to be unreconstructable** — GDPNow did not
+exist as a model until 2011, so ALFRED almost certainly has zero vintages that far
+back; `replay_parity.py` determines this empirically from the manifest at run time,
+never by assumption, and the committed `regime-turns.json` documents the caveat
+directly rather than silently omitting the turn.
+
+**Genuinely still open (this entry does NOT close on those grounds):** *using* the
+harness to admit/reject a candidate signal (#19's flexible CPI, #22's probabilistic
+vector, the tape scores) is deliberately NOT done in this PR — baseline metrics only,
+no candidate scored (see new entry **#87**). Also still open: running the harness
+against real data to get a REAL parity rate and lag table (currently only
+mechanically verified against synthetic fixtures); the FMP EOD depth probe for
+market-derived inputs (`get_historical_price_light`'s own docstring already records
+"~5 years on Starter" from a prior audit — not independently re-verified this session
+with a live key); and gating #13 monthly-review amendment proposals on this harness
+(a Learning Loop integration point, not touched here).
 
 ### 24. `regional_signals` per-region scorecard (HIGH — intl track parent)
 The system has one global quadrant and one DXY switch; it has **no per-region read**,

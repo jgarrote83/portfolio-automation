@@ -1,0 +1,45 @@
+{
+  "_note": "FOLLOWUPS #23, Task D section 6.1 -- pre-registered regime-turn ground truth, committed BEFORE any scoring run (decision J-3: no turn date or basis was chosen or adjusted after seeing a lag result). Growth turns use NBER Business Cycle Dating Committee peak/trough months -- the canonical, undisputed authority; inflation has no equivalent single authority, so each inflation turn's basis is an explicit, citable BLS release rather than an editorial judgment call. `direction` is the axis's own vocabulary (rising/falling) for the turn BEING MEASURED, i.e. what the axis should eventually confirm, not a description of the prior regime. `true_turn_date` is the NBER/BLS-designated month (first of month, ISO) -- for a monthly macro release this is the OBSERVATION month, not the later publication date (recorded separately in `source_release_date` for BLS entries, since a real-time observer only learns the observation-month value with a ~1 month lag baked into every macro series' own reconstruction already -- the lag table measures the CLASSIFIER's additional lag on top of that publication lag, not instead of it).",
+  "_growth_axis_caveat": "GDPNow is a real-GDP GROWTH-RATE nowcast, not a level -- its rising/falling direction reflects whether growth is accelerating or decelerating, which is a closely related but not textually identical concept to an NBER peak/trough (a peak is where growth crosses from positive to negative, not merely where its rate stops accelerating). GDPNow typically starts decelerating well before an NBER-dated peak and starts re-accelerating around a trough, so some LEAD relative to the NBER date is an expected, not anomalous, result -- exactly the kind of finding this harness exists to surface, not paper over.",
+  "_2007_08_coverage_caveat": "The Atlanta Fed's GDPNow model did not exist until 2011 -- ALFRED almost certainly has zero GDPNOW vintages covering the 2007-12 peak. This is NOT assumed here: `replay_parity.py` determines it empirically from `alfred_cache.py`'s manifest (earliest_realtime_start for GDPNOW) at run time and reports `reconstructable: false` with a named reason if so, never silently dropping the turn from this file or substituting a proxy series.",
+  "_inflation_turn_merge_note": "The task prompt names two inflation turns -- 'the 2022 stagflation flip' and 'the 2023 disinflation' -- as if they were temporally distinct. Empirically, per BLS releases, core CPI YoY rose essentially continuously from 2021 through its September 2022 peak (6.6%) and then fell essentially continuously through 2023 -- ONE reversal, not two. Inventing a second, later 'disinflation' turn date would mean picking an arbitrary threshold-crossing (e.g. 'core CPI first back under 4%') with no comparable authority to a genuine local extremum, which is exactly the kind of unfalsifiable-basis risk J-3 says to avoid by dropping rather than inventing. These two named turns are therefore merged into the single `2022-core-cpi-peak` entry below, which represents both framings (the flip INTO persistent high inflation, culminating at its peak, and the flip INTO the disinflation that followed) from opposite sides of the same reversal.",
+  "turns": [
+    {
+      "id": "2007-08-financial-crisis",
+      "axis": "growth",
+      "direction": "falling",
+      "true_turn_date": "2007-12-01",
+      "source": "NBER Business Cycle Dating Committee",
+      "source_url": "https://www.nber.org/research/business-cycle-dating/business-cycle-dating-committee-announcements",
+      "rationale": "NBER-designated business-cycle PEAK (expansion ends, contraction begins) -- the single most-cited authority for US growth-cycle turning points."
+    },
+    {
+      "id": "2020-covid-crash",
+      "axis": "growth",
+      "direction": "falling",
+      "true_turn_date": "2020-02-01",
+      "source": "NBER Business Cycle Dating Committee",
+      "source_url": "https://www.nber.org/research/business-cycle-dating/business-cycle-dating-committee-announcements",
+      "rationale": "NBER-designated peak preceding the shortest recession on record (Feb-Apr 2020)."
+    },
+    {
+      "id": "2020-21-reflation",
+      "axis": "growth",
+      "direction": "rising",
+      "true_turn_date": "2020-04-01",
+      "source": "NBER Business Cycle Dating Committee",
+      "source_url": "https://www.nber.org/research/business-cycle-dating/business-cycle-dating-committee-announcements",
+      "rationale": "NBER-designated trough -- expansion (and the subsequent 2020-21 growth/reflation regime) begins."
+    },
+    {
+      "id": "2022-core-cpi-peak",
+      "axis": "inflation",
+      "direction": "falling",
+      "true_turn_date": "2022-09-01",
+      "source": "BLS Consumer Price Index News Release (October 2022, covering September 2022 data)",
+      "source_url": "https://www.bls.gov/news.release/archives/cpi_10132022.htm",
+      "source_release_date": "2022-10-13",
+      "rationale": "Core CPI (ex food & energy) YoY peaked at 6.6% for the 12 months ended September 2022 -- the cycle high, and the reversal both 'the 2022 stagflation flip' and 'the 2023 disinflation' describe from opposite sides (see _inflation_turn_merge_note)."
+    }
+  ]
+}
