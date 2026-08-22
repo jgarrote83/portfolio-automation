@@ -156,6 +156,17 @@
   },
   "_labor_leading_note": "2026-08-06 audit O3 — ADP private payrolls (FRED NPPTTL) as a deterministic LEADING labor sub-signal, surfaced explicitly (collector._build_labor_leading) as a forward-risk flag; it never overwrites the binding BLS-PAYEMS scorecard in labor_signals. forward_softening_gap_k is how far below the trailing 3m-average pace (in thousands) the latest ADP print must miss to flag forward_softening_flag. Motivating incident: 08-05's ADP miss (+44K vs +70K consensus) — the session's most important forward labor signal — was caught only because the analyzer happened to parse it out of the forex-news feed.",
 
+  "growth_axis_rollover": {
+    "band": 0.1,
+    "drawdown_threshold": 0.1
+  },
+  "_growth_axis_rollover_note": "FOLLOWUPS #54: head-to-tail slope alone misreads a trajectory that already peaked/troughed mid-window as still moving in its original direction (2026-08-03/04/05 live evidence). `band` is the existing rising/falling/flat threshold on GDPNow points; `drawdown_threshold` gates rollover detection (peak-to-tail fall, or trough-to-tail rise) and defaults to the same value as `band` (decision H-1, 2026-08-21) since a rollover smaller than the band that already governs direction classification isn't a meaningfully different move.",
+
+  "inflation_quality": {
+    "band": 0.1
+  },
+  "_inflation_quality_note": "FOLLOWUPS #19: diagnostics-only inflation-quality context (Atlanta Fed sticky/flexible-price CPI, Dallas Fed trimmed-mean PCE, UMich 1y expectations) surfaced alongside the realized-core inflation axis. `band` gates each series' own month-over-month rising/falling/flat read. NOT wired into transition_watch confirmation — decision D-3/#78 on the inflation-side re-risk bar remains open and stays 2-of-3; a 4th source here would silently change that arithmetic.",
+
   "market_shock": {
     "news_baseline_min_sessions": 10,
     "news_baseline_window_sessions": 20,

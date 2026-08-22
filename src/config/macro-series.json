@@ -41,6 +41,12 @@
   "CIVPART":          { "name": "Labor Force Participation Rate",        "unit": "%",    "frequency": "monthly"  },
   "SAHMREALTIME":     { "name": "Sahm Rule Recession Indicator",         "unit": "pp",   "frequency": "monthly"  },
 
+  "_inflation_quality_comment": "Inflation-quality diagnostics (FOLLOWUPS #19, 2026-08-21). Surfaced alongside the realized-core inflation axis for context ONLY -- none of these are wired into transition_watch confirmation (see decision D-3/#78, still open).",
+  "CORESTICKM159SFRBATL": { "name": "Atlanta Fed Sticky-Price Core CPI",   "unit": "%",    "frequency": "monthly"  },
+  "FLEXCPIM159SFRBATL":   { "name": "Atlanta Fed Flexible-Price CPI",      "unit": "%",    "frequency": "monthly"  },
+  "PCETRIM12M159SFRBDAL": { "name": "Dallas Fed Trimmed-Mean PCE",         "unit": "%",    "frequency": "monthly"  },
+  "MICH":                 { "name": "U. of Michigan 1Y Inflation Expectations", "unit": "%","frequency": "monthly"  },
+
   "_leading_growth_comment": "Leading-growth composite inputs (FOLLOWUPS #17, 2026-07-23). Degrade gracefully on stale/absent.",
   "WEI":                  { "name": "Weekly Economic Index (NY Fed)",                     "unit": "index","frequency": "weekly"   },
   "PERMIT":               { "name": "Building Permits: New Private Housing Units",         "unit": "000s", "frequency": "monthly"  },

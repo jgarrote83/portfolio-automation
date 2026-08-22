@@ -3,7 +3,36 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-08-21, third cycle that day (measurement integrity: quadrant basket index fixes A1/A2/A3, equity reconciliation, external cash-flow detection, cash-share surfacing, branch `fix/20260821-measurement-integrity`).**
+**▶ START HERE — last session 2026-08-21, fourth cycle that day (axis correctness: growth-axis peak-drawdown rollover detection, inflation-quality FRED diagnostics, GDPNow-smoothing probe, branch `fix/20260821-axis-correctness`).**
+Three tasks. **A** — fixes entry **#54** for real: `_build_growth_axis`'s
+head-to-tail slope couldn't see an interior peak/trough, misreading a rolled-over
+trajectory as still "rising" (both of #54's live 08-03/04 and 08-05 incidents).
+The originally-recorded fix candidate (terminal-2/3-vintage agreement with
+head-to-tail) is proven INADEQUATE by test — the 3-vintage 08-05 case makes
+terminal-3 identical to head-to-tail by construction, so it would have missed
+that exact rollover. Implemented instead: peak-drawdown detection
+(`_detect_growth_rollover`, new `rollover` payload block), symmetric on the
+trough side (decision H-2), reusing the existing `band` as the drawdown
+threshold (decision H-1), reclassifying a rolled-over read to `flat` (decision
+H-3) — verified NOT to bypass `_confirm_axis_direction`'s N=2 hysteresis. Also
+fixed in passing: `cross_quarter_fallback`'s `used`/`used_rows` were left at a
+stale, unrelated default. **B** — entry **#19**'s four inflation-quality FRED
+series (sticky/flexible CPI, trimmed-mean PCE, UMich expectations), diagnostics
+only (`inflation_axis.quality`) — explicitly NOT wired into `transition_watch`
+confirmation (that would silently change decision D-3/#78's still-open
+arithmetic); split into its own decision, entry **#86**. **C** — the GDPNow
+smoothing probe entry **#80** demanded before any implementation:
+`scripts/probe_gdpnow_rollover_history.py` (committed, not run against
+production — same tenant-access constraint as recent sessions) plus an
+in-session replay of #54's own two documented cases confirms the ±0.1 band
+ITSELF never misfired; the single first-vs-last comparison missing an interior
+extremum did (now fixed by Task A) — #80 narrowed accordingly, its remaining
+independent-nowcast-source idea stays deferred pending its own evidence. Suite
+1397→1414 green (17 new tests), ruff clean, every new/modified test confirmed
+failing on pre-fix source via `git stash` isolation. **Auto-merge: NO, human
+review required.**
+
+**▶ Prior session 2026-08-21, third cycle that day (measurement integrity: quadrant basket index fixes A1/A2/A3, equity reconciliation, external cash-flow detection, cash-share surfacing, branch `fix/20260821-measurement-integrity`).**
 See entry **#83** below for the full per-task design. Triggered by a
 walked-back headline number (a "book trails its own quadrant blend by
 ~1.91pp" claim that turned out to be a manufactured, non-neutral
@@ -879,21 +908,35 @@ lean's budget across only the DEPLOYABLE names in the projected concentrate)
 rather than merely narrated. Track the live frequency before designing the
 fix — do not guess at a suppression rule from zero observed sessions.
 
-### 80. GDPNow within-quarter smoothing / inflation de-staling candidates (MEDIUM — deliberately deferred, cross-refs #54)
+### 80. GDPNow within-quarter smoothing / inflation de-staling candidates (MEDIUM — narrowed by the 2026-08-21 probe, cross-refs #54)
 From the 2026-08-21 quadrant-selection-reachability cycle (entry **#77**) —
-explicitly out of scope for that cycle (§7), logged here per instruction
-rather than attempted inline. The raw oldest→newest GDPNow vintage path
-(±0.1 band, `_confirm_axis_direction`) over-reads early-quarter nowcast
-noise — related to, but more specific than, entry **#54**'s "growth-axis
-recency slope" deferral from the 2026-08-06 audit. Candidate de-staling
-inputs for a later cycle: the Cleveland Fed / NY Fed nowcasts (independent
-of the Atlanta Fed GDPNow this system already tracks) and the Cleveland Fed
-median/trimmed-mean CPI (a genuinely different inflation-persistence
-estimator, not just a fresher print of the same core CPI/PCE series). Do
-not implement without a specific empirical probe showing the current
-±0.1 band actually misfires on a real vintage-boundary case — the diagnosis
-here is a hypothesis, not yet independently confirmed the way this session's
-other findings (F1-F7) were.
+explicitly out of scope for that cycle (§7). The empirical probe this entry
+demanded ("do not implement without a specific empirical probe showing the
+current ±0.1 band actually misfires on a real vintage-boundary case") was run
+in the follow-on 2026-08-21 axis-correctness cycle
+(`scripts/probe_gdpnow_rollover_history.py`) — **result: the band itself does
+NOT misfire; the mechanism does.** Both of #54's live-evidence cases
+(08-03/04, 08-05) confirmed the trajectory's own first-vs-last comparison was
+correctly inside/outside the ±0.1 band given the endpoints it was fed — the
+defect was that a single first-vs-last comparison cannot see an interior
+peak/trough, not that 0.1 is the wrong threshold. That specific, confirmed
+misfire is now FIXED (see entry **#54**'s peak-drawdown detection). A full
+historical census across every stored snapshot could not be run in the
+authoring session (no live credentials for the `EasyGridsProduction`
+subscription the storage account lives in — same constraint documented
+elsewhere in this file, e.g. entry #83); the committed script performs that
+scan and reports, per historical `raw_direction` change, whether Task A's
+rollover rule would have suppressed it — run it against production for the
+full count. **Narrowed remaining scope:** the two candidate de-staling inputs
+this entry originally proposed — independent Cleveland Fed / NY Fed nowcasts,
+and the Cleveland Fed median/trimmed-mean CPI (a different inflation-
+persistence estimator, not just a fresher print of the same series) — remain
+unimplemented and still lack their own empirical justification; they are a
+genuinely separate idea (additional independent signal sources) from the
+now-fixed peak/trough defect, and should not be picked up as if the general
+"early-quarter noise" hypothesis were still open. Do not implement without a
+probe demonstrating one of THESE inputs would have changed a real historical
+call.
 
 ### 58. `catalyst_score` weight tuning — gated on graded outcome rows (LOW — data-gated, do not touch early)
 From the 2026-08-10 catalyst-sleeve-funnel session (entry **#57**). `src/collector/catalyst_screen.py`'s
@@ -932,25 +975,40 @@ note, not a spec. Do not start without both prerequisites — a sector
 read-through claim without the ranking-ledger history to test it against is
 exactly the kind of unfalsifiable pattern-matching #23 exists to prevent.
 
-### 54. Growth-axis head-to-tail slope mislabels a rolled-over trajectory as "rising" (B5, deferred by decision 2026-08-06)
-From the 2026-08-06 signal-integrity audit (entry **#53**) — deliberately NOT
-fixed this cycle (Jorge's decision: leave `_build_growth_axis`'s direction
-logic untouched). The current head-to-tail slope method (first vs last
-vintage in the rolling window) reads a trajectory that has already ROLLED
-OVER and is now decelerating as still "rising," because the endpoints alone
-don't see the intervening peak. **Live evidence:** 08-03/04 Q2 tail
-`1.36→…→1.74→1.68→1.58→1.54` (peaked at 1.74, now falling for 3 straight
-vintages) read "rising"; 08-05 Q3 tail `4.95→6.18→5.86` (peaked at 6.18, now
-falling) also read "rising." **Fix candidate (not implemented):** a
-recency-aware slope — compare the terminal 2-3 vintages' own trend (not just
-first-vs-last) and require AGREEMENT with the head-to-tail sign before
-confirming "rising"; when they disagree (head-to-tail says rising but the
-terminal segment is falling), classify as `flat`/`indeterminate` with an
-explicit rollover flag, mirroring how `direction_change_diagnostics`
-already flags a `window_rolloff` attribution for the D-2 axis-confirmation
-gate. Revisit once a session is scoped to touch axis classification
-directly — do not fold into an unrelated cycle given the D-2 confirmation
-hysteresis's sensitivity to this exact field.
+### 54. Growth-axis head-to-tail slope mislabels a rolled-over trajectory as "rising" ✅ DONE 2026-08-21 (PR `fix/20260821-axis-correctness`)
+From the 2026-08-06 signal-integrity audit (entry **#53**) — deferred there
+(Jorge's decision: leave `_build_growth_axis`'s direction logic untouched that
+cycle), fixed in the dedicated 2026-08-21 axis-correctness cycle. The head-to-tail
+slope method (first vs last vintage in the rolling window) read a trajectory that
+had already ROLLED OVER and was decelerating as still "rising," because the
+endpoints alone don't see the intervening peak. **Live evidence (both now fixed,
+verified by test):** 08-03/04 Q2 tail `1.36→…→1.74→1.68→1.58→1.54` (peaked at
+1.74, falling 3 straight vintages) read "rising" — now `flat`, `rollover.detected
+== True`, `peak_drawdown == 0.20`. 08-05 Q3 tail `4.95→6.18→5.86` (peaked at 6.18)
+also read "rising" — now `flat`, `peak_drawdown == 0.32`.
+**The fix candidate this entry originally recorded (terminal 2-3-vintage
+agreement with head-to-tail) was proven INADEQUATE, not implemented as-is:** the
+08-05 case has only 3 vintages, so a terminal-3 comparison is byte-identical to
+head-to-tail by construction and would have MISSED this exact rollover (both read
+"rising", "agreeing" with each other). **Implemented instead: peak-drawdown
+detection.** `_detect_growth_rollover` (`src/collector/handler.py`) computes
+`peak_index = argmax(used)` (rising) or `argmin(used)` (falling, decision H-2 —
+the symmetric trough case), `peak_drawdown = peak_value − used[-1]` (or the
+reverse for a trough), and flags `rolled_over` when the peak/trough sits before
+the final point AND the drawdown exceeds `drawdown_threshold` — which reuses the
+existing `band` (0.1, decision H-1) rather than introducing a second unrelated
+magic number. A rollover reclassifies the RAW direction to `flat` (decision
+H-3) — it changes nothing else; `_confirm_axis_direction`'s N=2 hysteresis still
+gates the flip exactly as it does any other raw-direction change (verified by
+test — a rollover-induced `flat` still needs 2 confirming runs before it reaches
+the consumed `direction` field). `terminal_2_direction`/`terminal_3_direction`
+are retained as non-binding DIAGNOSTICS on the new `rollover` payload block
+(auditability + the empirical record of why the original candidate would have
+failed) — never the decision rule. Also fixed in passing: the
+`cross_quarter_fallback` basis previously left `used`/`used_rows` at their stale
+`traj`/`traj_rows` defaults (unrelated to the `first`/`last` pair that actually
+drove that branch's direction call) — corrected to `used = [first, last]` so
+`gdpnow_trajectory` and rollover detection both operate on the real basis.
 
 ### 55. Risk Score sensitivity investigation (R2, 2026-08-06 audit)
 The 08-03/04/05 reports held Risk Score at a flat 4/10 across materially
@@ -1443,16 +1501,46 @@ dollar switch.
   quadrant with votes, and the new divergence fires `active` (tape risk-on vs macro
   defensive) rather than `indeterminate`.
 
-### 19. Inflation-quality FRED adds — sticky/flexible CPI, trimmed-mean PCE, expectations (MEDIUM — trivial)
-Four lines in `macro-series.json` + small axis-payload additions:
-`CORESTICKM159SFRBATL` (sticky core CPI — persistence), `FLEXCPIM159SFRBATL` (flexible
-CPI — turns first; a natural extra leading confirmation for the re-risk bar in
-`transition_watch`), `PCETRIM12M159SFRBDAL` (Dallas trimmed-mean PCE — cleaner
-underlying trend than core), `MICH` (1y household expectations). Wire as secondary
-confirmations into `_build_inflation_axis` diagnostics and as an optional third
-confirmation signal in the leading-inflation divergence.
-- **Prereqs:** none. **Acceptance:** series in snapshot; flexible-CPI direction
-  surfaced in the divergence basis.
+### 19. Inflation-quality FRED adds — sticky/flexible CPI, trimmed-mean PCE, expectations ✅ DONE 2026-08-21 (diagnostics only, PR `fix/20260821-axis-correctness`)
+Four lines added to `macro-series.json` (`CORESTICKM159SFRBATL` sticky core CPI,
+`FLEXCPIM159SFRBATL` flexible CPI, `PCETRIM12M159SFRBDAL` Dallas trimmed-mean PCE,
+`MICH` 1y household expectations) and surfaced in `_build_inflation_axis`'s new
+`quality` sub-block: `{series_id, value, as_of, days_stale, stale, direction}` per
+series, keyed by a human label (`sticky_core_cpi_yoy`/`flexible_cpi_yoy`/
+`trimmed_mean_pce_yoy`/`umich_1y_expectations`). Direction is a simple
+month-over-month read gated on a new `inflation_quality.band` config (0.1,
+`risk-limits.json`); stale (>45d, the existing monthly freshness threshold) or
+missing data degrades to `"indeterminate"`, never fabricated. **Deliberately NOT
+done** — this entry's own original text proposed wiring flexible CPI in "as an
+optional third confirmation signal in the leading-inflation divergence"; that is
+explicitly OUT of scope for this fix and is its own decision, logged separately as
+entry **#86** below, because `transition_watch`'s inflation-side re-risk bar already
+counts 3 sources (breakeven + oil + structural tape, 2026-08-21 quadrant-reachability
+cycle) and adding a 4th here would silently change that arithmetic while decision
+D-3/#78 (1-of-3 vs 2-of-3) is still open. Regression-tested:
+`tests/test_transition_watch_confirmation_sources.py::
+test_new_inflation_quality_block_does_not_become_a_fourth_confirmation_source`
+confirms `confirmations_of` stayed at 3 with the new block populated.
+
+### 86. Decision: whether flexible CPI (or another #19 series) should become a 4th `transition_watch` inflation-side confirmation source (MEDIUM — architecture decision, cross-refs #19/#78)
+Split out of entry #19 (2026-08-21 axis-correctness cycle) rather than folded in
+silently. #19 shipped the four inflation-quality series as snapshot diagnostics
+only (`inflation_axis.quality`) — none of them feed `_evaluate_inflation_side`'s
+re-risk confirmation count, which currently sums breakeven + oil + the structural
+tape score (`market_implied_quadrant.structural_inflation_score`, added
+2026-08-21) against a denominator of 2 or 3. Flexible CPI (`FLEXCPIM159SFRBATL`,
+"turns first" of the CPI components) is the most plausible 4th source if this is
+ever picked up.
+- **Blocked on:** decision **D-3 (#78)** first — whether the re-risk bar should be
+  1-of-3 or 2-of-3 against the CURRENT 3 sources. Changing the denominator to 4
+  while that's still unresolved would compound two open questions into one
+  change and make either one harder to reason about in isolation.
+- **Prereqs:** #78 resolved. **Acceptance (if picked up):** the new source is
+  added to `_evaluate_inflation_side`'s `confs`/`confirmations_of` computation
+  with the same "missing never fabricates, only shrinks the denominator" pattern
+  the structural-tape addition already established; a regression test proves the
+  3-source cases (`tests/test_transition_watch_confirmation_sources.py`) are
+  unaffected when the new source is absent.
 
 ### 20. Poor-man's economic surprise index from the FMP economic calendar (MEDIUM)
 Both axes measure rate-of-change of *data*; markets reprice on data vs *consensus*. A
