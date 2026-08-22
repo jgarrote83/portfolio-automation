@@ -199,6 +199,32 @@ _RISK_LIMITS_DEFAULTS = {
     "labor_leading": {
         "forward_softening_gap_k": 20.0,
     },
+    "inflation_quality": {
+        "_note": (
+            "FOLLOWUPS #19: diagnostics-only inflation-quality context (Atlanta Fed "
+            "sticky/flexible-price CPI, Dallas Fed trimmed-mean PCE, UMich 1y "
+            "expectations) surfaced alongside the realized-core inflation axis. "
+            "`band` gates each series' own month-over-month rising/falling/flat "
+            "read. NOT wired into transition_watch confirmation — decision D-3/#78 "
+            "on the inflation-side re-risk bar remains open and stays 2-of-3; a 4th "
+            "source here would silently change that arithmetic."
+        ),
+        "band": 0.1,
+    },
+    "growth_axis_rollover": {
+        "_note": (
+            "FOLLOWUPS #54: head-to-tail slope alone misreads a trajectory that "
+            "already peaked/troughed mid-window as still moving in its original "
+            "direction (2026-08-03/04/05 live evidence). `band` is the existing "
+            "rising/falling/flat threshold on GDPNow points; `drawdown_threshold` "
+            "gates rollover detection (peak-to-tail fall, or trough-to-tail rise) "
+            "and defaults to the same value as `band` (decision H-1, 2026-08-21) "
+            "since a rollover smaller than the band that already governs direction "
+            "classification isn't a meaningfully different move."
+        ),
+        "band": 0.1,
+        "drawdown_threshold": 0.1,
+    },
     "market_shock": {
         "news_baseline_min_sessions": 10,
         "news_baseline_window_sessions": 20,
@@ -2896,7 +2922,7 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.debug("Inflation axis: USO oil-proxy fetch failed (non-fatal)")
         _oil_proxy_cache = {}
-    inflation_axis_raw = _build_inflation_axis(macro_data, _oil_proxy_cache)
+    inflation_axis_raw = _build_inflation_axis(macro_data, _oil_proxy_cache, today)
 
     # Session 2026-07-28 (Task A, decision D-2): N=2 confirmation on the CONSUMED
     # `direction` field — a label change (any value, including flat) only reaches
@@ -5893,6 +5919,77 @@ def _growth_rolloff_diagnostics(
     }
 
 
+def _detect_growth_rollover(
+    used: list[float],
+    used_rows: list[dict],
+    head_to_tail_direction: str,
+    band: float,
+    drawdown_threshold: float,
+) -> dict:
+    """Peak/trough-drawdown check (FOLLOWUPS #54) for whether a trajectory that
+    reads 'rising'/'falling' head-to-tail has actually already turned over
+    mid-window — head-to-tail alone can't see an interior peak (2026-08-03/04
+    live evidence: peaked at 1.74, fell 3 straight vintages, still read
+    'rising'). 'rising': the peak (argmax) sits before the final point AND the
+    fall from it exceeds ``drawdown_threshold`` -> rolled over. 'falling':
+    symmetric on the trough (argmin), a rise back up from it (decision H-2).
+    An already-'flat' head-to-tail read is left untouched — there is no
+    directional claim left for a rollover to contradict.
+
+    ``terminal_2_direction``/``terminal_3_direction`` are DIAGNOSTICS ONLY —
+    the FOLLOWUPS #54 fix candidate this replaces (recency-aware slope
+    requiring agreement between a terminal segment and head-to-tail) — never
+    the decision rule. They are proven inadequate empirically: a 3-vintage
+    trajectory makes terminal-3 IDENTICAL to head-to-tail by construction
+    (misses a real 3-point rollover entirely), and a terminal-2 read alone
+    false-positives on ordinary single-point noise near a high.
+    """
+    def _slope_direction(vals: list[float]) -> str | None:
+        if len(vals) < 2:
+            return None
+        first, last = vals[0], vals[-1]
+        if last > first + band:
+            return "rising"
+        if last < first - band:
+            return "falling"
+        return "flat"
+
+    terminal_2_direction = _slope_direction(used[-2:]) if len(used) >= 2 else None
+    terminal_3_direction = _slope_direction(used[-3:]) if len(used) >= 3 else None
+
+    detected = False
+    extreme_index = None
+    extreme_value = None
+    drawdown = 0.0
+    if len(used) >= 2 and head_to_tail_direction in ("rising", "falling"):
+        if head_to_tail_direction == "rising":
+            extreme_index = max(range(len(used)), key=lambda i: used[i])
+            extreme_value = used[extreme_index]
+            drawdown = extreme_value - used[-1]
+        else:
+            extreme_index = min(range(len(used)), key=lambda i: used[i])
+            extreme_value = used[extreme_index]
+            drawdown = used[-1] - extreme_value
+        drawdown = round(drawdown, 4)
+        detected = extreme_index < len(used) - 1 and drawdown > drawdown_threshold
+
+    peak_asof = None
+    if extreme_index is not None and used_rows and extreme_index < len(used_rows):
+        peak_asof = used_rows[extreme_index].get("asof")
+
+    return {
+        "detected": detected,
+        "peak_value": round(extreme_value, 4) if extreme_value is not None else None,
+        "peak_index": extreme_index,
+        "peak_asof": peak_asof,
+        "peak_drawdown": drawdown,
+        "band": band,
+        "head_to_tail_direction": head_to_tail_direction,
+        "terminal_2_direction": terminal_2_direction,
+        "terminal_3_direction": terminal_3_direction,
+    }
+
+
 def _build_growth_axis(macro_data: dict) -> dict:
     """Deterministic growth-direction read — the quadrant *growth axis*, computed in
     Python so the analyzer ECHOES it (mirrors bond_signals/labor_signals) rather than
@@ -5924,7 +6021,10 @@ def _build_growth_axis(macro_data: dict) -> dict:
     traj_rows = _rows("GDPNOW_VINTAGES")
     prior_rows = _rows("GDPNOW_VINTAGES_PRIOR")
 
-    BAND = 0.1
+    _rollover_cfg = (_load_risk_limits().get("growth_axis_rollover")
+                     or _RISK_LIMITS_DEFAULTS["growth_axis_rollover"])
+    BAND = float(_rollover_cfg.get("band", 0.1))
+    DRAWDOWN_THRESHOLD = float(_rollover_cfg.get("drawdown_threshold", BAND))
     PRIOR_TAIL_N = 6   # ~3 weeks of vintages — the recent slope, not the whole quarter
     confidence = "high"
     basis = "within_quarter_vintages"
@@ -5957,6 +6057,13 @@ def _build_growth_axis(macro_data: dict) -> dict:
             latest = q[0]
             confidence = "low"
             basis = "cross_quarter_fallback"
+            # `used`/`used_rows` previously stayed at the stale traj/traj_rows
+            # default (<3 elements, unrelated to q[0]/q[1]) instead of the
+            # pair that actually drove `first`/`last` above — fixed so
+            # gdpnow_trajectory/vintage_count and rollover detection all
+            # operate on the real basis. GDPNOW has no row-level asof here.
+            used = [first, last]
+            used_rows = []
         else:
             return {
                 "direction": "indeterminate",
@@ -5978,6 +6085,11 @@ def _build_growth_axis(macro_data: dict) -> dict:
     elif last < first - BAND:
         direction = "falling"
     else:
+        direction = "flat"
+
+    head_to_tail_direction = direction
+    rollover = _detect_growth_rollover(used, used_rows, head_to_tail_direction, BAND, DRAWDOWN_THRESHOLD)
+    if rollover["detected"]:
         direction = "flat"
 
     pay = _macro_vals(macro_data, "PAYEMS")            # 000s, level; newest-first
@@ -6015,6 +6127,7 @@ def _build_growth_axis(macro_data: dict) -> dict:
             "initial_claims_latest_k": round(claims[0] / 1000.0, 1) if claims else None,
             "retail_sales_dir": retail_dir,
         },
+        "rollover": rollover,
         "note": note,
     }
 
@@ -6035,7 +6148,71 @@ def _fresh_oil_20d_pct(close_cache: dict[str, float] | None) -> tuple[float | No
     return round((latest / past - 1.0) * 100.0, 1), dates[0]
 
 
-def _build_inflation_axis(macro_data: dict, oil_proxy_close_cache: dict[str, float] | None = None) -> dict:
+_INFLATION_QUALITY_SERIES = {
+    "CORESTICKM159SFRBATL": "sticky_core_cpi_yoy",
+    "FLEXCPIM159SFRBATL": "flexible_cpi_yoy",
+    "PCETRIM12M159SFRBDAL": "trimmed_mean_pce_yoy",
+    "MICH": "umich_1y_expectations",
+}
+
+
+def _build_inflation_quality(macro_data: dict, today: str, band: float) -> dict:
+    """Diagnostics-only inflation-quality context (FOLLOWUPS #19, 2026-08-21):
+    Atlanta Fed sticky-price/flexible-price CPI, Dallas Fed trimmed-mean PCE,
+    and UMich 1y inflation expectations. Each is already FRED-hosted as a
+    percent-format series (12-month percent change, or a direct expectations
+    read for MICH) — no YoY re-derivation needed, unlike the index-level
+    CPI/PCE series the realized-core read uses.
+
+    Context only: none of these govern `_build_inflation_axis`'s `direction`,
+    and — per this task's explicit constraint — none feed `transition_watch`
+    confirmation (decision D-3/#78 is still open on whether the inflation-side
+    re-risk bar should be 1-of-3 or 2-of-3; wiring a 4th source here would
+    silently change that arithmetic while it's unresolved).
+
+    Direction is a simple month-over-month read (latest vs. the prior print,
+    gated on `band`) — mirrors the flat/rising/falling vocabulary used
+    elsewhere on this axis. Missing data (series absent, or fewer than 2
+    valid prints) OR a stale `as_of` (the existing monthly freshness
+    threshold, ``_FRESHNESS_MONTHLY_THRESHOLD_D`` — these are all monthly
+    series) degrades `direction` to 'indeterminate' — never a fabricated
+    read off a print too old to trust.
+    """
+    out: dict[str, dict] = {}
+    for sid, label in _INFLATION_QUALITY_SERIES.items():
+        rows = [
+            r for r in (macro_data.get(sid) or [])
+            if r.get("value") not in (None, ".", "")
+        ]  # newest-first
+        value = float(rows[0]["value"]) if rows else None
+        prior = float(rows[1]["value"]) if len(rows) > 1 else None
+        as_of = rows[0].get("date") if rows else None
+        days_stale = _days_stale(as_of, today)
+        stale = bool(days_stale is not None and days_stale > _FRESHNESS_MONTHLY_THRESHOLD_D)
+        if value is None or prior is None or stale:
+            direction = "indeterminate"
+        elif value > prior + band:
+            direction = "rising"
+        elif value < prior - band:
+            direction = "falling"
+        else:
+            direction = "flat"
+        out[label] = {
+            "series_id": sid,
+            "value": value,
+            "as_of": as_of,
+            "days_stale": days_stale,
+            "stale": stale,
+            "direction": direction,
+        }
+    return out
+
+
+def _build_inflation_axis(
+    macro_data: dict,
+    oil_proxy_close_cache: dict[str, float] | None = None,
+    today: str | None = None,
+) -> dict:
     """Deterministic inflation-direction read — the quadrant *inflation axis*.
 
     Realized core (PCE-first, then CPI) governs via the 3-month-annualized-vs-YoY
@@ -6058,6 +6235,8 @@ def _build_inflation_axis(macro_data: dict, oil_proxy_close_cache: dict[str, flo
     isn't. The overlay RULE is unchanged either way — it keys on the price
     trend, never the news-shock level.
     """
+    today = today or date.today().isoformat()
+
     def _yoy(sid: str, base: int = 0) -> float | None:
         v = _macro_vals(macro_data, sid)
         return round((v[base] / v[base + 12] - 1) * 100, 2) if len(v) > base + 12 else None
@@ -6190,6 +6369,10 @@ def _build_inflation_axis(macro_data: dict, oil_proxy_close_cache: dict[str, flo
     else:
         bridge_direction = "flat"
 
+    _iq_cfg = (_load_risk_limits().get("inflation_quality")
+               or _RISK_LIMITS_DEFAULTS["inflation_quality"])
+    quality = _build_inflation_quality(macro_data, today, float(_iq_cfg.get("band", 0.1)))
+
     return {
         "direction": direction,
         "reason": reason,
@@ -6216,6 +6399,7 @@ def _build_inflation_axis(macro_data: dict, oil_proxy_close_cache: dict[str, flo
         "breakeven_10y_delta_20d_bp": be_10y_delta,
         "breakeven_5y5y_delta_20d_bp": be_5y5y_delta,
         "realized_governs": True,
+        "quality": quality,
         "note": note,
         "bridge_note": (
             "bridge_direction is a SECONDARY, NON-BINDING read off the already-fresh "

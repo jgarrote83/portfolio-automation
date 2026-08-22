@@ -16,6 +16,7 @@ from collector.handler import (  # noqa: E402
     _build_inflation_axis,
     _build_policy_axis,
     _build_regime_gate,
+    _confirm_axis_direction,
     _gdpnow_vintage_rows,
 )
 
@@ -172,6 +173,163 @@ def test_gdpnow_vintage_rows_split_by_observation_date():
     assert _gdpnow_vintage_rows(None, "2026-07-01") == []
 
 
+# --- growth axis: rollover detection (FOLLOWUPS #54, 2026-08-21) -------------
+# Head-to-tail slope alone cannot see an interior peak/trough — a trajectory
+# that has already turned over reads as if it were still moving in its
+# original direction. Peak-drawdown detection (NOT the terminal-2/3-agreement
+# candidate recorded in FOLLOWUPS #54, which is verified inadequate below)
+# reclassifies a rolled-over "rising"/"falling" read as "flat".
+
+def test_rollover_case_a_deferred_08_03_04_q2_tail():
+    """Live evidence #1 from FOLLOWUPS #54: peaked at 1.74, falling for 3
+    straight vintages by the end — head-to-tail alone reads 'rising'."""
+    md = {"GDPNOW_VINTAGES": _vintages([1.36, 1.50, 1.62, 1.74, 1.68, 1.58, 1.54])}
+    g = _build_growth_axis(md)
+    assert g["direction"] == "flat"
+    assert g["rollover"]["detected"] is True
+    assert g["rollover"]["peak_value"] == 1.74
+    assert g["rollover"]["peak_drawdown"] == 0.2
+    assert g["rollover"]["head_to_tail_direction"] == "rising"
+
+
+def test_rollover_case_b_deferred_08_05_q3_tail_terminal_3_candidate_fails():
+    """Live evidence #2 from FOLLOWUPS #54: only 3 vintages, so the terminal-3
+    candidate recorded in that entry IS the whole trajectory (identical to
+    head-to-tail by construction) and would MISS this rollover entirely.
+    Peak-drawdown catches it because it doesn't need a minimum segment length
+    beyond 2."""
+    md = {"GDPNOW_VINTAGES": _vintages([4.95, 6.18, 5.86])}
+    g = _build_growth_axis(md)
+    assert g["direction"] == "flat"
+    assert g["rollover"]["detected"] is True
+    assert g["rollover"]["peak_value"] == 6.18
+    assert round(g["rollover"]["peak_drawdown"], 2) == 0.32
+    # The terminal-3 read (over the whole 3-point trajectory) is identical to
+    # head-to-tail -- proving the #54 candidate would have missed this case.
+    assert g["rollover"]["terminal_3_direction"] == g["rollover"]["head_to_tail_direction"] == "rising"
+
+
+def test_rollover_control_genuinely_rising_monotonic():
+    md = {"GDPNOW_VINTAGES": _vintages([1.0, 1.2, 1.4, 1.6, 1.8, 2.0])}
+    g = _build_growth_axis(md)
+    assert g["direction"] == "rising"
+    assert g["rollover"]["detected"] is False
+    assert g["rollover"]["peak_drawdown"] == 0.0
+
+
+def test_rollover_control_noisy_but_rising_peak_stays_at_the_end():
+    """A dip mid-trajectory that the series recovers ABOVE by the final
+    vintage -- the peak is still the LAST point, so no rollover, no false
+    positive from ordinary noise."""
+    md = {"GDPNOW_VINTAGES": _vintages([1.0, 1.3, 1.2, 1.5, 1.4, 1.7])}
+    g = _build_growth_axis(md)
+    assert g["direction"] == "rising"
+    assert g["rollover"]["detected"] is False
+
+
+def test_rollover_control_trivial_wobble_at_peak_below_threshold():
+    """A peak that IS before the final vintage, but the drawdown from it is
+    below the band -- must NOT fire (this is exactly the case a stricter
+    terminal-agreement rule would have false-positived on)."""
+    md = {"GDPNOW_VINTAGES": _vintages([1.0, 1.3, 1.6, 1.65, 1.60])}
+    g = _build_growth_axis(md)
+    assert g["direction"] == "rising"
+    assert g["rollover"]["detected"] is False
+    assert round(g["rollover"]["peak_drawdown"], 2) == 0.05
+
+
+def test_rollover_symmetric_trough_case_flips_falling_to_flat():
+    """H-2: the symmetric case on the falling side -- bottomed and turning up
+    must not still assert 'falling'."""
+    md = {"GDPNOW_VINTAGES": _vintages([6.0, 5.5, 5.0, 4.6, 4.8, 5.0, 5.3])}
+    g = _build_growth_axis(md)
+    assert g["direction"] == "flat"
+    assert g["rollover"]["detected"] is True
+    assert g["rollover"]["head_to_tail_direction"] == "falling"
+    assert round(g["rollover"]["peak_drawdown"], 2) == 0.7  # rise from the trough
+
+
+def test_rollover_applies_to_prior_quarter_tail_used_not_full_traj():
+    """prior_quarter_tail already slices `used` to the tail before this
+    function ever sees it -- confirm rollover reads THAT slice, not the
+    whole `GDPNOW_VINTAGES_PRIOR` trajectory (which may contain an earlier,
+    irrelevant peak outside the tail window)."""
+    # Full prior trajectory has an early peak far outside the 6-vintage tail;
+    # the tail itself is monotonically falling -- no rollover should fire
+    # from the earlier, out-of-window peak.
+    md = {"GDPNOW_VINTAGES_PRIOR": _vintages(
+        [9.0, 1.0, 2.0, 3.0, 4.0, 4.3, 4.2, 4.0, 3.7, 3.4, 3.1])}
+    g = _build_growth_axis(md)
+    assert g["basis"] == "prior_quarter_tail"
+    assert g["direction"] == "falling"
+    assert g["rollover"]["detected"] is False
+
+
+def test_rollover_cross_quarter_fallback_two_element_used_no_crash():
+    """cross_quarter_fallback: `used` must be the actual [first, last] pair
+    driving the direction call (not stale leftover `traj`), and a bare
+    2-element trajectory must not crash the rollover detector."""
+    md = {"GDPNOW_VINTAGES": _vintages([2.5]), "GDPNOW": _obs([2.54, 1.24])}
+    g = _build_growth_axis(md)
+    assert g["basis"] == "cross_quarter_fallback"
+    assert g["direction"] == "rising"
+    assert g["rollover"]["detected"] is False
+    assert g["gdpnow_trajectory"] == [1.24, 2.54]
+
+
+def test_rollover_flat_head_to_tail_never_computes_a_false_rollover():
+    md = {"GDPNOW_VINTAGES": _vintages([2.50, 2.55, 2.45, 2.52])}
+    g = _build_growth_axis(md)
+    assert g["direction"] == "flat"
+    assert g["rollover"]["detected"] is False
+
+
+def test_rollover_induced_flat_still_gated_by_n2_confirmation_hysteresis():
+    """A rollover changes only `_build_growth_axis`'s raw `direction` output --
+    it must NOT bypass, alter, or special-case `_confirm_axis_direction`'s
+    existing N=2 hysteresis. Simulate the exact `run()` wiring: raw 'rising'
+    was confirmed for a while (state persisted), then the trajectory rolls
+    over to a raw 'flat' -- the CONFIRMED direction must still read 'rising'
+    for one more run before flipping."""
+    md = {"GDPNOW_VINTAGES": _vintages([1.36, 1.50, 1.62, 1.74, 1.68, 1.58, 1.54])}
+    g = _build_growth_axis(md)
+    assert g["direction"] == "flat"  # the raw read, post-rollover-fix
+
+    prev_state = {
+        "raw_direction": "rising", "confirmed_direction": "rising",
+        "raw_streak": 5, "confirmed_as_of": "2026-08-19",
+    }
+    first_confirm = _confirm_axis_direction(g["direction"], prev_state, "2026-08-20")
+    assert first_confirm["direction"] == "rising"  # still cushioned -- 1st raw flat
+    assert first_confirm["direction_pending"] is True
+    assert first_confirm["raw_streak"] == 1
+
+    second_confirm = _confirm_axis_direction(
+        g["direction"],
+        {
+            "raw_direction": first_confirm["raw_direction"],
+            "confirmed_direction": first_confirm["direction"],
+            "raw_streak": first_confirm["raw_streak"],
+            "confirmed_as_of": first_confirm["confirmed_as_of"],
+        },
+        "2026-08-21",
+    )
+    assert second_confirm["direction"] == "flat"  # 2nd consecutive raw flat -- now confirmed
+    assert second_confirm["direction_pending"] is False
+
+
+def test_rollover_diagnostics_present_regardless_of_detection():
+    """The rollover block is always emitted (auditability), not only when it
+    fires."""
+    md = {"GDPNOW_VINTAGES": _vintages([1.0, 1.2, 1.4, 1.6])}
+    g = _build_growth_axis(md)
+    r = g["rollover"]
+    assert set(r) >= {
+        "detected", "peak_value", "peak_index", "peak_asof", "peak_drawdown",
+        "band", "head_to_tail_direction", "terminal_2_direction", "terminal_3_direction",
+    }
+
+
 # --- inflation axis ----------------------------------------------------------
 
 def test_inflation_flat_sticky_core():
@@ -307,6 +465,82 @@ def test_no_proxy_cache_defaults_to_fred():
     i = _build_inflation_axis(md)
     assert i["oil_trend_source"] == "fred_futures"
     assert i["oil_proxy_as_of"] is None
+
+
+# --- inflation-quality diagnostics (FOLLOWUPS #19, 2026-08-21, Task B) --------
+# Diagnostics only -- none of these govern `direction`, and (hard constraint)
+# none feed transition_watch confirmation (see
+# tests/test_transition_watch_confirmation_sources.py for the regression
+# guard that confirmations_of stays 3, not 4).
+
+def _dated_obs(pairs):
+    """Newest-first FRED-shaped rows with real dates: pairs = [(date, value), ...]."""
+    return [{"date": d, "value": str(v)} for d, v in pairs]
+
+
+_IQ_TODAY = "2026-08-21"
+
+
+def test_inflation_quality_all_four_series_present_with_as_of_and_direction():
+    md = {
+        "CORESTICKM159SFRBATL": _dated_obs([("2026-08-01", 4.30), ("2026-07-01", 4.10)]),
+        "FLEXCPIM159SFRBATL":   _dated_obs([("2026-08-01", 2.00), ("2026-07-01", 2.30)]),
+        "PCETRIM12M159SFRBDAL": _dated_obs([("2026-08-01", 2.90), ("2026-07-01", 2.92)]),
+        "MICH":                 _dated_obs([("2026-08-01", 3.20), ("2026-07-01", 3.20)]),
+    }
+    i = _build_inflation_axis(md, today=_IQ_TODAY)
+    q = i["quality"]
+    assert set(q) == {
+        "sticky_core_cpi_yoy", "flexible_cpi_yoy", "trimmed_mean_pce_yoy", "umich_1y_expectations",
+    }
+    assert q["sticky_core_cpi_yoy"]["as_of"] == "2026-08-01"
+    assert q["sticky_core_cpi_yoy"]["direction"] == "rising"    # 4.30 vs 4.10, +0.20 > band
+    assert q["flexible_cpi_yoy"]["direction"] == "falling"      # 2.00 vs 2.30, -0.30 < -band
+    assert q["trimmed_mean_pce_yoy"]["direction"] == "flat"     # 2.90 vs 2.92, within band
+    assert q["umich_1y_expectations"]["direction"] == "flat"    # unchanged
+    for label in q:
+        assert q[label]["stale"] is False
+
+
+def test_inflation_quality_stale_series_degrades_to_indeterminate():
+    """An as_of far outside the 45d monthly freshness threshold must degrade
+    `direction` to 'indeterminate' -- never a fabricated rising/falling read
+    off a print too old to trust."""
+    md = {"MICH": _dated_obs([("2026-01-01", 5.0), ("2025-12-01", 3.0)])}
+    i = _build_inflation_axis(md, today=_IQ_TODAY)
+    q = i["quality"]["umich_1y_expectations"]
+    assert q["stale"] is True
+    assert q["direction"] == "indeterminate"
+
+
+def test_inflation_quality_missing_series_degrades_to_indeterminate_never_crashes():
+    i = _build_inflation_axis({}, today=_IQ_TODAY)
+    for label, row in i["quality"].items():
+        assert row["value"] is None
+        assert row["direction"] == "indeterminate"
+
+
+def test_inflation_quality_single_print_insufficient_for_direction():
+    """Only one valid print (no prior to compare) -> indeterminate, not a
+    fabricated flat/rising/falling from nothing."""
+    md = {"CORESTICKM159SFRBATL": _dated_obs([("2026-08-01", 4.0)])}
+    i = _build_inflation_axis(md, today=_IQ_TODAY)
+    q = i["quality"]["sticky_core_cpi_yoy"]
+    assert q["value"] == 4.0
+    assert q["direction"] == "indeterminate"
+
+
+def test_inflation_quality_never_governs_the_axis_direction():
+    """Sanity: `quality` readings must have zero effect on the realized-core
+    -governed `direction` -- identical core inputs, wildly different quality
+    readings, same direction."""
+    core = {"PCEPILFE": _monthly_index(3.40, 2.10)}
+    baseline = _build_inflation_axis(core, today=_IQ_TODAY)
+    with_quality = _build_inflation_axis({
+        **core,
+        "CORESTICKM159SFRBATL": _dated_obs([("2026-08-01", 9.0), ("2026-07-01", 0.5)]),
+    }, today=_IQ_TODAY)
+    assert baseline["direction"] == with_quality["direction"] == "falling"
 
 
 # --- policy axis (FOLLOWUPS #16) ----------------------------------------------
