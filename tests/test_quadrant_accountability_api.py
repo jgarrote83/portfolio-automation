@@ -190,3 +190,61 @@ def test_lean_absent_from_point_degrades_to_none(monkeypatch):
     monkeypatch.setattr(function_app, "_latest_snapshot", lambda: (None, None))
     body = _call_performance(window="1Y")
     assert body["series"][0]["lean"] is None
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-21 measurement-integrity cycle, Task A -- `quadrant_index_meta` +
+# per-point `quadrant_coverage` reach the `/api/performance` response, and
+# Task D -- `cash_pct` reaches it too. End-to-end (empirical verification,
+# not a diff read).
+# ---------------------------------------------------------------------------
+
+def _blobs(equity_series, quadrant_config=None):
+    def _dl(container, name):
+        if name == "equity-series.json":
+            return equity_series
+        if name == "quadrant-config.json":
+            return quadrant_config or {}
+        return {}
+    return _dl
+
+
+def test_quadrant_index_meta_and_coverage_reach_the_response(monkeypatch):
+    cache = [
+        {"date": "2026-08-19", "equity": 100_000.0, "spy_close": 620.0,
+         "closes": {"A": 100.0, "B": 200.0}},
+        {"date": "2026-08-20", "equity": 100_100.0, "spy_close": 621.0,
+         "closes": {"A": 110.0, "B": 190.0}},
+    ]
+    monkeypatch.setattr(function_app, "_download_json",
+                         _blobs(cache, {"quadrants": {"Q1": ["A", "B"]}}))
+    monkeypatch.setattr(function_app, "_latest_snapshot", lambda: (None, None))
+    body = _call_performance(window="1Y")
+    meta = body["quadrant_index_meta"]
+    assert meta["membership_basis"] == "current_map_applied_retroactively"
+    assert meta["Q1"]["members_used"] == ["A", "B"]
+    assert body["series"][1]["quadrants"]["Q1"] == 102.5
+    assert body["series"][1]["quadrant_coverage"]["Q1"] == {
+        "members_priced": 2, "members_expected": 2,
+    }
+
+
+def test_quadrant_index_meta_absent_when_no_quadrant_map_configured(monkeypatch):
+    cache = [{"date": "2026-08-19", "equity": 100_000.0, "spy_close": 620.0}]
+    monkeypatch.setattr(function_app, "_download_json", _blobs(cache, {}))
+    monkeypatch.setattr(function_app, "_latest_snapshot", lambda: (None, None))
+    body = _call_performance(window="1Y")
+    assert body["quadrant_index_meta"] is None
+    assert "quadrants" not in body["series"][0]
+
+
+def test_cash_pct_passed_through_series(monkeypatch):
+    cache = [
+        {"date": "2026-08-19", "equity": 100_000.0, "spy_close": 620.0, "cash_pct": 12.34},
+        {"date": "2026-08-20", "equity": 100_100.0, "spy_close": 621.0},  # predates the field
+    ]
+    monkeypatch.setattr(function_app, "_download_json", _blobs(cache))
+    monkeypatch.setattr(function_app, "_latest_snapshot", lambda: (None, None))
+    body = _call_performance(window="1Y")
+    assert body["series"][0]["cash_pct"] == 12.34
+    assert body["series"][1]["cash_pct"] is None

@@ -1331,7 +1331,62 @@ call at all costs.
   composition is as-of the CURRENT roster; new members' bases start
   ~2026-07-10, so early-window (30d) returns under-represent them — the same
   caveat as the `/performance` web chart. Do not treat a thin 30d read for a
-  recently-reconstituted bucket as a strong signal either way.
+  recently-reconstituted bucket as a strong signal either way. **2026-08-21
+  measurement-integrity cycle:** this same look-ahead, plus two related
+  measurement defects (a late-appearing member based-in retroactively; a
+  day missing one member silently averaged over the rest instead of
+  gapping), were formally identified and FIXED for the `/performance` web
+  chart's basket index (`web/api/function_app.py::_quadrant_series`) — but
+  **not** for this block's own basket returns, which are computed by a
+  separate, hand-maintained collector twin (`_quadrant_perf_series`) that
+  this cycle did not touch. Treat `quadrant_performance`'s basket returns
+  as **potentially biased upward by the same three defects** until that
+  twin is corrected to match (tracked in FOLLOWUPS) — do not cite them with
+  more confidence than the web chart's own disclosed caveats would warrant.
+- **Never an achievable alternative.** When citing ANY quadrant basket
+  return (here, or from the web chart), do not describe it as something the
+  book could have captured instead. These baskets carry no cash, no flex
+  sleeve, no international sleeve, no fills, and no spreads — they are an
+  equal-weight index of names, not a tradable strategy. "The book trailed
+  the Q2 basket by N pp" is a description of a comparison, never a claim
+  that N pp was actually achievable.
+
+---
+
+### Measurement integrity — `paper_account.reconciliation` + `external_flows` (2026-08-21)
+
+Two deterministic, non-fatal, non-gating integrity checks on the numbers the
+entire report rests on. Neither ever blocks a snapshot or a trading day —
+they record and warn; **your job is to disclose, not to silently trust or
+silently suppress.**
+
+- **`paper_account.reconciliation`** — `equity`, `cash`, and `net_mv` (sum of
+  position market values) are computed independently and checked against
+  each other every run (`status`: `"ok"` / `"mismatch"` / `"unavailable"`).
+  **When `status == "mismatch"`,** surface it under the Data Integrity
+  Warning heading, naming `delta` and all three components verbatim
+  (`equity`, `cash`, `net_mv`, `tolerance`) — and **treat every
+  position-derived figure in that session's report as provisional**
+  (holdings valuation, weight percentages, P/L) rather than presenting them
+  with the usual confidence. Some drift is legitimate (unsettled trades,
+  accrued-but-unposted dividends, fractional rounding) — a mismatch is a
+  flag to disclose and watch, not proof of a broken feed on its own.
+  `"unavailable"` (Alpaca unreachable) — say so in one line; this is the
+  existing fallback-to-`portfolio.json` case, not a new failure mode.
+- **`external_flows`** — a deterministic scan of Alpaca's own activity log
+  for deposits, withdrawals, and cash journal entries (`series_integrity`:
+  `"clean"` or `"compromised_from:<date>"`). **When `series_integrity` is
+  not `"clean"`,** the report MUST disclose that the normalized
+  portfolio-vs-SPY return and alpha are **not comparable** across that
+  date boundary — an external cash flow makes `equity` jump for a reason
+  that is not return, and treating it as one would fabricate performance.
+  **Do not present a spanning-window alpha figure (inception, 30d, 60d,
+  90d — anything crossing the compromised date) as a clean result** when
+  this fires; name the compromised date and, if the window can be narrowed
+  to a flow-free span, prefer that instead of silently keeping the
+  contaminated one. `available: false` (the scan itself failed) — say so;
+  never assume `"clean"` in that case, since that is exactly the silent
+  failure mode this check exists to prevent.
 
 ---
 
@@ -1467,7 +1522,13 @@ A single JSON snapshot for one trading day containing:
   propose selling more shares than `paper_account.positions[].qty`, and respect
   `paper_account.cash` / `buying_power` as the hard cash constraint. If
   `paper_account.available == false`, fall back to `portfolio.positions` and note the
-  staleness.
+  staleness. `paper_account.reconciliation` (2026-08-21) — `{status, equity, cash,
+  net_mv, delta, tolerance, position_count}` — see "Measurement integrity" below for
+  the mandatory `mismatch` disclosure.
+- `external_flows` — deterministic external-cash-flow detection (2026-08-21):
+  `{available, flows[], series_integrity, checked_through}`. See "Measurement
+  integrity" below for the mandatory disclosure when `series_integrity` is not
+  `"clean"`.
 - `fundamentals` — FMP company profile per holding (P/E, beta, DCF, rating, sector)
 - `flex_candidates` — FMP profiles for a seed watchlist of **non-held** flex
   candidate tickers (evaluation-only, not positions). Their prices are in `prices`.

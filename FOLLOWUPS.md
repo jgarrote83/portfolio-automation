@@ -3,7 +3,30 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-08-21, later same day (SWA regime-lean visibility: transition-lean rail on the performance chart, regime-call accountability scorecard, reachable-suspect badge, branch `feat/20260821-swa-lean-visibility`).**
+**▶ START HERE — last session 2026-08-21, third cycle that day (measurement integrity: quadrant basket index fixes A1/A2/A3, equity reconciliation, external cash-flow detection, cash-share surfacing, branch `fix/20260821-measurement-integrity`).**
+See entry **#83** below for the full per-task design. Triggered by a
+walked-back headline number (a "book trails its own quadrant blend by
+~1.91pp" claim that turned out to be a manufactured, non-neutral
+benchmark) and the realization that all three known basket-index defects
+bias returns UPWARD — so the published Q2/Q3 basket figures were suspect
+before any attribution work was worth doing. **This cycle fixes
+measurement, not attribution** — the withdrawn seven-component blend-
+attribution ledger is tracked separately (entry **#84**), to be
+re-evaluated only after corrected basket returns are in hand. **Important:
+the required real-data probes (headline basket-return comparison, equity
+reconciliation, external-flows historical scan) could NOT be run this
+session** — this session's `az` context is in the wrong Entra tenant for
+this repo's storage account (interactive device-code login required, not
+available non-interactively). Everything is implemented and unit-tested
+against synthetic data; `scripts/probe_quadrant_basket_bias.py` is
+committed for Jorge to run for real. **Check the first post-merge daily
+snapshot's `external_flows.series_integrity` — if it's not `"clean"`, that
+finding supersedes everything else in this PR.** One more open follow-on:
+entry **#85** (`_quadrant_perf_series`, the analyzer-facing basket-return
+twin, still carries the same three defects, unfixed by this cycle). Suite
+1361→1397, ruff clean. **Auto-merge: NO, human review required.**
+
+**▶ Prior session 2026-08-21, second cycle that day (SWA regime-lean visibility: transition-lean rail on the performance chart, regime-call accountability scorecard, reachable-suspect badge, branch `feat/20260821-swa-lean-visibility`) — merged, PR #43 (incl. Finding M1 remediation).**
 See entry **#81** below for the full per-task design (Tasks A/B) — the
 instrumentation that should land BEFORE decision **D-3** resolves, so the
 first live joint lean (once it stages) is watched on the chart rather than
@@ -14,9 +37,9 @@ and a real regression the literal task spec would have missed (B1a: the
 backfill guard's naive `"closes" in existing` check would have silently
 never backfilled `lean` onto any pre-existing perf-series point). One new
 low-priority tooling gap logged as entry **#82**. Suite 1330→1354, ruff
-clean. **Auto-merge: NO, human review required.**
+clean.
 
-**▶ Prior session 2026-08-21 (quadrant selection reachability: diagonal projection, inflation-confirmation semantics, structural tape scores, per-axis divergence eligibility, reachable accountability, inert-lean diagnostic, branch `fix/20260821-quadrant-reachability`) — merged, PR #42.**
+**▶ Prior session 2026-08-21, first cycle that day (quadrant selection reachability: diagonal projection, inflation-confirmation semantics, structural tape scores, per-axis divergence eligibility, reachable accountability, inert-lean diagnostic, branch `fix/20260821-quadrant-reachability`) — merged, PR #42.**
 See entry **#77** below for the full per-task design (Tasks A/C/D/B/E/F) and the
 required end-to-end probe showing exactly what decision **D-3** (entry **#78**)
 buys — at the current default the reachability fix has nothing to compose with
@@ -404,6 +427,43 @@ wiped them.
 ---
 
 ## Open
+
+### 84. Blend-attribution ledger — deliberately deferred pending corrected basket returns (MEDIUM — architecture decision, cross-refs #83)
+The 2026-08-21 chart review's headline number (book trailed an equal-weight
+blend of its own four quadrant baskets by ~1.91pp) turned out, on
+inspection, to be a 35%-real-assets bet manufactured by double-counting the
+Q2/Q3 and Q3/Q4 basket overlaps — not a neutral benchmark, and one that
+beat the book over a window when real assets rallied (close to
+tautological). The originating draft (`claude-code-prompt-20260821-blend-
+attribution.md`, never implemented, superseded by entry **#83**) proposed a
+seven-component attribution ledger on TOP of that number. Building it on
+inputs already known to be wrong in a known (upward) direction would have
+been backwards. Entry **#83** fixed the measurement (basket index A1/A2/A3
+defects, equity reconciliation, external cash-flow detection) first. **Re-
+argue whether the attribution ledger is still needed once corrected basket
+returns are actually in hand** — the gap the ledger would explain may be
+substantially smaller than it looked, possibly small enough not to need
+explaining at all. Do not resurrect the seven-component design without
+first re-running the headline comparison (`scripts/probe_quadrant_basket_
+bias.py`) against real post-fix data.
+
+### 85. `_quadrant_perf_series` (collector) shares Task A's three basket-index defects, unfixed (MEDIUM — measurement integrity, cross-refs #83)
+Entry **#83** fixed `web/api/function_app.py::_quadrant_series` (the
+`/performance` web chart's basket index) but did NOT touch its
+hand-maintained "lock-step" twin, `collector.handler._quadrant_perf_series`
+— the function `quadrant_performance` (FOLLOWUPS #12, the regime-call
+accountability scorecard the ANALYZER actually reads and cites in its
+daily report) is built from. `project-instructions.md`'s "Regime-call
+accountability" section now carries an explicit caveat telling the model to
+treat `quadrant_performance`'s basket returns as potentially biased upward
+by the same three defects (A1 late-appearing members based-in
+retroactively, A2 today's roster applied to history, A3 a day missing one
+member silently averaged over the rest instead of gapping) until this twin
+is corrected — but the underlying NUMBERS are still wrong. Port the SAME
+three fixes from `_quadrant_series` to `_quadrant_perf_series` in a future
+cycle (same base-at-window-start / prefer-recorded-membership / gap-on-any-
+missing-member logic) — the two functions must stay in exact lock-step per
+CLAUDE.md's existing doctrine, and right now they don't.
 
 ### 82. `scripts/validate_palette.js` referenced by `web/performance.js` but absent from the repo (LOW — tooling gap, cross-refs #81)
 `web/performance.js`'s file-header comment (originally added for the Flex
@@ -2043,6 +2103,137 @@ fills (or explains a deviation).
 ---
 
 ## Done
+### 83. 2026-08-21 session: Measurement integrity — quadrant basket index fixes (A1/A2/A3), equity reconciliation, external cash-flow detection, cash-share surfacing — Done, branch `fix/20260821-measurement-integrity` (auto-merge: NO, human review required)
+Mission: the 2026-08-21 chart review's headline "book trailed an equal-
+weight blend of its own quadrant baskets by ~1.91pp" turned out to be a
+manufactured, non-neutral benchmark on inspection (double-counted Q2/Q3 and
+Q3/Q4 overlaps, ~35% real-assets-tilted) — and, more importantly, all
+three known defects in the basket index bias basket returns UPWARD, so the
+published Q2 (+4.82%)/Q3 (+4.06%) figures were suspect in a known
+direction. **This cycle does not build the withdrawn seven-component
+attribution ledger** (see entry **#84**) — it fixes the measurement first,
+so the NEXT chart read is trustworthy.
+
+- **Task A — honest quadrant basket index (`web/api/function_app.py::
+  _quadrant_series`).** Three defects fixed, `_quadrant_series` now returns
+  `(rows, coverage, meta)` instead of just `rows`:
+  - **A1** — a member lacking a price at the window's FIRST point is now
+    excluded from the whole window's index (never based-in retroactively
+    once it happens to appear later). The member set is FIXED for the
+    window, decided once. A quadrant left with <2 usable members is `None`
+    for the whole window — a one-name "basket" is not a basket.
+    `quadrant_index_meta.<Q>.{members_used, members_dropped, window_start}`
+    discloses the exclusion; never hidden.
+  - **A2** — the window prefers `points[0]`'s OWN recorded `quadrant_map`
+    (stamped by the collector — `_perf_point` gains a `quadrant_map` param,
+    live-only) over today's current config. **Deliberately NOT backfilled
+    onto pre-existing historical points** — per explicit instruction,
+    reconstructing a past day's membership (even from data as
+    close-at-hand as the collector's OWN `effective_selected`, already
+    stamped since 2026-07-28) is the defect, not the remedy; fallback +
+    disclosure (`quadrant_index_meta.membership_basis`:
+    `"as_of"`/`"current_map_applied_retroactively"`) is correct instead.
+    The re-hydration guard was deliberately NOT extended to include
+    `quadrant_map` (unlike `lean`'s guard in PR #43) — since it is never
+    set during backfill at all, adding it to the skip-guard without ever
+    setting it would force every historical point to be re-read on every
+    future run, forever.
+  - **A3** — the member set is fixed by A1, so a day missing ANY fixed
+    member now gaps the WHOLE quadrant that day (`None`), never a partial
+    average over the remaining members (which silently changed the
+    divisor day to day — a pure coverage artifact, not performance).
+    `quadrant_coverage.<Q>.{members_priced, members_expected}` per point
+    makes a chronically-flaky ticker visible instead of silently
+    reshaping the index.
+  - **Headline probe:** `scripts/probe_quadrant_basket_bias.py` (committed,
+    not yet run against the real account — see the environment note below)
+    prints the OLD-vs-NEW basket returns side by side for any window,
+    plus `members_dropped`/coverage/`membership_basis`. Smoke-tested
+    against a synthetic fixture confirming the OLD/NEW divergence is real
+    (a late-appearing member inflated OLD's return by ~1.5pp in the test
+    fixture — same direction, same mechanism as A1's defect).
+- **Task B — equity reconciliation.** New `paper_account.reconciliation`
+  (`_build_equity_reconciliation`, mirrors the existing
+  `_build_flex_reconciliation` pattern exactly): `equity`, `cash`, and
+  `net_mv` were computed on adjacent lines in `run()` and never checked
+  against each other, even though `equity` is the single number the whole
+  performance chart rests on. `status`: `"ok"`/`"mismatch"`/`"unavailable"`
+  (never a fabricated verdict when any input is missing). Tolerance =
+  `max(0.25% of equity, $50)` (config `risk-limits.json:
+  equity_reconciliation`, decision F-2 defaults — tune after a few weeks of
+  live deltas). Non-fatal, non-gating throughout — records and warns, never
+  blocks a snapshot or a trading day.
+- **Task C — external cash-flow detection.** New `external_flows` block
+  (`_build_external_flows`/`_classify_external_flows`/
+  `_scan_external_flows`): scans Alpaca's own activity log for CSD (cash
+  deposit), CSW (cash withdrawal), and JNLC (cash journal entry) — activity
+  type codes and the `net_amount`/`date` field names VERIFIED against
+  Alpaca's own docs this session, not merely assumed from the task's
+  suggested list. `series_integrity`: `"clean"` or
+  `"compromised_from:<date>"`. **One-time historical scan** on first run
+  (persisted to `performance/external-flows-scan.json`, keyed off
+  `checked_through`) — the existing chart may already be compromised and
+  nobody would know; every subsequent run scans only what's new.
+  Detect-and-disclose only this cycle — chain-linking into a true
+  time-weighted return is a separate cycle (decision gate F-3, deferred).
+- **Task D — surface the cash share.** `_perf_point` has always written
+  `cash_pct`; nothing downstream ever read it (grep across `web/` returned
+  zero hits) even though cash is a deliberate strategic position in this
+  book. `web/api/function_app.py` now passes it through the series
+  comprehension (`p.get("cash_pct")`, absent -> `None`).
+- **Report narration (`project-instructions.md`).** New "Measurement
+  integrity" subsection: a `paper_account.reconciliation.status ==
+  "mismatch"` MUST be disclosed with its delta and MUST downgrade every
+  position-derived figure that session to provisional; an `external_flows.
+  series_integrity != "clean"` MUST disclose that normalized return/alpha
+  are not comparable across that boundary, and a spanning-window alpha
+  figure must never be presented as clean when it fires. Extended the
+  existing "Regime-call accountability" section with a "never an
+  achievable alternative" doctrine (a quadrant basket carries no cash, no
+  flex, no international sleeve, no fills, no spreads — citing its return
+  is a comparison, never a claim of achievability) and an explicit caveat
+  that `quadrant_performance`'s own basket returns share Task A's three
+  defects, unfixed there (see entry **#85**). `web/performance.js` gained a
+  matching UI-side disclosure (the chart, not the analyzer, is what
+  actually cites `quadrant_index_meta`'s numbers) — a per-chip dropped-
+  member tooltip and a visible warning when `membership_basis ==
+  "current_map_applied_retroactively"`.
+- **Environment note — real-data probes not run this session.** This
+  repo's storage account lives in a different Entra tenant
+  (EasyGridsProduction / jgarrote@easygrids.com) from this session's
+  authenticated `az` context (QuirchFoodsSubscription) — interactive
+  device-code login was required and not available non-interactively.
+  §9.3/9.4/9.5's required real-data probes (the headline basket-return
+  comparison; the equity-reconciliation probe; the external-flows
+  historical-scan result) could not be run against the real account this
+  session. All three are fully implemented and unit-tested against
+  synthetic/fake data (Task A's probe script smoke-tested per above); the
+  equity-reconciliation and external-flows checks will run automatically
+  on the collector's next production cycle once merged, with results
+  visible in that day's `daily-snapshots/{date}.json` under
+  `paper_account.reconciliation`/`external_flows` and a WARNING-level log
+  line if either is not clean/ok. **Jorge: please run `scripts/probe_
+  quadrant_basket_bias.py` for real once merged (instructions in the
+  script's own docstring) and check the first post-merge snapshot's
+  `external_flows.series_integrity` — if it is not `"clean"`, that
+  supersedes everything else in this PR.**
+- **Suite:** 1361 (branch tip after PR #43) -> 1397 (+36: 13 `_quadrant_
+  series` + 5 `_perf_point`/backfill `quadrant_map` + 7 equity-
+  reconciliation + 15 external-cash-flow + 3 route-level A/D passthrough +
+  2 prompt sentinel — some overlap between categories). `ruff check .`
+  clean throughout — delta zero vs `master` apart from the Task B
+  tolerance key in `risk-limits.json`. Every new/modified test confirmed
+  failing before implementation (`git stash` isolation for the collector
+  changes; direct `TypeError`/`ImportError`/`KeyError` for brand-new
+  functions).
+- **Out of scope, confirmed untouched:** the withdrawn seven-component
+  blend-attribution ledger (entry **#84**); decision D-3
+  (`re_risk_min_confirmations`, still open, unrelated to this cycle); the
+  as-of-integrity branch's Task D (SPY/basket total return, stashed and
+  separate); TWR chain-linking (decision F-3); any allocation/gate/
+  threshold/weight change; any skill statistic, annualization, or
+  significance test on basket or portfolio returns.
+
 ### 81. 2026-08-21 session: SWA regime-lean visibility — transition-lean rail on the performance chart, regime-call accountability scorecard, reachable-suspect badge — Done, branch `feat/20260821-swa-lean-visibility` (auto-merge: NO, human review required)
 Mission: PR #42 (entry **#77**) made Q2 reachable and made the quadrant call
 accountable — neither change was visible anywhere in the UI (grep across

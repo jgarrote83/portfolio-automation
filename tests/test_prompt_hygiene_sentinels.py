@@ -188,6 +188,26 @@ _INERT_LEAN_SENTINELS = (
     "not a trade you failed to make",
 )
 
+# 2026-08-21 measurement-integrity cycle: equity reconciliation + external
+# cash-flow disclosure doctrine.
+_MEASUREMENT_INTEGRITY_SENTINELS = (
+    "Measurement integrity",
+    "paper_account.reconciliation",
+    "treat every",
+    "position-derived figure",
+    "external_flows",
+    "not comparable",
+    "Do not present a spanning-window alpha figure",
+)
+
+# Quadrant baskets are never an achievable alternative to the book; the
+# quadrant_performance/quadrant_series measurement-integrity caveat.
+_QUADRANT_BASKET_NOT_ACHIEVABLE_SENTINELS = (
+    "Never an achievable alternative",
+    "not a tradable strategy",
+    "potentially biased upward by the same three defects",
+)
+
 
 def _text() -> str:
     return _PROMPT.read_text(encoding="utf-8")
@@ -331,3 +351,15 @@ def test_inert_lean_doctrine_present():
     text = _text()
     for s in _INERT_LEAN_SENTINELS:
         assert s in text, f"missing inert-lean sentinel: {s!r}"
+
+
+def test_measurement_integrity_doctrine_present():
+    text = _text()
+    for s in _MEASUREMENT_INTEGRITY_SENTINELS:
+        assert s in text, f"missing measurement-integrity sentinel: {s!r}"
+
+
+def test_quadrant_basket_not_achievable_doctrine_present():
+    text = _text()
+    for s in _QUADRANT_BASKET_NOT_ACHIEVABLE_SENTINELS:
+        assert s in text, f"missing quadrant-basket-not-achievable sentinel: {s!r}"

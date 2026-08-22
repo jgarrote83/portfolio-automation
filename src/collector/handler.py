@@ -210,6 +210,10 @@ _RISK_LIMITS_DEFAULTS = {
         "dxy_news_corroboration_hits": 8,
         "no_baseline_watch_floor_hits": 5,
     },
+    "equity_reconciliation": {
+        "tolerance_pct_of_equity": 0.25,
+        "tolerance_floor_usd": 50.0,
+    },
 }
 
 # Conviction-sleeve flex-review defaults (overridable via config/flex-review.json).
@@ -690,6 +694,7 @@ def _load_equity_spy_series(
     growth_axis: dict | None = None,
     inflation_axis: dict | None = None,
     transition_watch: dict | None = None,
+    quadrant_map: dict | None = None,
 ) -> list[dict]:
     """Compact, self-healing (date, equity, spy_close, cash_pct) series.
 
@@ -716,6 +721,21 @@ def _load_equity_spy_series(
     present, value `None`) rather than absent once checked, to preserve the
     at-most-once-more re-read property for pre-#17 dates that will never
     have a lean to find.
+
+    2026-08-21 measurement-integrity cycle, Task A2: the LIVE point also
+    carries `quadrant_map` — today's effective quadrant->members membership
+    (post-`selected_for_role` resolution), passed in from `run()`. Unlike
+    `lean`, this is deliberately NEVER backfilled onto historical points —
+    per instruction, reconstructing what a past day's membership "must have
+    been" is exactly the defect this feature exists to avoid (a roster that
+    changed mid-window has no honest retroactive answer). Consequently
+    `quadrant_map` is NOT added to the re-hydration guard below: unlike
+    `lean` (which always gets an answer, even `None`, on backfill and so can
+    be checked-once), `quadrant_map` is never set during backfill at all —
+    adding it to the guard without ever setting it would force every
+    historical point to be re-read on every future run, forever.
+    `web/api/function_app.py::_quadrant_series` falls back to the current
+    config (and discloses `membership_basis`) for any point lacking it.
     """
     series = read_perf_series()
     by_date = {p.get("date"): p for p in series}
@@ -764,6 +784,7 @@ def _load_equity_spy_series(
                 (inflation_axis or {}).get("direction"),
             ),
             lean=_lean_from_transition_watch(transition_watch),
+            quadrant_map=quadrant_map,
         )
         existing = by_date.get(today)
         if existing != point:
@@ -1120,6 +1141,7 @@ def _perf_point(
     closes: dict | None = None,
     favored: list | None = None,
     lean: dict | None = _LEAN_UNSET,
+    quadrant_map: dict | None = None,
 ) -> dict:
     eq = round(float(equity), 2)
     point = {
@@ -1134,6 +1156,15 @@ def _perf_point(
         point["favored_bucket"] = favored
     if lean is not _LEAN_UNSET:
         point["lean"] = lean
+    if quadrant_map is not None:
+        # 2026-08-21 measurement-integrity cycle, Task A2 — the day's OWN
+        # effective quadrant->members membership (post-`selected_for_role`
+        # resolution), so `web/api/function_app.py::_quadrant_series` can
+        # anchor a window's basket composition to what was ACTUALLY selected
+        # on the window's first day, never today's roster applied
+        # retroactively. Omitted (not `None`) for historical points this
+        # cycle deliberately never backfills — see `_load_equity_spy_series`.
+        point["quadrant_map"] = quadrant_map
     return point
 
 
@@ -2342,6 +2373,12 @@ def run() -> None:
     portfolio_source = "fallback"
     paper_account: dict = {"available": False}
     day_pl_zero_watch: dict = {"available": False}
+    # Task B (2026-08-21 measurement-integrity cycle): loaded once, used for
+    # both the success (real tolerance) and unavailable (floor-only) paths.
+    _eq_recon_cfg = (_load_risk_limits().get("equity_reconciliation")
+                     or _RISK_LIMITS_DEFAULTS["equity_reconciliation"])
+    _eq_tol_pct = float(_eq_recon_cfg.get("tolerance_pct_of_equity", 0.25))
+    _eq_tol_floor = float(_eq_recon_cfg.get("tolerance_floor_usd", 50.0))
 
     ak = secrets.get("AlpacaApiKey")
     asec = secrets.get("AlpacaApiSecret")
@@ -2412,6 +2449,22 @@ def run() -> None:
                     for p in pos
                 ],
             }
+            # Task B (2026-08-21 measurement-integrity cycle): equity, cash,
+            # and net_mv are each already computed above but never checked
+            # against each other — a partial positions list could silently
+            # desync net_mv from equity with nothing noticing. Non-fatal,
+            # non-gating: records and warns, never blocks the snapshot.
+            _eq_tolerance = max(equity * _eq_tol_pct / 100.0, _eq_tol_floor)
+            paper_account["reconciliation"] = _build_equity_reconciliation(
+                equity, cash, net_mv, _eq_tolerance, len(positions),
+            )
+            if paper_account["reconciliation"]["status"] == "mismatch":
+                logger.warning(
+                    "Equity reconciliation MISMATCH: equity=$%.2f cash=$%.2f net_mv=$%.2f "
+                    "delta=$%.2f (tolerance $%.2f) — %d positions",
+                    equity, cash, net_mv, paper_account["reconciliation"]["delta"],
+                    _eq_tolerance, len(positions),
+                )
             logger.info(
                 "Alpaca portfolio: %d positions, equity=$%.2f, cash=$%.2f, total_gain=$%.2f",
                 len(positions), equity, cash, total_gain,
@@ -2438,6 +2491,14 @@ def run() -> None:
             balances = {}
     else:
         logger.warning("Alpaca creds missing — falling back to portfolio.json")
+
+    if not paper_account.get("available"):
+        # Task B: Alpaca unreachable or creds missing — reconcile as
+        # "unavailable" rather than silently omitting the block (never a
+        # fabricated "ok").
+        paper_account["reconciliation"] = _build_equity_reconciliation(
+            None, None, None, _eq_tol_floor, 0,
+        )
 
     if not positions:
         logger.warning("Loading config/portfolio.json fallback")
@@ -3428,10 +3489,18 @@ def run() -> None:
         today_equity = paper_account.get("equity") if paper_account.get("available") else None
         today_cash = paper_account.get("cash") if paper_account.get("available") else None
         today_spy = (prices.get("SPY") or {}).get("c")
+        # Task A2 (2026-08-21 measurement-integrity cycle): TODAY's effective
+        # quadrant->members membership, post-`selected_for_role` resolution —
+        # distinct from the static `QUADRANT_CONCENTRATE` fallback published
+        # below, which does not track an auto-switched incumbent.
+        today_quadrant_map = {
+            q: list(concentrate_names(q, effective_selected)) for q in ("Q1", "Q2", "Q3", "Q4")
+        }
         series = _load_equity_spy_series(
             today, today_equity, today_spy, today_cash,
             prices=prices, growth_axis=growth_axis, inflation_axis=inflation_axis,
             transition_watch=transition_watch,
+            quadrant_map=today_quadrant_map,
         )
         performance = _build_performance(series)
         # Publish the quadrant basket membership for the web chart (the SWA API
@@ -3508,6 +3577,28 @@ def run() -> None:
             )
     except Exception:  # noqa: BLE001
         logger.exception("P&L decomposition build failed (non-fatal)")
+
+    # --- Task C (2026-08-21 measurement-integrity cycle): external cash-flow --
+    # detection. Non-fatal. `_load_equity_spy_series`'s own docstring asserts
+    # the normalized return line is valid because there are "no external cash
+    # flows" — this is what actually checks that, rather than trusting it.
+    external_flows: dict = {"available": False}
+    try:
+        if ak and asec and paper_account.get("available"):
+            _alp_flows = AlpacaClient(api_key=ak, api_secret=asec)
+            external_flows = _build_external_flows(_alp_flows, today, _inception_date)
+            if external_flows.get("series_integrity", "clean") != "clean":
+                logger.warning(
+                    "External cash flows detected — series_integrity=%s flows=%s",
+                    external_flows.get("series_integrity"), external_flows.get("flows"),
+                )
+            else:
+                logger.info(
+                    "External cash flows: clean through %s",
+                    external_flows.get("checked_through"),
+                )
+    except Exception:  # noqa: BLE001
+        logger.exception("External cash-flow scan failed (non-fatal)")
 
     # --- Brief Phase 5: override_record (judgment loop, sibling of track_record) --
     # Non-fatal. Reads OverrideHistory (stamped by _stamp_override_outcomes on
@@ -3664,6 +3755,7 @@ def run() -> None:
         "market_implied_quadrant": market_implied_quadrant,
         "dollar_proxy": dollar_proxy,
         "pnl_decomposition": pnl_decomposition,
+        "external_flows": external_flows,
         "day_pl_zero_watch": day_pl_zero_watch,
         # Session 2026-07-28 (Task E hardening): the FINAL value of `effective_selected`
         # at snapshot-assembly time — persisted-state-derived, overwritten by the fresh
@@ -3842,6 +3934,141 @@ def _flex_pos_qty(pos: dict) -> float:
         return float(raw or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+# 2026-08-21 measurement-integrity cycle, Task C — verified against Alpaca's
+# own docs (not merely assumed from a suggested list): CSD = cash deposit(+),
+# CSW = cash withdrawal(-), JNLC = journal entry (cash). These are the
+# EXTERNAL cash-movement activity types — a deposit, withdrawal, or paper
+# account reset makes `equity` jump for a reason that is NOT return, and the
+# performance chart's normalized series would otherwise render that jump as
+# one. FILL (trades) and DIV (dividends, an internal accrual, not external
+# capital) are deliberately excluded.
+_CASH_FLOW_ACTIVITY_TYPES = ("CSD", "CSW", "JNLC")
+_EXTERNAL_FLOWS_CONTAINER = "performance"
+_EXTERNAL_FLOWS_BLOB = "external-flows-scan.json"
+
+
+def _classify_external_flows(activities: list[dict]) -> list[dict]:
+    """Pure — extract `{date, type, amount}` from raw Alpaca non-trade
+    activity dicts for the external cash-movement types above. `net_amount`
+    is the documented field for a non-trade activity's dollar value
+    (verified 2026-08-21); a malformed/missing amount degrades to `None`,
+    never a fabricated number. Sorted by date (earliest first) so the
+    caller can cheaply read off the earliest flow date."""
+    out: list[dict] = []
+    for a in activities:
+        t = str(a.get("activity_type") or "").upper()
+        if t not in _CASH_FLOW_ACTIVITY_TYPES:
+            continue
+        raw_amt = a.get("net_amount", a.get("amount"))
+        try:
+            amt = float(raw_amt) if raw_amt is not None else None
+        except (TypeError, ValueError):
+            amt = None
+        d = a.get("date") or str(a.get("transaction_time") or "")[:10] or None
+        out.append({"date": d, "type": t, "amount": amt})
+    out.sort(key=lambda f: f.get("date") or "")
+    return out
+
+
+def _scan_external_flows(prior_flows: list[dict], new_flows: list[dict], today: str) -> dict:
+    """Pure — merge freshly-classified flows into whatever was persisted
+    from a prior run, and render the integrity verdict. `series_integrity`
+    is `"clean"` only when NO external flow has ever been recorded;
+    otherwise `"compromised_from:<earliest flow date>"` — the normalized
+    return series is not comparable across that boundary (chain-linking
+    into a true time-weighted return is a separate cycle, decision gate
+    F-3; this cycle detects and discloses only).
+    """
+    seen = {(f.get("date"), f.get("type"), f.get("amount")) for f in prior_flows}
+    merged = list(prior_flows)
+    for f in new_flows:
+        key = (f.get("date"), f.get("type"), f.get("amount"))
+        if key not in seen:
+            merged.append(f)
+            seen.add(key)
+    merged.sort(key=lambda f: f.get("date") or "")
+    integrity = "clean" if not merged else f"compromised_from:{merged[0]['date']}"
+    return {
+        "available": True, "flows": merged,
+        "series_integrity": integrity, "checked_through": today,
+    }
+
+
+def _build_external_flows(alp: "AlpacaClient", today: str, inception_date: str) -> dict:
+    """2026-08-21 measurement-integrity cycle, Task C — detects external
+    cash flows (deposit/withdrawal/journal) against Alpaca's own activities
+    endpoint and discloses whether the normalized return series is
+    comparable across the whole window. Non-fatal: any failure (the
+    activities call raising, a malformed persisted state, etc.) degrades to
+    `available: False` — NEVER a fabricated `"clean"` verdict, since that
+    would be worse than no answer at all on the single most dangerous
+    silent-corruption path in this system.
+
+    ONE-TIME historical scan: on the first run (no persisted
+    `checked_through`), scans from the account's own `inception_date` —
+    the existing chart may already be compromised and nobody would know.
+    Every subsequent run scans only what's NEW since the last check
+    (persisted to `performance/external-flows-scan.json`), never re-scanning
+    the full history daily.
+    """
+    try:
+        state = read_json_blob(_EXTERNAL_FLOWS_CONTAINER, _EXTERNAL_FLOWS_BLOB)
+        state = state if isinstance(state, dict) else {}
+        checked_through = state.get("checked_through")
+        prior_flows = state.get("flows") or []
+        after = (
+            (date.fromisoformat(checked_through) + timedelta(days=1)).isoformat()
+            if checked_through else inception_date
+        )
+        raw_activities: list[dict] = []
+        for t in _CASH_FLOW_ACTIVITY_TYPES:
+            raw_activities.extend(alp.get_activities(activity_type=t, after=after))
+        new_flows = _classify_external_flows(raw_activities)
+        result = _scan_external_flows(prior_flows, new_flows, today)
+        write_json_blob(_EXTERNAL_FLOWS_CONTAINER, _EXTERNAL_FLOWS_BLOB, {
+            "checked_through": today, "flows": result["flows"],
+        })
+        return result
+    except Exception:  # noqa: BLE001
+        logger.exception("External cash-flow scan failed (non-fatal)")
+        return {"available": False, "flows": [], "series_integrity": None, "checked_through": None}
+
+
+def _build_equity_reconciliation(
+    equity: float | None, cash: float | None, net_mv: float | None,
+    tolerance: float, position_count: int,
+) -> dict:
+    """2026-08-21 measurement-integrity cycle, Task B — `equity` is the SINGLE
+    number the entire performance chart rests on, but it, `cash`, and
+    `net_mv` (`sum(position market_value)`) were computed on adjacent lines
+    in `run()` and never checked against each other. If Alpaca ever returns
+    a partial positions list, `net_mv` goes wrong while `equity` stays
+    correct (or vice versa) and nothing would notice. Mirrors the existing
+    `_build_flex_reconciliation` pattern exactly: pure, non-fatal,
+    non-gating — records and warns, never blocks a snapshot or a trading day.
+
+    `status` is `"unavailable"` (never a fabricated `"ok"`/`"mismatch"`)
+    when any of `equity`/`cash`/`net_mv` is `None` — Alpaca didn't return
+    enough to reconcile, which is itself worth knowing but is not the same
+    claim as "the numbers agree." Otherwise `"mismatch"` when
+    `|equity - (cash + net_mv)|` exceeds `tolerance` (config, gate F-2 —
+    some drift is legitimate: unsettled trades, accrued-but-unposted
+    dividends, fractional rounding), else `"ok"`.
+    """
+    if equity is None or cash is None or net_mv is None:
+        return {
+            "status": "unavailable", "equity": equity, "cash": cash, "net_mv": net_mv,
+            "delta": None, "tolerance": tolerance, "position_count": position_count,
+        }
+    delta = round(equity - (cash + net_mv), 2)
+    status = "ok" if abs(delta) <= tolerance else "mismatch"
+    return {
+        "status": status, "equity": round(equity, 2), "cash": round(cash, 2),
+        "net_mv": round(net_mv, 2), "delta": delta, "tolerance": tolerance,
+        "position_count": position_count,
+    }
 
 
 def _build_flex_reconciliation(flex_state: dict, paper_account: dict) -> dict:
