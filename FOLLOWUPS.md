@@ -3,7 +3,35 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-08-22 (ALFRED point-in-time backtest harness, branch `feat/20260821-alfred-backtest-harness`).**
+**▶ START HERE — last session 2026-08-22 (FOLLOWUPS carryover, docs only, branch `docs/20260822-followups-carryover`).**
+No code, test, or config changed — this session logs four findings diagnosed in
+conversation during the 2026-08-21/22 review cycle that had never been written
+down: **#88** (HIGH, actively blocking) the flex liquidity gate measures ADV off
+single-venue IEX volume against a threshold calibrated for the consolidated tape,
+excluding nearly the entire investable universe — live casualties ETN and EUAD
+both skipped on 2026-08-20, and the 2026-08-21 report guessed wrong about why;
+**#89** (MEDIUM) the dated-catalyst nomination rule demands a `catalyst_date` for
+a category (thematic-tier demand inflections) that structurally lacks one — the
+real mismatch is which exit machinery applies, not whether a date can be named;
+**#90** (MEDIUM) none of the 51 configured macro series is a consensus-forecast/
+survey-expectation series — flagged as the natural first candidate for #23's
+admission rule, with an explicit caution that the raw level is empirically
+lagging and revision velocity/dispersion may be the more promising angle; **#91**
+(HIGH, time-sensitive) three straight PRs shipped on synthetic-fixture
+verification only, and the backlog of built-but-never-read diagnostics
+(`external_flows.series_integrity`, `quadrant_index_meta`, `paper_account.
+reconciliation.status`, `growth_axis.rollover.detected`) is now bigger than the
+backlog of unwritten code. **Immediate next action: read #91's checklist before
+starting any new implementation work** — it requires zero code execution, only
+reading, and may reprioritize everything else in this file (concretely:
+`quadrant_index_meta` determines whether #84's ledger is worth building at all).
+Also amended entry **#23**: the inflation-turn merge took the harness's own
+acceptance margin to zero — 4 registered turns, 2007-08 expected
+unreconstructable, leaving exactly 3 against the implicit `≥3` bar; one more
+unreconstructable turn among the remaining three and #87 can't responsibly
+proceed. **Auto-merge: NO, human review required.**
+
+**▶ Prior session 2026-08-22 (ALFRED point-in-time backtest harness, branch `feat/20260821-alfred-backtest-harness`).**
 Builds FOLLOWUPS **#23**'s harness — the gate on the entire signal track — and
 tunes NOTHING (deliberately). Five tasks, all offline in `scripts/`, zero
 collector/runtime imports (verified by grep): **A** `alfred_cache.py`
@@ -486,6 +514,170 @@ wiped them.
 ---
 
 ## Open
+
+### 88. Flex liquidity gate is measured on the wrong feed (HIGH — actively blocking)
+Diagnosed in the 2026-08-21/22 review sessions, not yet implemented.
+`src/flex/config.py`'s `min_adv_usd` defaults to $50,000,000 (average daily
+dollar volume) — a floor sized for consolidated-tape volume. But
+`src/flex/handler.py:766` (and the minute-bar fetch at :761) fetches daily
+bars with `feed="iex"` — IEX is a single venue carrying roughly 2–3% of US
+consolidated volume, not the SIP consolidated tape. `avg_dollar_volume`
+(`src/flex/indicators.py:124`) therefore computes IEX-ONLY dollar volume
+(`sum(vals)/len(vals)` over close×volume) against a threshold obviously
+calibrated for consolidated volume — the effective bar is ~$1.5–2B of
+consolidated volume, excluding nearly the entire investable universe. The
+gate fires at `src/flex/entry.py:172` (catalyst path) and `:387` (conviction
+path), step 3 of 12 — before price, VWAP, ATR, stop, or sizing are ever
+computed.
+
+**Live casualties (2026-08-20 report):** ETN skipped at ADV $49.3M — short
+of the $50M floor by ~1.4%. EUAD skipped at ADV $205,851. The 2026-08-21
+report called ETN's skip "unexpected given its ADV" and speculated about an
+intraday VWAP condition — that guess was wrong; it's a plain threshold
+comparison the report couldn't diagnose because `_skip("liquidity_below_
+min")` emits a bare string carrying neither the threshold nor the
+shortfall.
+
+**Design direction discussed, not yet decided:**
+- **Resolve feed vs threshold.** Either source consolidated volume — FMP
+  EOD already returns volume and is already fetched for the price universe,
+  so zero new API cost and no Alpaca SIP subscription needed — or keep IEX
+  and rescale the floor by roughly the venue share. ADV and VWAP need not
+  share a feed: liquidity is a universe question, VWAP an execution
+  question. The existing `# Liquidity screen — tied to IEX-VWAP validity`
+  comment (`entry.py:169`) suggests the feed was chosen deliberately, but
+  the threshold was never rescaled to match it.
+- **Move the real constraint into sizing, not vetoing.** The gate sits
+  before sizing, which is why it must currently be an absolute floor —
+  nothing downstream has been computed yet. A participation clamp after
+  sizing (`notional / stressed_adv <= max_participation_pct`, equivalently
+  a days-to-liquidate cap) is dynamic in both the ticker's liquidity and
+  the position size, matching this system's own "a CLAMP, never an outright
+  rejection — 'size-floored ≠ impossible'" doctrine already used elsewhere
+  in `entry.py`.
+- **ETF look-through.** Screen volume is close to the wrong measure for an
+  ETF — creation/redemption means true liquidity is the underlying
+  basket's. EUAD is exactly this case; FMP ETF look-through is already on
+  the plan.
+- **Percentile, not mean.** `avg_dollar_volume`'s `sum(vals)/len(vals)` is
+  inflated by heavy days you won't be trading on; a median or 20th
+  percentile sizes against a typical-to-bad session.
+- **Exit asymmetry.** Entry is voluntary, exit often isn't — consider a
+  tighter participation cap on the exit side.
+- **Make the skip self-explanatory.** Carry `adv_usd`, `min_adv_usd`,
+  `shortfall_pct`, and the feed. A 1.4% miss and a ~200× miss currently
+  render identically, which is exactly why the 2026-08-21 report guessed
+  wrong.
+- Check `src/collector/catalyst_screen.py`'s own liquidity check (~line
+  125) for the same feed assumption.
+
+**Cross-refs #75.** Even with liquidity fixed, the conviction path's
+cash-accommodation clamp collapses every band to the same ~7 shares/$700,
+so EUAD would hit a second blocker immediately. These are sequential
+blockers on the same trade and should be resolved together.
+
+**Caveat, recorded honestly:** the specific consolidated-volume estimates
+for ETN and EUAD are inference from IEX venue share, not verified market
+data. The internal inconsistency stands regardless — a $50M floor applied
+to single-venue volume is a misconfiguration whatever the true figures are.
+
+### 89. Dated-catalyst doctrine: reframe from a date to a bounded window (MEDIUM — prompt-side only)
+Diagnosed in the 2026-08-21/22 review sessions, not yet implemented. There
+is no code gate for this — grep confirms no hard `catalyst_date`
+requirement anywhere in `src/`, and `earnings_proximity_score`'s own
+docstring is explicit that "a name with no upcoming print must never be
+penalized for lacking one." The requirement lives solely in
+`src/config/project-instructions.md` (~line 294) and applies ONLY to
+`path: "catalyst"` — the conviction path (~line 346) already requires no
+date, calling this "the entire point."
+
+**The tension:** the doctrine's own list of valid catalysts includes "a
+thematic-tier demand inflection," which by nature has no crisp date. The
+rule demands a `catalyst_date` for a category that structurally lacks one.
+
+**The counter-argument, recorded so it isn't lost:** the date is doing
+double duty as a routing signal for which exit machinery applies.
+`flex/exit_state.py` (~line 122) gates `time_stop` on `not is_conviction`;
+a catalyst hold exits on a clock, a conviction hold exits on hysteresis
+release, and the code's own comment calls a clock-based exit on a
+conviction hold a "phantom time_stop." The rest of the catalyst apparatus
+matches: morning-only window, VWAP-rising requirement, gap-vs-ADR logic, 4%
+max stop. Pushing a dateless thesis through it yields a momentum entry with
+a time stop counting down to nothing. **The mismatch is the exit, not the
+nomination.**
+
+**Proposed direction:** reframe the requirement from "cite a specific
+date" to "cite a recognition event and a bounded window by which it should
+resolve." This keeps `time_stop` anchored, admits thematic inflections,
+and removes the incentive to fabricate false precision that Task E5's
+hardening was built to stop.
+
+**Timing note worth recording:** E5 ("No exceptions, either direction… a
+`catalyst_date` of 'unknown' does NOT satisfy this bar") landed 2026-08-01;
+the zero-nomination drought ran 08-10→08-14; the conviction path was built
+08-14 in response. E5 was solving a model-honesty problem and may have
+overcorrected into a coverage problem. The conviction path earns its keep
+regardless, but the stated motivation for building it may be partly
+circular.
+
+### 90. Consensus-forecast series as the first signal-admission candidate (MEDIUM — cross-refs #23)
+Diagnosed in the 2026-08-21/22 review sessions, not yet implemented. Of the
+51 series currently in `macro-series.json`, none is a consensus forecast
+or survey expectation from professional forecasters. `SAHMREALTIME` is a
+real-time recession rule; `MICH`/`UMCSENT` are household expectations.
+There is no read on what professional forecasters think.
+
+**Candidates, all free and on ALFRED — therefore point-in-time
+reconstructable by the #23 harness:** the Philadelphia Fed Survey of
+Professional Forecasters (quarterly; includes probability distributions
+and the Anxious Index — a consensus regime probability that slots
+naturally into #22's probabilistic quadrant vector); smoothed recession
+probabilities (Chauvet-Piger); Cleveland Fed model-based inflation
+expectations; the FOMC Summary of Economic Projections. **Exact FRED
+series IDs are unverified — confirm before wiring anything.**
+
+**Caution to record:** consensus macro forecasts are empirically
+LAGGING — forecasters as a group essentially never call recessions in
+advance, consensus is heavily anchored, revises slowly, and herds tightly.
+Adding the raw level could make the quadrant call MORE lagging, the
+opposite of the problem the 2026-08-21 diagnosis identified. A more
+promising angle is revision velocity and cross-forecaster dispersion
+rather than the point forecast — how fast consensus is moving may lead
+where its level does not.
+
+**The point of this entry:** this is the natural first candidate for
+#23's pre-registered admission rule, and it should be decided by
+measurement, not argument (see #87). Also record: an LLM reading public
+macro commentary is structurally unbacktestable — training contamination
+means you cannot reconstruct what the model would have said in 2022 — so
+it fails the admission rule by construction and must stay commentary-only,
+never a weights input.
+
+**Sell-side bank research** was considered and set aside: licensing/
+redistribution barriers on the actual products, only marketing-tier
+material public, and the same lagging-consensus problem.
+
+### 91. Built-but-never-read diagnostics (HIGH — process, time-sensitive)
+Diagnosed in the 2026-08-22 carryover review. Three consecutive cycles
+(`fix/20260821-measurement-integrity`, `fix/20260821-axis-correctness`,
+`feat/20260821-alfred-backtest-harness`) merged or were proposed on
+synthetic-fixture verification only, none checked against real output. The
+backlog of built-but-unread diagnostics is now larger than the backlog of
+unwritten code.
+
+**Checklist to read — these run automatically (collector snapshot or the
+`/api/performance` view), no execution required, only reading:**
+
+| Field | Question it answers |
+|---|---|
+| `external_flows.series_integrity` | `clean`, or a date — if a date, the performance chart has been rendering a cash movement as return, and that supersedes everything else |
+| `quadrant_index_meta` + corrected Q1–Q4 returns | how much of the published −0.53 / +4.82 / +4.06 / +0.60 was A1/A2/A3 artifact — determines whether #84's ledger is worth building at all |
+| `paper_account.reconciliation.status` | `equity` vs `cash + net_mv` |
+| `growth_axis.rollover.detected` | whether the axis is currently reading a rolled-over trajectory |
+
+**Requires manual execution (not automatic):** `scripts/run_baseline.py`
+from #23 — the only route to the parity rate, coverage table, and baseline
+admission metrics, and the only thing that closes #23.
 
 ### 84. Blend-attribution ledger — deliberately deferred pending corrected basket returns (MEDIUM — architecture decision, cross-refs #83)
 The 2026-08-21 chart review's headline number (book trailed an equal-weight
@@ -1698,6 +1890,17 @@ market-derived inputs (`get_historical_price_light`'s own docstring already reco
 "~5 years on Starter" from a prior audit — not independently re-verified this session
 with a live key); and gating #13 monthly-review amendment proposals on this harness
 (a Learning Loop integration point, not touched here).
+
+**Acceptance-margin note (2026-08-22 carryover review):** the inflation-turn merge
+above (two originally-separate turns collapsed into one defensible
+`2022-core-cpi-peak` entry) took the harness's registered-turn count to exactly 4,
+and with 2007-08 expected unreconstructable that leaves exactly **3** turns against
+the `≥3` threshold a defensible baseline implicitly needs. There is zero margin: if
+any ONE of the three remaining turns (2020 COVID crash, 2020-21 reflation, 2022
+core-CPI peak) fails to reconstruct on a real run against real ALFRED data, coverage
+falls below what entry **#87**'s admission cycle can responsibly build on, and
+either the acceptance bar or the turn set itself will need revisiting before #87
+proceeds.
 
 ### 24. `regional_signals` per-region scorecard (HIGH — intl track parent)
 The system has one global quadrant and one DXY switch; it has **no per-region read**,
