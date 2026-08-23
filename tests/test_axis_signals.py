@@ -18,6 +18,7 @@ from collector.handler import (  # noqa: E402
     _build_regime_gate,
     _confirm_axis_direction,
     _gdpnow_vintage_rows,
+    _quarter_bounds,
 )
 
 
@@ -171,6 +172,18 @@ def test_gdpnow_vintage_rows_split_by_observation_date():
     assert cur[0]["asof"] == "2026-07-17"
     assert [r["value"] for r in pri] == ["2.5", "2.6"]
     assert _gdpnow_vintage_rows(None, "2026-07-01") == []
+
+
+def test_quarter_bounds_pure_arithmetic():
+    """Extracted from run()'s inline GDPNow fetch-window computation (2026-08-21
+    ALFRED backtest harness, Task B) so the offline replay can reuse the SAME
+    quarter-boundary arithmetic instead of reimplementing it. Covers every
+    quarter, including the year-boundary case (Q1 -> prior year's Q4)."""
+    from datetime import date
+    assert _quarter_bounds(date(2026, 2, 15)) == ("2026-01-01", "2025-10-01")
+    assert _quarter_bounds(date(2026, 5, 1)) == ("2026-04-01", "2026-01-01")
+    assert _quarter_bounds(date(2026, 8, 21)) == ("2026-07-01", "2026-04-01")
+    assert _quarter_bounds(date(2026, 12, 31)) == ("2026-10-01", "2026-07-01")
 
 
 # --- growth axis: rollover detection (FOLLOWUPS #54, 2026-08-21) -------------

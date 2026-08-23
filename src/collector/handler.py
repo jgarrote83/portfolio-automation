@@ -2760,11 +2760,7 @@ def run() -> None:
     # slope (e.g. 3.70 -> 4.26 -> 2.54) — the deceleration the quarterly view hides.
     macro_data["GDPNOW"] = fred.get_series_latest("GDPNOW", limit=8)
     _t = date.today()
-    _q_month = 3 * ((_t.month - 1) // 3) + 1
-    _q_start = date(_t.year, _q_month, 1).isoformat()
-    _prev_q_start = (
-        date(_t.year - 1, 10, 1) if _q_month == 1 else date(_t.year, _q_month - 3, 1)
-    ).isoformat()
+    _q_start, _prev_q_start = _quarter_bounds(_t)
     # Window starts at the PRIOR quarter: at every quarter turn the new quarter has
     # 0-2 vintages for weeks (the Atlanta Fed keeps nowcasting the just-ended quarter
     # until the BEA advance release), which left GDPNOW_VINTAGES empty and degraded
@@ -5687,6 +5683,21 @@ def _macro_vals(macro_data: dict, sid: str) -> list[float]:
         except (TypeError, ValueError):
             continue
     return vals
+
+
+def _quarter_bounds(t: date) -> tuple[str, str]:
+    """(current_quarter_start_iso, prior_quarter_start_iso) for the calendar
+    quarter ``t`` falls in. Pure — extracted from ``run()``'s inline GDPNow
+    fetch-window arithmetic (2026-08-21 ALFRED backtest harness, Task B) so
+    the offline point-in-time replay can compute the SAME quarter boundaries
+    a historical ``as_of`` was subject to, without reimplementing the
+    arithmetic a second time and risking drift."""
+    q_month = 3 * ((t.month - 1) // 3) + 1
+    q_start = date(t.year, q_month, 1).isoformat()
+    prev_q_start = (
+        date(t.year - 1, 10, 1) if q_month == 1 else date(t.year, q_month - 3, 1)
+    ).isoformat()
+    return q_start, prev_q_start
 
 
 def _gdpnow_vintage_rows(rows: list, obs_date: str) -> list[dict]:
