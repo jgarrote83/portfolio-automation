@@ -186,16 +186,25 @@ def test_pnl_decomposition_off_roster_flex_bucket():
     assert result["off_roster_flex"]["unrealized_usd"] < 0
 
 
-def test_pnl_decomposition_top15_cap():
-    """Even with many symbols in a bucket, contributors list is capped at 15."""
+def test_pnl_decomposition_contributors_uncapped():
+    """E1 (2026-09-02): a top-15 cap here was the root cause of the
+    2026-09-02 P&L reconciliation break (Section 1 prose vs Section 4 table
+    citing different numbers, because the ~17-sleeve core bucket exceeded
+    the old cap and sum(contributors) stopped equalling total_usd). No cap
+    now — every symbol in the bucket gets a contributor row."""
     fills = [
         _fill(f"SYM{i}", "buy", 1.0, 100.0, f"2026-05-{(27 + i):02d}")
         for i in range(20)
     ]
+    # A distinct open position per symbol so all 20 carry non-trivial P&L
+    # (buy-only fills alone register no realized P&L for _fifo_realized_pnl).
+    positions = [_pos(f"SYM{i}", unrealized_pl=-(1000.0 - i)) for i in range(20)]
     alp = _MockAlpaca(fills)
-    result = _build_pnl_decomposition(alp, _paper([]), "2026-05-26")
+    result = _build_pnl_decomposition(alp, _paper(positions), "2026-05-26")
     # All 20 are off_roster_flex (unknown symbols)
-    assert len(result["off_roster_flex"]["contributors"]) <= 15
+    assert len(result["off_roster_flex"]["contributors"]) == 20
+    row_sum = round(sum(c["total_usd"] for c in result["off_roster_flex"]["contributors"]), 2)
+    assert row_sum == result["off_roster_flex"]["total_usd"]
 
 
 # --- R1 (2026-08-06 audit): realized (closed) vs unrealized (open) labeling ---

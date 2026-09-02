@@ -33,7 +33,11 @@ from shared.quadrants import (
     benchmark_etf_for,
     quadrant_allocation_bucket,
 )
-from shared.reference_execution import REFERENCE_EXECUTION_DEFAULTS, reconcile
+from shared.reference_execution import (
+    REFERENCE_EXECUTION_DEFAULTS,
+    reconcile,
+    resolve_settling_tranche_cap,
+)
 from shared.trade_validation import validate_trades
 
 logger = logging.getLogger(__name__)
@@ -73,6 +77,8 @@ def _load_reference_execution_cfg() -> dict:
         "exempt_holds": list(EXEMPT_HOLDS),
         "sleeve_floor_pct_of_core": 0.1,
         "active_quadrant_ceiling_pct_of_core": 90.0,
+        "single_sleeve_cap_pct_of_equity": 12.0,
+        "override_saturation_alarm_frac": 0.40,
     }
     try:
         data = json.loads(_RISK_LIMITS_FILE.read_text(encoding="utf-8"))
@@ -84,7 +90,8 @@ def _load_reference_execution_cfg() -> dict:
             out[key] = {**out[key], **{k: v for k, v in block.items() if not k.startswith("_")}}
     if isinstance(data.get("exempt_holds"), list):
         out["exempt_holds"] = data["exempt_holds"]
-    for key in ("sleeve_floor_pct_of_core", "active_quadrant_ceiling_pct_of_core"):
+    for key in ("sleeve_floor_pct_of_core", "active_quadrant_ceiling_pct_of_core",
+                "single_sleeve_cap_pct_of_equity", "override_saturation_alarm_frac"):
         if isinstance(data.get(key), (int, float)):
             out[key] = float(data[key])
     return out
@@ -199,6 +206,14 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
     gaps: list[dict] = []
     ctx: dict = {}
     rex_cfg = _load_reference_execution_cfg()
+    # B3 (2026-09-02, G-2 merge blocker): while the collector's settling window
+    # (Table Storage backed) is active, reconcile's tranche pace is reduced —
+    # the SAME resolution the snapshot's execution_config.settling_window
+    # already echoes, never re-derived from the raw dates here.
+    _settling_window = (snapshot.get("execution_config") or {}).get("settling_window") or {}
+    rex_cfg["reference_execution"]["tranche_pp_max"] = resolve_settling_tranche_cap(
+        rex_cfg["reference_execution"]["tranche_pp_max"], _settling_window,
+    )
     try:
         gaps, ctx = _build_reference_gaps(snapshot)
         ctx["date"] = date_str
@@ -237,6 +252,24 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
     except Exception as e:  # noqa: BLE001
         logger.error("Override validation failed (non-fatal): %s", e)
         result = {"decisions": []}
+
+    # --- D1 (2026-09-02): override-saturation alarm — the cheapest possible ------
+    # detector of exactly the reference-degeneracy bug this cycle fixes. Non-fatal:
+    # a computation error must never lose the report.
+    try:
+        override_saturation = _build_override_saturation(
+            result.get("decisions", []), gaps, rex_cfg.get("override_saturation_alarm_frac", 0.40),
+        )
+        trades_obj["override_saturation"] = override_saturation
+        if override_saturation["alarm"]:
+            logger.warning(
+                "Override saturation ALARM: %d/%d referenced sleeves (%.1f%%) overridden",
+                override_saturation["overridden_count"], override_saturation["total_referenced_sleeves"],
+                override_saturation["saturation_frac"] * 100,
+            )
+        report_md += _override_saturation_addendum(override_saturation)
+    except Exception:  # noqa: BLE001
+        logger.exception("Override-saturation build failed (non-fatal)")
 
     # --- Session 2026-07-15, Task B1: two-pass validation around reconcile -------
     # Before this, reconcile ran on the model's RAW trades BEFORE Tier-1 validation,
@@ -425,6 +458,69 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
 # ---------------------------------------------------------------------------
 # Reference execution (Finding 2 — input assembly for shared/reference_execution.py)
 # ---------------------------------------------------------------------------
+
+def _build_override_saturation(decisions: list[dict], gaps: list[dict], alarm_frac: float) -> dict:
+    """D1 (2026-09-02) — the cheapest possible detector of exactly the
+    reference-degeneracy bug this cycle fixes. All three source sessions
+    carried 17-19 SIMULTANEOUS sleeve overrides (one on every sleeve with a
+    non-zero reference) and proposed ZERO trades; nothing treated that as
+    anomalous, because each override was individually well-formed.
+
+    At saturation the REFERENCE is the suspect, not the model's positioning
+    — an override on nearly every sleeve at once is not N independent
+    judgment calls, it is one signal that the deterministic target itself is
+    wrong. Counts ANY override record filed today (accepted, downsized, OR
+    rejected — the filing behavior itself is the smell, not the validation
+    outcome), restricted to sleeves the reference actually targets (a
+    zero-reference sleeve — LEGACY_EXITS, a non-selected pool member — isn't
+    part of the denominator; an override on one doesn't move the needle on
+    whether the LIVE reference looks broken)."""
+    referenced = {
+        str(g.get("symbol") or "").upper()
+        for g in (gaps or [])
+        if float(g.get("reference_pct") or 0) > 0
+    }
+    overridden = {
+        str((d.get("override") or {}).get("sleeve") or "").upper()
+        for d in (decisions or [])
+        if (d.get("override") or {}).get("sleeve")
+    } & referenced
+    total = len(referenced)
+    frac = round(len(overridden) / total, 3) if total > 0 else 0.0
+    return {
+        "overridden_count": len(overridden),
+        "total_referenced_sleeves": total,
+        "saturation_frac": frac,
+        "overridden_sleeves": sorted(overridden),
+        "alarm_frac_threshold": float(alarm_frac),
+        "alarm": total > 0 and frac > float(alarm_frac),
+    }
+
+
+def _override_saturation_addendum(sat: dict) -> str:
+    """Markdown addendum — a BLOCKING Data Integrity Warning (same prominence
+    as `paper_account.reconciliation`'s mismatch disclosure), fired when
+    `override_saturation.alarm` is True. States the INTERPRETATION, not just
+    the number: at saturation the reference is the suspect, not the model's
+    positioning. Unconditional, no gate on the alarm itself — empty string
+    when it hasn't fired."""
+    if not sat or not sat.get("alarm"):
+        return ""
+    pct = round(sat["saturation_frac"] * 100, 1)
+    thr_pct = round(sat["alarm_frac_threshold"] * 100, 1)
+    names = ", ".join(sat.get("overridden_sleeves") or [])
+    return (
+        "\n\n---\n\n### 🚨 Data Integrity Warning — override saturation\n\n"
+        f"**{sat['overridden_count']} of {sat['total_referenced_sleeves']} referenced "
+        f"sleeves ({pct}%) carry an override this session — above the {thr_pct}% alarm "
+        f"threshold: {names}.**\n\n"
+        "An override on nearly every sleeve simultaneously is not this many independent "
+        "judgment calls — it is one signal that the DETERMINISTIC REFERENCE itself is "
+        "wrong, not that the book's positioning is. Treat this as a prompt to re-examine "
+        "`reference_weights` (regime read, quadrant bucket, conviction proxy) before "
+        "filing another override this session.\n"
+    )
+
 
 def _flagged_sleeves_addendum(recon_sleeves: dict) -> str:
     """Markdown addendum listing `reconcile()`'s `non_compliant_flagged` sleeves

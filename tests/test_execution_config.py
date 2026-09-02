@@ -44,6 +44,7 @@ def test_matches_real_risk_limits_json():
     assert out["sleeve_floor_pct_of_core"] == cfg["sleeve_floor_pct_of_core"]
     assert out["de_risk_min_evidence"] == 1
     assert out["relative_band_frac"] == cfg["override_protocol"]["relative_band_frac"]
+    assert out["max_magnitude_rel_frac"] == cfg["override_protocol"]["max_magnitude_rel_frac"]
 
 
 def test_defaults_path_when_keys_absent():
@@ -57,6 +58,7 @@ def test_defaults_path_when_keys_absent():
     assert out["min_notional_usd"] == REFERENCE_EXECUTION_DEFAULTS["min_notional_usd"]
     assert out["sleeve_floor_pct_of_core"] == 0.1
     assert out["relative_band_frac"] == 0.5
+    assert out["max_magnitude_rel_frac"] == 1.0
 
 
 def test_partial_cfg_falls_back_per_key():

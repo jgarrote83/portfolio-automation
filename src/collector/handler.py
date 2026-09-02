@@ -51,7 +51,12 @@ from shared.quadrants import (
 from flex.config import load_flex_config
 from flex.indicators import avg_dollar_volume
 from flex.regime import FLEX_REENTERABLE, flex_separation_set, regime_fit_score, resolve_quadrant
-from shared.reference_execution import effective_execution_config
+from shared.reference_execution import (
+    REFERENCE_EXECUTION_DEFAULTS,
+    advance_settling_window,
+    effective_execution_config,
+    resolve_settling_tranche_cap,
+)
 from shared.overrides import evaluate_falsifier
 from collector import catalyst_screen
 
@@ -3703,6 +3708,17 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Freshness build failed (non-fatal)")
 
+    # --- C1 (2026-09-02, DESCRIBE-ONLY, decision gate G-4): staleness-damped ------
+    # axis confidence + bridge-disagreement score. Non-fatal; wired to NOTHING —
+    # direction/confidence are untouched either way (see the two builders' own
+    # docstrings). Computed here (not inside _build_growth_axis/_build_inflation_
+    # axis) because it needs `freshness`, which itself needs growth_axis first.
+    try:
+        growth_axis = {**growth_axis, **_growth_confidence_damped(growth_axis, freshness)}
+        inflation_axis = {**inflation_axis, **_inflation_confidence_damped(inflation_axis, freshness)}
+    except Exception:  # noqa: BLE001
+        logger.exception("Confidence-damping build failed (non-fatal)")
+
     # --- Session 2026-07-17, Task B: execution_config (config-guessing kill) -----
     # Non-fatal, pure echo of `shared.reference_execution.effective_execution_config`
     # — the SAME resolution `reconcile`/`validate_trades` apply, so the prompt can
@@ -3711,9 +3727,34 @@ def run() -> None:
     # alone filed three unnecessary in-band overrides). See #33(i).
     execution_config: dict = {}
     try:
-        execution_config = effective_execution_config(_load_risk_limits())
+        _risk_limits_cfg = _load_risk_limits()
+        execution_config = effective_execution_config(_risk_limits_cfg)
     except Exception:  # noqa: BLE001
         logger.exception("Execution config build failed (non-fatal)")
+
+    # --- B3 (2026-09-02, G-2 merge blocker): settling-tranche-cap window ----------
+    # Non-fatal, separate try/except from the block above — a settling-window
+    # failure must not lose the rest of execution_config (worst case: the plain
+    # tranche_pp_max applies everywhere, same as if this cycle had never shipped).
+    try:
+        _settling_sessions = int(execution_config.get(
+            "settling_sessions", REFERENCE_EXECUTION_DEFAULTS["settling_sessions"]))
+        _settling_tranche = float(execution_config.get(
+            "settling_tranche_pp_max", REFERENCE_EXECUTION_DEFAULTS["settling_tranche_pp_max"]))
+        _prior_settling = _load_settling_window_state()
+        _settling_window = advance_settling_window(
+            _prior_settling, today, _settling_sessions, _settling_tranche)
+        _save_settling_window_state(_settling_window)
+        execution_config["settling_window"] = {
+            "active": _settling_window["active"],
+            "sessions_remaining": _settling_window["sessions_remaining"],
+            "effective_cap": resolve_settling_tranche_cap(
+                execution_config.get("tranche_pp_max", REFERENCE_EXECUTION_DEFAULTS["tranche_pp_max"]),
+                _settling_window,
+            ),
+        }
+    except Exception:  # noqa: BLE001
+        logger.exception("Settling-window build failed (non-fatal)")
 
     # --- Assemble snapshot ---------------------------------------------------
     snapshot = {
@@ -4555,6 +4596,105 @@ _FRESHNESS_MONTHLY = frozenset({"CPILFESL", "PCEPILFE", "CPIAUCSL", "PCEPI"})
 _FRESHNESS_DAILY_THRESHOLD_D = 5
 _FRESHNESS_MONTHLY_THRESHOLD_D = 45
 _FRESHNESS_GDPNOW_THRESHOLD_D = 7
+
+
+_CONFIDENCE_BASE = {"high": 1.0, "medium": 0.7, "low": 0.4, "none": 0.0}
+
+
+def _damp_confidence_by_staleness(
+    base_confidence: float, days_stale: int | None, threshold_days: float | None,
+) -> float:
+    """C1 (2026-09-02, DESCRIBE-ONLY — decision gate G-4). Inverse-proportion
+    decay of a 0-1 base confidence once its governing series sits past its
+    OWN freshness threshold (``freshness.<series>.days_stale`` vs
+    ``.threshold_days``): undamped (factor 1.0) at or under the threshold;
+    factor = threshold_days / days_stale beyond it — halved at 2x the
+    threshold, a third at 3x, asymptotically toward (never reaching, never
+    negative) 0.0 for extreme staleness. Missing days_stale/threshold ->
+    undamped (nothing to damp against; absence is a separate signal the
+    freshness table itself already surfaces via `stale`)."""
+    if days_stale is None or not threshold_days or threshold_days <= 0:
+        return round(base_confidence, 3)
+    if days_stale <= threshold_days:
+        return round(base_confidence, 3)
+    factor = float(threshold_days) / float(days_stale)
+    return round(base_confidence * factor, 3)
+
+
+def _growth_confidence_damped(growth_axis: dict, freshness: dict) -> dict:
+    """DESCRIBE-ONLY (C1, decision gate G-4): growth_axis.confidence damped by
+    GDPNow vintage staleness. Wired to NOTHING this cycle — `direction` and
+    the plain `confidence` label are both untouched; no consumer reads this."""
+    base_label = (growth_axis or {}).get("confidence") or "none"
+    base = _CONFIDENCE_BASE.get(base_label, 0.0)
+    gd = ((freshness or {}).get("series") or {}).get("GDPNOW") or {}
+    damped = _damp_confidence_by_staleness(base, gd.get("days_stale"), gd.get("threshold_days"))
+    return {
+        "confidence_damped": damped,
+        "confidence_damped_inputs": {
+            "base_confidence_label": base_label,
+            "base_confidence_numeric": base,
+            "governing_series": "GDPNOW",
+            "days_stale": gd.get("days_stale"),
+            "threshold_days": gd.get("threshold_days"),
+        },
+    }
+
+
+def _inflation_confidence_damped(inflation_axis: dict, freshness: dict) -> dict:
+    """DESCRIBE-ONLY (C1, decision gate G-4): inflation_axis carries no
+    categorical `confidence` field (realized core deterministically GOVERNS
+    `direction` always, spec doctrine) — the base is a flat 1.0, damped
+    purely by how stale the GOVERNING realized series (whichever of
+    PCEPILFE/CPILFESL actually drove `direction` — mirrors the existing
+    `realized_core_as_of` resolution) sits past ITS OWN freshness threshold.
+    Motivating incident: core CPI/PCE 63 days stale, yet the CONFIRMED
+    direction reads at a 24-run streak with nothing surfacing the staleness
+    tension against it.
+
+    Also promotes the existing bridge_direction-vs-direction tension
+    (previously prose-only counter-signal in report write-ups) to an
+    explicit numeric `bridge_disagreement_score`: 0 = same direction, 1 = one
+    side flat/indeterminate (partial disagreement), 2 = fully opposite
+    (rising vs falling) — a fixed ordinal scale, never a bp-vs-percentage-
+    point unit conversion between two genuinely different underlying metrics
+    (breakeven moves vs core ann3-vs-YoY spread), which would be false
+    precision.
+
+    Wired to NOTHING this cycle — `direction` is untouched; no consumer
+    reads either new field. See decision gate G-4 (PR body): wiring the
+    bridge to govern is deferred at least one cycle."""
+    ia = inflation_axis or {}
+    governing_sid = "PCEPILFE" if ia.get("core_pce_ann3") is not None else "CPILFESL"
+    fd = ((freshness or {}).get("series") or {}).get(governing_sid) or {}
+    damped = _damp_confidence_by_staleness(1.0, fd.get("days_stale"), fd.get("threshold_days"))
+
+    direction = ia.get("direction")
+    bridge_direction = ia.get("bridge_direction")
+    if direction is None or bridge_direction is None:
+        disagreement = None
+    elif direction == bridge_direction:
+        disagreement = 0.0
+    elif "flat" in (direction, bridge_direction) or "indeterminate" in (direction, bridge_direction):
+        disagreement = 1.0
+    else:
+        disagreement = 2.0
+
+    return {
+        "confidence_damped": damped,
+        "confidence_damped_inputs": {
+            "base_confidence_numeric": 1.0,
+            "governing_series": governing_sid,
+            "days_stale": fd.get("days_stale"),
+            "threshold_days": fd.get("threshold_days"),
+        },
+        "bridge_disagreement_score": disagreement,
+        "bridge_disagreement_note": (
+            "0 = bridge agrees with the realized direction; 1 = one side is "
+            "flat/indeterminate (partial disagreement); 2 = fully opposite "
+            "(rising vs falling). Describe-only — never governs `direction`."
+        ),
+    }
 
 
 def _build_freshness(macro_data: dict, growth_axis: dict, today: str) -> dict:
@@ -5812,6 +5952,34 @@ def _save_axis_direction_state(new_state: dict) -> None:
             "raw_streak": int(s.get("raw_streak") or 0),
             "confirmed_as_of": s.get("confirmed_as_of") or "",
         })
+
+
+_SETTLING_STATE_TABLE = "SettlingWindowState"
+
+
+def _load_settling_window_state() -> dict | None:
+    """B3 (2026-09-02, G-2 merge blocker). Mirrors `_load_axis_direction_state`
+    exactly — same table-per-row shape, same non-fatal-on-read-failure caller
+    contract (None is a valid "first run" input to `advance_settling_window`,
+    never a crash)."""
+    for e in query_entities(_SETTLING_STATE_TABLE):
+        if e.get("RowKey") == "reference_execution":
+            return {
+                "start_date": e.get("start_date") or "",
+                "sessions_elapsed": int(e.get("sessions_elapsed") or 0),
+                "last_date": e.get("last_date") or "",
+            }
+    return None
+
+
+def _save_settling_window_state(state: dict) -> None:
+    upsert_entity(_SETTLING_STATE_TABLE, {
+        "PartitionKey": "state",
+        "RowKey": "reference_execution",
+        "start_date": state.get("start_date") or "",
+        "sessions_elapsed": int(state.get("sessions_elapsed") or 0),
+        "last_date": state.get("last_date") or "",
+    })
 
 
 def _confirm_axis_direction(raw_direction: str, prev: dict | None, today: str) -> dict:
@@ -7175,6 +7343,30 @@ def _conviction_edge(p_up: float, base_rate_up: float) -> float:
     return max(0.0, p_up - base_rate_up)
 
 
+def _damp_p_up_toward_base_rate(p_up: float, base_rate_up: float, damping_factor: float) -> float:
+    """D2 (2026-09-02) — MECHANICAL confidence damping on the conviction path.
+
+    08-31 calibration (n=102 matured): predicted 0.65 -> actual 0.46 (n=26);
+    0.73 -> 0.44 (n=54); 0.82 -> 0.50 (n=16); 0.92 -> 0.33 (n=6). Calibration
+    is not merely poor but INVERTED — higher stated confidence predicts WORSE
+    outcomes. The 08-31 report's response ("I am compressing confidence
+    toward 0.5") was prose and did not survive into the 09-01/09-02 sessions
+    — this makes it mechanical.
+
+    Flattens `p_up` toward its own empirical `base_rate_up` by
+    `damping_factor` (1.0 = no change, full trust in the stated probability;
+    0.0 = fully flattened to the base rate, `edge` always 0 regardless of
+    what was claimed) BEFORE `edge = p_up - base_rate_up` — reuses the SAME
+    `brier_damping` ladder already computed for the path (see
+    `_build_flex_conviction_calibration` / `_thematic_damping_factor`), now
+    applied upstream of the edge/ladder lookup instead of as a post-hoc
+    multiplier on the final size_mult (the prior mechanism, superseded here —
+    damping the INPUT belief is the honest fix; damping only the output size
+    left a miscalibrated p_up still setting the ladder RUNG, just at a
+    smaller multiple of it)."""
+    return base_rate_up + (p_up - base_rate_up) * damping_factor
+
+
 def _conviction_ladder_lookup(ladder: list[dict], edge: float) -> tuple[float, str]:
     """Maps an `edge` (p_up - base_rate_up, already clamped >= 0) to
     `(size_mult, conviction)` via the config ladder (sorted descending by
@@ -7512,6 +7704,18 @@ def _build_flex_conviction(
     catalyst_size_mult = float(cv_cfg.get("catalyst_size_mult", 1.0))
     promotes_band = bool(cv_cfg.get("catalyst_promotes_band", False))
 
+    # D2 (2026-09-02): the effective p_up-damping factor — the MECHANICAL
+    # brier_damping ladder (unchanged computation, `calibration.damping_factor`
+    # from `_build_flex_conviction_calibration`) UNLESS Jorge has set an
+    # explicit interim override (risk-limits.json `conviction.
+    # p_up_damping_factor_override`, non-null) — the honest-interim response
+    # to calibration this inverted, while the path's OWN brier_min_sample-
+    # gated ladder is still too thin to mechanically reflect it. `None`
+    # (default once real Brier data governs) defers entirely to the ladder.
+    _mechanical_damping = float((calibration or {}).get("damping_factor", 1.0))
+    _override = cv_cfg.get("p_up_damping_factor_override")
+    damping_factor = _mechanical_damping if _override is None else float(_override)
+
     nominatable = {
         row["symbol"] for row in (eligibility or {}).get("candidates", []) if row.get("flex_nominatable")
     }
@@ -7547,18 +7751,25 @@ def _build_flex_conviction(
             excluded.append({"symbol": sym, "reason": "insufficient_base_rate_history"})
             continue
 
-        edge = _conviction_edge(p_up, rate["base_rate_up"])
+        # D2: damp p_up TOWARD base_rate_up before it ever reaches edge — the
+        # STATED confidence is what's untrustworthy (inverted calibration),
+        # not merely its eventual sizing. damping_factor=1.0 is a no-op
+        # (p_up_damped == p_up); 0.0 fully flattens (edge always 0).
+        p_up_damped = _damp_p_up_toward_base_rate(p_up, rate["base_rate_up"], damping_factor)
+        edge = _conviction_edge(p_up_damped, rate["base_rate_up"])
         size_mult, conviction = _conviction_ladder_lookup(ladder, edge)
         amp = _conviction_catalyst_amplifier(
             size_mult, conviction, nom.get("catalyst_date"), horizon_days, today,
             ladder, catalyst_size_mult, promotes_band,
         )
-        damping = float((calibration or {}).get("damping_factor", 1.0))
-        final_mult = round(amp["size_mult"] * damping, 4)
+        # No post-hoc size_mult multiplication anymore — damping already
+        # happened upstream, at p_up, before it ever set the ladder rung.
 
         candidates_by_symbol[sym] = {
-            "conviction": amp["conviction"], "size_mult": final_mult,
-            "symbol": sym, "p_up": p_up, "base_rate_up": rate["base_rate_up"],
+            "conviction": amp["conviction"], "size_mult": round(amp["size_mult"], 4),
+            "symbol": sym, "p_up": p_up, "p_up_damped": round(p_up_damped, 4),
+            "damping_factor_applied": damping_factor,
+            "base_rate_up": rate["base_rate_up"],
             "base_rate_windows": rate["windows"], "edge": edge,
             "horizon_days": horizon_days, "evidence": evidence,
             "invalidation": nom.get("invalidation"), "catalyst_date": nom.get("catalyst_date"),
@@ -8768,6 +8979,10 @@ def _build_reference_weights(
     intl_lean = dxy_tag == "tailwind"   # falling dollar favors international
 
     # Names to concentrate into + their raw shares of the active-quadrant target.
+    barbell_applied = False
+    _barbell_restricted_names: list[str] = []
+    _barbell_permitted_names: list[str] = []
+    _barbell_cap_restricted = False
     if borderline:
         # Intersection blend: cross-regime names take the lion's share; the divergent
         # (single-bucket) names are staged at partial size. Never a freeze.
@@ -8786,10 +9001,75 @@ def _build_reference_weights(
             per = inter_share / len(inter)
             for t in inter:
                 raw_core[t] = raw_core.get(t, 0.0) + per
-        if divergent:
-            per = div_share / len(divergent)
-            for t in divergent:
-                raw_core[t] = raw_core.get(t, 0.0) + per
+            if divergent:
+                per = div_share / len(divergent)
+                for t in divergent:
+                    raw_core[t] = raw_core.get(t, 0.0) + per
+        elif len(bucket) >= 2:
+            # A2 (2026-09-02) — barbell: NO cross-regime overlap (the bucket's
+            # two quadrants are opposite risk postures, e.g. Q1/Q4 or Q1/Q2).
+            # The naive fix (equal LEG shares) would (a) put ~46% of core into
+            # the amplifier leg while the deployment gate is CLOSED — a
+            # permanently unfillable buy obligation, the exact failure mode D2
+            # fixed for non-selected pool members — and (b) concentrate by
+            # NAME-COUNT ARTIFACT (a 3-name leg would get >2x a 7-name leg's
+            # per-name share for an equal LEG total). Instead: classify each
+            # leg by block (existing is_amplifier model — no new map), reuse
+            # the SAME 60/20 asymmetry keyed on which leg the deployment gate
+            # currently PERMITS, cap the restricted leg at current weight
+            # (never a buy obligation — the VXUS C0/Option 1 precedent for a
+            # gate-closed amplifier reference), and redistribute the residual
+            # freed by that cap to the permitted leg.
+            barbell_applied = True
+            gate_closed = str((regime_gate or {}).get("status") or "").lower() == "closed"
+            leg_names = {q: list(concentrate_names(q, effective_selected)) for q in bucket}
+            leg_is_amp = {
+                q: bool(names) and all(is_amplifier(t, effective_selected) for t in names)
+                for q, names in leg_names.items()
+            }
+            amp_qs = [q for q in bucket if leg_is_amp[q]]
+            non_amp_qs = [q for q in bucket if not leg_is_amp[q]]
+            if amp_qs and non_amp_qs and gate_closed:
+                # Gate forbids the amplifier leg's buys -> RESTRICTED (capped
+                # at current weight); the damper/cash leg is always buyable
+                # regardless of gate -> PERMITTED.
+                restricted_qs, permitted_qs, cap_restricted = amp_qs, non_amp_qs, True
+            elif amp_qs and non_amp_qs:
+                # Gate open -> nothing is actually gate-restricted. Default the
+                # amplifier leg to PERMITTED (a risk-on read); the other leg is
+                # staged at the smaller share, uncapped (no buy is forbidden).
+                restricted_qs, permitted_qs, cap_restricted = non_amp_qs, amp_qs, False
+            else:
+                # Bucket doesn't split into a clean amplifier + non-amplifier
+                # leg (shouldn't arise on the current roster) -> fixed bucket
+                # order, uncapped.
+                restricted_qs, permitted_qs, cap_restricted = bucket[1:], bucket[:1], False
+
+            _barbell_restricted_names = [t for q in restricted_qs for t in leg_names.get(q, [])]
+            _barbell_permitted_names = [t for q in permitted_qs for t in leg_names.get(q, [])]
+            _barbell_cap_restricted = cap_restricted
+
+            # Split WITHIN each leg by that leg's OWN name count (fixes the
+            # headcount artifact — a 3-name leg no longer inherits a 7-name
+            # leg's per-name share). The "cap restricted leg at current
+            # weight" step CANNOT happen here: `raw_core` is still in
+            # %-of-CORE units, pre-renormalize, and the uniform `scale`
+            # factor applied in step 5 below can push a pre-scale-capped
+            # value BACK ABOVE current weight (observed: SPY/QQQ capped at
+            # their ~5.8% current pre-scale, then scaled up to ~6.6% post-
+            # renormalize — the exact unfillable-buy trap this design exists
+            # to avoid, just moved one step later). The real cap is applied
+            # POST-scale, in %-of-EQUITY units where it is directly
+            # comparable to `cur_w` — see "barbell post-scale cap" below,
+            # mirroring the AMZN/GOOGL exempt-hold pin-and-carve-out pattern.
+            if _barbell_restricted_names:
+                per_r = div_share / len(_barbell_restricted_names)
+                for t in _barbell_restricted_names:
+                    raw_core[t] = raw_core.get(t, 0.0) + per_r
+            if _barbell_permitted_names:
+                per_p = inter_share / len(_barbell_permitted_names)
+                for t in _barbell_permitted_names:
+                    raw_core[t] = raw_core.get(t, 0.0) + per_p
         concentrate = list(raw_core.keys())
     else:
         concentrate = list(concentrate_names(quad, effective_selected))
@@ -8830,7 +9110,15 @@ def _build_reference_weights(
     # Route the bulk of the core to the ballast names instead, so the book reads as
     # capital-preservation, not mega-cap-tech-heavy.
     nrb = cfg.get("no_read_ballast") or _RISK_LIMITS_DEFAULTS["no_read_ballast"]
-    no_read = proxy["score"] >= float(nrb.get("conviction_score_min", 7.0))
+    # A1b (2026-09-02): an EMPTY favored_bucket means genuinely no directional
+    # read on EITHER axis (post-A1, the only way `bucket` is [] is growth AND
+    # inflation both flat/unknown) — that must route to the ballast
+    # UNCONDITIONALLY, never gated on conviction_score_min, or a moderate-
+    # conviction both-flat session re-freezes at bare floor (the same class of
+    # bug A1 fixed for the growth-flat-only corner). conviction_score_min still
+    # governs no_read firing on its own (a pinned or single-quadrant bucket
+    # that is simply low-conviction) — unchanged there.
+    no_read = (not bucket) or proxy["score"] >= float(nrb.get("conviction_score_min", 7.0))
     if no_read:
         # Session 2026-07-27: route each static ballast name through `substitution`
         # (config ticker -> live auto-switched ticker) FIRST. Without this, a
@@ -8952,6 +9240,30 @@ def _build_reference_weights(
     weights = {t: round(w * scale, 3) for t, w in scalable.items()}
     for t, w in exempt_held.items():
         weights[t] = round(w, 3)  # pinned at current
+
+    # A2 barbell post-scale cap (2026-09-02): NOW `weights` is in %-of-EQUITY
+    # units, directly comparable to `cur_w` — this is where "never a buy
+    # obligation" actually gets enforced (the pre-scale raw_core shares are
+    # not, by themselves, meaningful equity weights; renormalize can and did
+    # push a pre-scale-capped value back above current — see the comment at
+    # the barbell split above). Any restricted-leg name still above its own
+    # current weight after scaling is clamped down to it; the freed pp is
+    # redistributed across the permitted leg (mirrors the pre-scale
+    # freed-residual idea, just computed in the units where the guarantee
+    # actually holds).
+    if barbell_applied and _barbell_cap_restricted and _barbell_restricted_names:
+        _freed = 0.0
+        for _t in _barbell_restricted_names:
+            _cur = cur_w.get(_t, 0.0)
+            _computed = weights.get(_t, 0.0)
+            if _computed > _cur:
+                _freed += _computed - _cur
+                weights[_t] = round(_cur, 3)
+        if _freed > 1e-9 and _barbell_permitted_names:
+            _per_add = _freed / len(_barbell_permitted_names)
+            for _t in _barbell_permitted_names:
+                weights[_t] = round(weights.get(_t, 0.0) + _per_add, 3)
+
     # Cash sleeve = SGOV (yield-bearing) holding all but a ~1.5% literal-cash buffer.
     sgov_w = max(0.0, cash_sleeve_target - _CASH_BUFFER_PCT)
     weights["SGOV"] = round(sgov_w, 3)
@@ -9120,10 +9432,24 @@ def _build_reference_weights(
     if no_read:
         binding.append("no_read_ballast")
 
+    # Which allocation mechanism produced core_target — surfaced so the report
+    # can cite it directly instead of re-deriving it from binding/borderline
+    # (A1b/A2, 2026-09-02). no_read wins even when it fires alongside a
+    # borderline blend/barbell (additive ballast on top — see step 3a above).
+    if no_read:
+        basis = "no_read_ballast"
+    elif barbell_applied:
+        basis = "borderline_barbell"
+    elif borderline:
+        basis = "borderline_blend"
+    else:
+        basis = "quadrant_concentrate"
+
     return {
         "available": True,
         "as_of": (paper_account.get("as_of") or growth_axis.get("as_of")),
         "no_read": no_read,
+        "basis": basis,
         "active_quadrant": quad or None,
         "favored_bucket": bucket,
         "borderline": borderline,
@@ -10124,8 +10450,23 @@ def _build_pnl_decomposition(
     for b_name, b_data in buckets.items():
         r, u = b_data["realized_usd"], b_data["unrealized_usd"]
         total = r + u
-        # Top 15 contributors by absolute total P&L.
-        top15 = sorted(b_data["symbols"].items(), key=lambda kv: abs(kv[1]["total_usd"]), reverse=True)[:15]
+        # E1 (2026-09-02): `contributors` is COMPLETE (every symbol in the
+        # bucket), sorted by |total_usd| descending — the ONE deterministic
+        # per-symbol source both a narrative section and a per-position table
+        # must cite verbatim. A top-15 cap here was the E1 root cause: the
+        # 2026-09-02 report's Section 1 ("SOXX -$1,073.93, GLD -$783.87") and
+        # Section 4's table ("SOXX -$1,035.61, GLD -$340.97", summing to
+        # -$854.79 against Section 1's claimed core -$354.96) diverged
+        # because the core bucket (~17 sleeves, post roster-revision) exceeds
+        # 15 symbols — sum(contributors[].total_usd) stopped equalling
+        # `total_usd` the moment a bucket crossed the cap, forcing a report
+        # section built from "the contributors list" to either omit a symbol
+        # or fall back to freehand arithmetic for the rest. No cap now:
+        # every symbol appears, so sum(contributors[].total_usd) == total_usd
+        # always holds (test_pnl_decomposition_reconciliation.py).
+        contributors = sorted(
+            b_data["symbols"].items(), key=lambda kv: abs(kv[1]["total_usd"]), reverse=True,
+        )
         has_open_position = any(v["position_status"] == "open" for v in b_data["symbols"].values())
         result[b_name] = {
             "realized_usd": round(r, 2),
@@ -10133,7 +10474,7 @@ def _build_pnl_decomposition(
             "total_usd": round(total, 2),
             "pct_of_equity": round(total / equity * 100.0, 3),
             "has_open_position": has_open_position,
-            "contributors": [{"symbol": sym, **v} for sym, v in top15],
+            "contributors": [{"symbol": sym, **v} for sym, v in contributors],
         }
 
     return result

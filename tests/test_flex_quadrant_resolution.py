@@ -51,6 +51,20 @@ def test_borderline_tiebreak_higher_5d_wins():
         ("Q4", "borderline_5d_tiebreak")
 
 
+def test_flat_growth_confirmed_inflation_tiebreak_no_longer_unresolved():
+    # 2026-09-02 Task A1/A3: growth flat + inflation falling used to empty the
+    # favored_bucket entirely (unresolved); it now resolves like any other
+    # 2-quadrant borderline bucket via the 5d tiebreak — flex self-heals with
+    # NO change needed in flex/regime.py itself.
+    assert resolve_quadrant("flat", "falling", {"Q1": 2.1, "Q4": -0.4}) == \
+        ("Q1", "borderline_5d_tiebreak")
+    assert resolve_quadrant("flat", "falling", {"Q1": -0.4, "Q4": 2.1}) == \
+        ("Q4", "borderline_5d_tiebreak")
+    # growth flat + inflation rising -> Q2/Q3 union, same tiebreak mechanism.
+    assert resolve_quadrant("flat", "rising", {"Q2": 1.0, "Q3": 0.5}) == \
+        ("Q2", "borderline_5d_tiebreak")
+
+
 def test_exact_tie_takes_first_bucket_member():
     assert resolve_quadrant("falling", "flat", {"Q3": 1.0, "Q4": 1.0}) == \
         ("Q3", "borderline_5d_tiebreak")

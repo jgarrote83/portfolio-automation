@@ -36,8 +36,11 @@ CFG = {
 
 
 def _gaps():
+    # reference 20.0 (B1, 2026-09-02: bumped from the original 10.0 so the 15pp
+    # override stays within the k=1.0 relative shelter cap — min(15, 1.0*20)=15
+    # >= 15 — same gap (17.74pp) preserved via current_pct).
     return [
-        {"symbol": "SGOV", "current_pct": 27.74, "reference_pct": 10.0,
+        {"symbol": "SGOV", "current_pct": 37.74, "reference_pct": 20.0,
          "price": 100.715, "held_qty": 900},
     ]
 

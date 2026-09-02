@@ -241,7 +241,10 @@ def favored_bucket(growth_direction: str | None, inflation_direction: str | None
     returns "" otherwise), this returns a *union* of quadrants so a half-confirmed
     regime still yields a directional read — the reference must produce a specific
     posture on a falling-growth + flat-inflation book (a borderline regime), not a
-    freeze. Used for the borderline intersection blend.
+    freeze. Used for the borderline intersection blend (and, when the intersection
+    is empty, the A2 barbell split — see collector `_build_reference_weights`).
+
+    All nine (growth x inflation) combinations:
 
     - growth rising  + inflation falling -> [Q1]
     - growth rising  + inflation rising  -> [Q2]
@@ -249,7 +252,14 @@ def favored_bucket(growth_direction: str | None, inflation_direction: str | None
     - growth falling + inflation rising  -> [Q3]
     - growth falling + inflation falling -> [Q4]
     - growth falling + inflation flat/unknown -> [Q3, Q4] (defensive, borderline)
-    - growth flat/unknown -> [] (no directional read — caller falls back to ballast)
+    - growth flat/unknown + inflation falling -> [Q1, Q4] (2026-09-02, Task A1: a
+      confirmed falling-inflation streak is a real half-read, not "no read" — the
+      two falling-inflation quadrants)
+    - growth flat/unknown + inflation rising  -> [Q2, Q3] (symmetric: the two
+      rising-inflation quadrants)
+    - growth flat/unknown + inflation flat/unknown -> [] (genuinely no directional
+      read on EITHER axis — caller falls back to the no-read ballast unconditionally,
+      see A1b)
     """
     g = (growth_direction or "").lower()
     i = (inflation_direction or "").lower()
@@ -265,6 +275,10 @@ def favored_bucket(growth_direction: str | None, inflation_direction: str | None
         if i == "falling":
             return ["Q4"]
         return ["Q3", "Q4"]
+    if i == "falling":
+        return ["Q1", "Q4"]
+    if i == "rising":
+        return ["Q2", "Q3"]
     return []
 
 
