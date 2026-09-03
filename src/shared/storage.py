@@ -17,6 +17,7 @@ _TABLES = [
     "OverrideHistory",
     "SleeveSelectionState",
     "AxisDirectionState",
+    "SettlingWindowState",
     "TransitionWatchState",
     "ThematicConvictionState",
     "ThematicHistory",

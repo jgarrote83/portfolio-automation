@@ -6,8 +6,10 @@ The quadrant is resolved by ``resolve_quadrant`` from the precomputed
 ``active_quadrant``, exactly as Core uses it; when the regime is *borderline* (a
 2-quadrant ``favored_bucket`` such as Q3/Q4 on a falling-growth + flat-inflation
 book) it is the bucket member that has performed better over the last 5 trading
-days (measured by its ``QUADRANT_BENCHMARK_ETF``). Only a truly no-read regime
-(growth flat/unknown → empty bucket) or missing benchmark data still fails
+days (measured by its ``QUADRANT_BENCHMARK_ETF``). Since 2026-09-02 (Task A1)
+``favored_bucket`` is also non-empty for Q1/Q4 and Q2/Q3 on a flat-growth book
+with inflation confirmed falling/rising — only a genuinely-no-read regime
+(BOTH axes flat/unknown -> empty bucket) or missing benchmark data still fails
 closed. This kills the old G1 freeze that blocked EVERY entry whenever
 ``active_quadrant`` was "" — which it has been continuously since 2026-07-02
 (decision D1, 2026-07-21). An unknown quadrant blocks NEW entries but never
@@ -96,8 +98,10 @@ def resolve_quadrant(
     - Both axes pinned to rising/falling → ``(active_quadrant, "active")`` — the
       unchanged strict behaviour.
     - Otherwise take ``favored_bucket``:
-      - empty bucket (growth flat/unknown) → ``("", "unresolved")`` — still fail
-        closed; there is no directional read at all.
+      - empty bucket (BOTH growth and inflation flat/unknown — since Task A1 a
+        flat growth axis alone no longer empties the bucket when inflation is
+        confirmed falling/rising) → ``("", "unresolved")`` — still fail closed;
+        there is no directional read at all.
       - single-element bucket → that quadrant, basis ``"favored_single"`` (defensive;
         in practice a single-element bucket coincides with ``active`` resolving).
       - 2-quadrant union → the member with the higher trailing 5d benchmark return

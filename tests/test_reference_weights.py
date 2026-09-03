@@ -18,6 +18,7 @@ from collector.handler import (  # noqa: E402
     _load_risk_limits,
 )
 from shared.quadrants import favored_bucket, intersection_names  # noqa: E402
+from shared.trade_validation import validate_trades  # noqa: E402
 
 CFG = _load_risk_limits()
 
@@ -340,6 +341,188 @@ def test_non_selected_pool_members_zeroed_selected_present():
         assert tw.get(t, 0.0) == 0.0, t
     # The selected incumbent of a concentrated Q3 role is present (GLD = gold).
     assert tw.get("GLD", 0.0) > 0.0
+
+
+# --- A1/A1b (2026-09-02): the growth-flat hole + the both-flat freeze --------
+
+def test_favored_bucket_growth_flat_confirmed_inflation_no_longer_empty():
+    assert favored_bucket("flat", "falling") == ["Q1", "Q4"]
+    assert favored_bucket("flat", "rising") == ["Q2", "Q3"]
+    assert favored_bucket("flat", "flat") == []  # genuinely no read — unchanged
+
+
+def test_growth_flat_falling_inflation_no_longer_degenerate_equal_weight():
+    """THE regression this cycle fixes: growth flat + inflation falling used to
+    return an empty bucket -> raw_core={} -> every core sleeve floors and
+    renormalizes to an identical equal weight (the 2026-09-02 live-book bug,
+    all 16 sleeves at 5.782%). It must now be a specific barbell posture."""
+    g, i = _axes("flat", "falling")
+    paper = _paper({"SPY": 15.0, "QQQ": 12.0, "SOXX": 19.08, "TLT": 3.0, "IEF": 2.0,
+                     "USMV": 2.0, "SGOV": 6.0}, cash_pct=1.5)
+    rw = _build_reference_weights(
+        paper, g, i, _gate("closed", "neutral"), _rot(), {}, {}, {}, CFG,
+        effective_selected={"semis": "SOXX"},
+    )
+    tw = rw["target_weights_pct"]
+    distinct = {round(tw[t], 3) for t in
+                ("SPY", "QQQ", "SOXX", "XLI", "XLF", "COWZ", "VDE", "PDBC",
+                 "VTIP", "GLD", "XLP", "KMLM", "TLT", "IEF", "USMV")}
+    assert len(distinct) > 1, "must not collapse to the equal-weight degeneracy"
+
+
+def test_no_read_ballast_fires_unconditionally_on_empty_bucket_moderate_conviction():
+    """A1b: both axes flat/unknown (bucket == []) must route to ballast even at
+    a MODERATE conviction score (< the 7.0 no_read_ballast.conviction_score_min)
+    — otherwise the both-flat corner re-freezes at bare floor exactly like the
+    growth-flat-only hole A1 fixed."""
+    g, i = _axes("flat", "flat")
+    # gate open + confirmed policy + no shock -> score well under 7.0.
+    rw = _build(_paper({"SPY": 10, "SGOV": 10}), g, i, _gate("open", "confirmed"))
+    assert rw["conviction_proxy"] < 7.0
+    assert rw["no_read"] is True
+    assert rw["basis"] == "no_read_ballast"
+    tw = rw["target_weights_pct"]
+    assert tw["GLD"] > 20 and tw["TLT"] > 20
+
+
+def test_basis_field_reflects_the_active_mechanism():
+    g, i = _axes("rising", "falling")  # pinned Q1
+    rw = _build(_paper({"SPY": 20, "SGOV": 10}), g, i, _gate("open", "dovish"))
+    assert rw["basis"] == "quadrant_concentrate"
+
+    g, i = _axes("falling", "flat")  # [Q3, Q4] non-empty intersection
+    rw = _build(_paper({"SPY": 17, "GLD": 5, "SGOV": 10}), g, i, _gate("closed", "neutral"))
+    assert rw["basis"] == "borderline_blend"
+
+
+# --- A2 (2026-09-02): barbell rule for empty-intersection borderline buckets --
+
+def test_q1_q4_barbell_gate_closed_no_buy_obligation():
+    """growth flat + inflation falling -> [Q1, Q4]; Q1/Q4 share NO concentrate
+    names (opposite risk postures) -> the naive equal-leg-share fix would put
+    ~46% of core into SPY/QQQ/SOXX while the gate is CLOSED, manufacturing a
+    buy obligation the Tier-1 validator permanently refuses. The barbell must
+    instead cap the amplifier (Q1) leg at current weight and route the 60
+    share (+ any freed residual) to the damper (Q4) leg."""
+    g, i = _axes("flat", "falling")
+    paper = _paper({"SPY": 15.0, "QQQ": 12.0, "SOXX": 19.08, "TLT": 3.0, "IEF": 2.0,
+                     "USMV": 2.0, "SGOV": 6.0}, cash_pct=1.5)
+    rw = _build_reference_weights(
+        paper, g, i, _gate("closed", "neutral"), _rot(), {}, {}, {}, CFG,
+        effective_selected={"semis": "SOXX"},
+    )
+    assert rw["basis"] == "borderline_barbell"
+    tw = rw["target_weights_pct"]
+    # Amplifier leg (Q1) capped at current weight -- never a buy obligation.
+    assert tw["SPY"] <= 15.0 + 1e-6
+    assert tw["QQQ"] <= 12.0 + 1e-6
+    assert tw["SOXX"] <= 19.08 + 1e-6
+    assert tw["SOXX"] < 19.08 - 5.0, "SOXX target must sit materially below current (sell obligation)"
+    # Damper leg (Q4) carries the larger, unrestricted share.
+    q4_total = tw["TLT"] + tw["IEF"] + tw["USMV"]
+    q1_total = tw["SPY"] + tw["QQQ"] + tw["SOXX"]
+    assert q4_total > q1_total
+    assert abs(_total(rw) - 100.0) < 0.6
+    assert rw["active_quadrant_target_pct_of_core"] <= CFG["active_quadrant_ceiling_pct_of_core"]
+
+
+def test_q1_q4_barbell_validate_trades_no_rejected_amplifier_buy():
+    """Empirical proof (not inspection): synthesize a 'full compliance' buy for
+    every sleeve whose reference sits above current, and run validate_trades
+    over them. None of the barbell's amplifier-leg trades may be a BUY (their
+    targets are capped at/below current by construction) so none can trip the
+    V1 closed-gate amplifier-buy rejection."""
+    g, i = _axes("flat", "falling")
+    cur = {"SPY": 15.0, "QQQ": 12.0, "SOXX": 19.08, "TLT": 3.0, "IEF": 2.0, "USMV": 2.0}
+    paper = _paper({**cur, "SGOV": 6.0}, cash_pct=1.5)
+    rw = _build_reference_weights(
+        paper, g, i, _gate("closed", "neutral"), _rot(), {}, {}, {}, CFG,
+        effective_selected={"semis": "SOXX"},
+    )
+    equity = paper["equity"]
+    tw = rw["target_weights_pct"]
+    gaps, trades = [], []
+    price = 100.0
+    for sym, cur_pct in cur.items():
+        ref_pct = tw.get(sym, 0.0)
+        gaps.append({"symbol": sym, "current_pct": cur_pct, "reference_pct": ref_pct,
+                      "price": price, "held_qty": cur_pct / 100.0 * equity / price})
+        if ref_pct > cur_pct:  # a hypothetical "full compliance" buy
+            qty = (ref_pct - cur_pct) / 100.0 * equity / price
+            trades.append({"symbol": sym, "side": "buy", "quantity": qty})
+    ctx = {
+        "equity_usd": equity, "cash_usd": paper["cash"], "deployment_gate": "closed",
+        "effective_selected": {"semis": "SOXX"},
+    }
+    result = validate_trades(gaps, trades, [], CFG, ctx)
+    for rej in result["rejected"]:
+        reasons = " ".join(rej["validation"]["reasons"])
+        assert "amplifier buy" not in reasons, rej
+
+
+def test_barbell_cap_survives_renormalize_scale_overshoot():
+    """Regression: capping the restricted leg PRE-scale (in %-of-core raw
+    units) is not sufficient -- the uniform renormalize `scale` factor (core
+    room / scalable sum) can multiply a pre-scale-capped value BACK ABOVE
+    current weight, exactly reproducing the unfillable-buy trap A2 exists to
+    avoid, just one step later. Live-conditions shape: SPY/QQQ/SOXX at the
+    OLD degenerate 5.782% reference (i.e. below the barbell's per-name
+    share), SOXX at the documented 19.08% outlier -- the freed room from
+    Q2/Q3 sitting near their floor pushes scale > 1, which used to lift
+    SPY/QQQ's capped pre-scale value back above their own current weight."""
+    g, i = _axes("flat", "falling")
+    old_ref = 5.782
+    weights = {t: old_ref for t in
+               ("SPY", "QQQ", "XLI", "XLF", "COWZ", "VDE", "PDBC", "VTIP",
+                "GLD", "XLP", "IHE", "KMLM", "TLT", "IEF", "USMV")}
+    weights["SOXX"] = 19.08
+    paper = _paper(weights, equity=98_793.01, cash_pct=1.5)
+    rw = _build_reference_weights(
+        paper, g, i, _gate("closed", "confirmed"), _rot(), {}, {}, {}, CFG,
+        effective_selected={"semis": "SOXX"},
+    )
+    tw = rw["target_weights_pct"]
+    assert tw["SPY"] <= old_ref + 1e-6
+    assert tw["QQQ"] <= old_ref + 1e-6
+    assert tw["SOXX"] <= 19.08 + 1e-6
+
+
+def test_q1_q2_barbell_gate_closed_also_fixed():
+    """growth rising + inflation flat -> [Q1, Q2], ALSO an empty intersection
+    (noted in the audit as broken 'today' alongside Q1/Q4) -- same barbell
+    mechanism, same no-buy-obligation guarantee under a closed gate."""
+    g, i = _axes("rising", "flat")
+    paper = _paper({"SPY": 15.0, "QQQ": 12.0, "SOXX": 19.08, "XLI": 3.0, "XLF": 2.0,
+                     "COWZ": 2.0, "VDE": 1.0, "PDBC": 1.0, "VTIP": 1.0, "SGOV": 6.0},
+                    cash_pct=1.5)
+    rw = _build_reference_weights(
+        paper, g, i, _gate("closed", "neutral"), _rot(), {}, {}, {}, CFG,
+        effective_selected={"semis": "SOXX"},
+    )
+    assert rw["basis"] == "borderline_barbell"
+    tw = rw["target_weights_pct"]
+    assert tw["SOXX"] <= 19.08 + 1e-6
+    q2_total = sum(tw[t] for t in ("XLI", "XLF", "COWZ", "VDE", "PDBC", "VTIP"))
+    q1_total = tw["SPY"] + tw["QQQ"] + tw["SOXX"]
+    assert q2_total > q1_total
+    assert abs(_total(rw) - 100.0) < 0.6
+
+
+def test_barbell_no_op_when_intersection_non_empty():
+    """The barbell branch must NEVER fire when the bucket's intersection is
+    non-empty (Q3/Q4 falling-growth, and the NEW Q2/Q3 flat-growth bucket) --
+    both keep taking the pre-existing, unchanged intersection-blend path."""
+    g, i = _axes("falling", "flat")  # [Q3, Q4], GLD/XLP/IHE/KMLM intersection
+    rw = _build(_paper({"SPY": 17, "QQQ": 14, "GLD": 5, "SGOV": 10}), g, i, _gate("closed", "neutral"))
+    assert rw["basis"] == "borderline_blend"
+    assert rw["favored_bucket"] == ["Q3", "Q4"]
+
+    g, i = _axes("flat", "rising")  # [Q2, Q3], COWZ/PDBC/VDE/VTIP intersection
+    rw = _build(_paper({"GLD": 5, "COWZ": 5, "SGOV": 10}), g, i, _gate("closed", "neutral"))
+    assert rw["basis"] == "borderline_blend"
+    assert rw["favored_bucket"] == ["Q2", "Q3"]
+    # Intersection names get materially more than the divergent (single-side) ones.
+    assert rw["target_weights_pct"]["COWZ"] > rw["target_weights_pct"].get("XLI", 0.0)
 
 
 def test_b1_mechanism_follows_effective_selected_not_ticker():

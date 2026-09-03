@@ -168,9 +168,14 @@ def validate_trades(
     rex_cfg = {**REFERENCE_EXECUTION_DEFAULTS, **((cfg or {}).get("reference_execution") or {})}
     band = float(ov_cfg.get("gap_band_pp", 5.0))
     max_mag = float(ov_cfg.get("max_magnitude_pp", 15.0))
+    max_mag_rel_frac = float(ov_cfg.get("max_magnitude_rel_frac", 1.0))
     min_notional = float(rex_cfg["min_notional_usd"])
     floor_pct = float((cfg or {}).get("sleeve_floor_pct_of_core", 0.1))
     ceiling = float((cfg or {}).get("active_quadrant_ceiling_pct_of_core", 90.0))
+    # G-6/B2 (2026-09-02): hard per-sleeve concentration ceiling, independent of
+    # the override path — no single core sleeve may be BOUGHT past this share of
+    # equity regardless of override state (see the V3 window clamp below).
+    single_sleeve_cap = float((cfg or {}).get("single_sleeve_cap_pct_of_equity", 12.0))
 
     ctx = quadrant_ctx or {}
     equity = float(ctx.get("equity_usd") or 0)
@@ -186,7 +191,12 @@ def validate_trades(
     literal_cash_buffer_pct = float(ctx.get("literal_cash_target_pct") or 1.5)
 
     rows = {str(g.get("symbol") or "").upper(): g for g in (gaps or []) if g.get("symbol")}
-    residual = allowed_residuals(override_decisions, max_mag)
+    # B1 (2026-09-02, G-3, k=1.0): relative to each sleeve's OWN reference_pct —
+    # resolved from the SAME `rows` `reconcile` builds its own copy from, so the
+    # two layers can never disagree on what an override shelters (see the shared
+    # helper's docstring and the B1 cross-agreement test).
+    ref_by_sleeve = {sym: float(g.get("reference_pct") or 0) for sym, g in rows.items()}
+    residual = allowed_residuals(override_decisions, max_mag, ref_by_sleeve, max_mag_rel_frac)
 
     # Running state: sleeve weights, held shares, cash after processed trades.
     cur_pct: dict[str, float] = {}
@@ -349,7 +359,14 @@ def validate_trades(
                 or _non_selected_pool_member(sym, intl_leader_pick, effective_selected)
             ) else (floor_pct if sym in CORE_ROSTER else 0.0)
             lo = max(ref - w, floor_lb, 0.0)
+            # G-6/B2: the hard concentration ceiling caps the BUY side of the
+            # window regardless of override state — but never below the
+            # reference itself (a legitimately concentrated high-conviction
+            # target is not a "concentration breach"; the cap only bites when
+            # it is STRICTER than what the reference already asks for).
             hi = ref + w
+            if single_sleeve_cap > 0 and ref < single_sleeve_cap:
+                hi = min(hi, single_sleeve_cap)
             cur = cur_pct.get(sym, 0.0)
             delta_pp = qty * px / equity * 100.0
             post = cur - delta_pp if side == "sell" else cur + delta_pp

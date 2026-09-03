@@ -69,6 +69,10 @@ REFERENCE_EXECUTION_DEFAULTS = {
     "enforce": True,
     "enforcement_turnover_max_pct": 20.0,
     "min_notional_usd": 115.0,
+    # B3 (2026-09-02, G-2 merge blocker) — see advance_settling_window /
+    # resolve_settling_tranche_cap below.
+    "settling_tranche_pp_max": 3.0,
+    "settling_sessions": 5,
 }
 
 _EPS_PP = 0.05   # sub-0.05pp residue is rounding noise, never a shortfall
@@ -131,13 +135,33 @@ def derive_override_direction(sleeve: str, gap_signed: float | None) -> str | No
     return None
 
 
-def allowed_residuals(override_decisions: list[dict], max_magnitude_pp: float) -> dict[str, float]:
+def allowed_residuals(
+    override_decisions: list[dict],
+    max_magnitude_pp: float,
+    reference_pct_by_sleeve: dict[str, float] | None = None,
+    max_magnitude_rel_frac: float = 1.0,
+) -> dict[str, float]:
     """D1 — the per-sleeve residual an override may shelter: |magnitude_pp| of the
     ACCEPTED/DOWNSIZED record for that sleeve, capped at ``max_magnitude_pp``; a
     rejected or absent record shelters nothing. Shared by ``reconcile`` (shortfall
     enforcement) and ``trade_validation.validate_trades`` (the V3 window rule) so
-    the two layers can never disagree on what an override authorizes."""
+    the two layers can never disagree on what an override authorizes.
+
+    G-3/B1 (2026-09-02, k=1.0): the absolute ``max_magnitude_pp`` (15.0) was built
+    for the pre-roster-revision references, where a shelter that size was a modest
+    fraction of a typical target. Against a 5.782%-of-equity reference it permits a
+    ~20.8%-of-equity single sleeve — a 3.6x overweight, fully "compliant" (how SOXX
+    reached 19.08%). Mirrors the ``relative_band_frac`` hybrid-band precedent (O4,
+    2026-08-06 audit): the effective cap is
+    ``min(max_magnitude_pp, max_magnitude_rel_frac * reference_pct)`` whenever the
+    sleeve's ``reference_pct_by_sleeve`` entry is positive. A zero-or-missing
+    reference (LEGACY_EXITS, a zeroed non-selected pool member, or a caller that
+    predates this — ``reference_pct_by_sleeve`` omitted/empty) keeps the PLAIN
+    absolute cap — same carve-out ``_effective_band`` already uses, so a sleeve
+    with no positive target to measure against, or a legacy exit's shelter, is
+    never narrowed to (near) zero."""
     residual: dict[str, float] = {}
+    ref_by_sleeve = reference_pct_by_sleeve or {}
     for dec in override_decisions or []:
         if dec.get("outcome") not in ("accepted", "downsized"):
             continue
@@ -147,8 +171,13 @@ def allowed_residuals(override_decisions: list[dict], max_magnitude_pp: float) -
             mag = abs(float(ov.get("magnitude_pp")))
         except (TypeError, ValueError):
             continue
-        if sleeve:
-            residual[sleeve] = min(max(residual.get(sleeve, 0.0), mag), float(max_magnitude_pp))
+        if not sleeve:
+            continue
+        cap = float(max_magnitude_pp)
+        ref_pct = float(ref_by_sleeve.get(sleeve, 0.0) or 0.0)
+        if ref_pct > 0:
+            cap = min(cap, float(max_magnitude_rel_frac) * ref_pct)
+        residual[sleeve] = min(max(residual.get(sleeve, 0.0), mag), cap)
     return residual
 
 
@@ -179,6 +208,11 @@ def effective_execution_config(cfg: dict) -> dict:
         # rather than assuming every sleeve is governed by the flat gap_band_pp.
         "relative_band_frac": float(ov_cfg.get("relative_band_frac", 0.5)),
         "max_magnitude_pp": float(ov_cfg.get("max_magnitude_pp", 15.0)),
+        # B1 (2026-09-02, G-3, k=1.0): the RELATIVE override-shelter cap — see
+        # `allowed_residuals`. Effective shelter = min(max_magnitude_pp,
+        # max_magnitude_rel_frac * reference_pct) whenever reference_pct > 0; a
+        # zero-reference sleeve keeps the plain absolute max_magnitude_pp.
+        "max_magnitude_rel_frac": float(ov_cfg.get("max_magnitude_rel_frac", 1.0)),
         # Structural gate (shared/overrides.py): BOTH directions require >=1 clean
         # evidence item or the record is rejected outright; re-risk additionally
         # needs >= re_risk_min_evidence or it is downsized. de_risk_min_evidence is
@@ -191,6 +225,20 @@ def effective_execution_config(cfg: dict) -> dict:
         "enforcement_turnover_max_pct": float(rex_cfg["enforcement_turnover_max_pct"]),
         "min_notional_usd": float(rex_cfg["min_notional_usd"]),
         "sleeve_floor_pct_of_core": float((cfg or {}).get("sleeve_floor_pct_of_core", 0.1)),
+        "single_sleeve_cap_pct_of_equity": float(
+            (cfg or {}).get("single_sleeve_cap_pct_of_equity", 12.0)
+        ),
+        # B3 (2026-09-02, G-2) — the STATIC config numbers only; the DYNAMIC
+        # active/sessions-remaining state lives in the collector-built
+        # `execution_config.settling_window` snapshot block (Table Storage
+        # backed — see advance_settling_window), not here (this function stays
+        # a pure, stateless echo of `cfg`).
+        "settling_tranche_pp_max": float(rex_cfg.get(
+            "settling_tranche_pp_max", REFERENCE_EXECUTION_DEFAULTS["settling_tranche_pp_max"]
+        )),
+        "settling_sessions": int(rex_cfg.get(
+            "settling_sessions", REFERENCE_EXECUTION_DEFAULTS["settling_sessions"]
+        )),
     }
 
 
@@ -209,6 +257,81 @@ def _effective_band(band: float, relative_band_frac: float, reference_pct: float
     if reference_pct <= 0:
         return band
     return min(band, relative_band_frac * reference_pct)
+
+
+def _cap_breach_pp(current_pct: float, reference_pct: float, cap_pct: float) -> float:
+    """G-6/B2 (2026-09-02) — the hard concentration ceiling: how far `current_pct`
+    sits above `cap_pct` (single_sleeve_cap_pct_of_equity), UNSHELTERABLE by any
+    override (independent of the override path entirely — an override justifies
+    a deviation, not a concentration). Zero when the sleeve isn't actually
+    over the cap, AND zero when the REFERENCE itself is at/above the cap — the
+    cap is a ceiling on holdings, never a floor forcing a sell below reference
+    (a legitimately concentrated high-conviction reference is not a breach)."""
+    if cap_pct <= 0 or reference_pct >= cap_pct:
+        return 0.0
+    return max(0.0, current_pct - cap_pct)
+
+
+def advance_settling_window(
+    prior: dict | None, today: str, settling_sessions: int, settling_tranche_pp_max: float,
+) -> dict:
+    """B3 (2026-09-02, G-2 merge blocker) — a time-boxed REDUCED tranche cap
+    following a reference-engine change (this cycle's A1/A2 fix). Without
+    this, the first post-merge run could submit ~10pp of a newly-enforceable
+    sleeve (e.g. SOXX, ~$9.9k) unsupervised, bounded only by the turnover cap
+    and available cash — if the new reference is miscalibrated, that is
+    discovered at 10pp of damage instead of 3pp.
+
+    PURE (no I/O) — the collector wraps this with the Table Storage read/write
+    (mirrors `_load_axis_direction_state` / `_save_axis_direction_state`: same
+    table-per-row shape, same non-fatal-on-read-failure caller contract). NO
+    date literal ever appears in config: the window is SELF-INITIATING — the
+    first run that finds no persisted state (``prior`` is None/empty) starts
+    the window TODAY, exactly like the axis-confirmation D-A2 first-run rule.
+
+    ``prior`` is the previously persisted ``{start_date, sessions_elapsed,
+    last_date}`` (or None on the very first run ever). A second invocation on
+    the SAME ``today`` (a retry) must not double-count a session — it replays
+    the prior session count unchanged.
+
+    Returns the full window info to both persist (minus ``effective_cap``,
+    which is derived, not stored) and surface in the snapshot: ``{active,
+    start_date, sessions_elapsed, sessions_remaining, effective_cap,
+    last_date}``.
+    """
+    if not prior or not prior.get("start_date"):
+        start_date = today
+        sessions_elapsed = 1
+    elif prior.get("last_date") == today:
+        start_date = prior["start_date"]
+        sessions_elapsed = int(prior.get("sessions_elapsed") or 1)
+    else:
+        start_date = prior["start_date"]
+        sessions_elapsed = int(prior.get("sessions_elapsed") or 0) + 1
+
+    active = sessions_elapsed <= int(settling_sessions)
+    return {
+        "active": active,
+        "start_date": start_date,
+        "sessions_elapsed": sessions_elapsed,
+        "sessions_remaining": max(0, int(settling_sessions) - sessions_elapsed) if active else 0,
+        "effective_cap": float(settling_tranche_pp_max) if active else None,
+        "last_date": today,
+    }
+
+
+def resolve_settling_tranche_cap(tranche_pp_max: float, settling_window: dict | None) -> float:
+    """B3 — the effective tranche cap `reconcile()` must use: the LESSER of
+    the plain ``tranche_pp_max`` and the settling window's ``effective_cap``
+    while the window is active; the plain cap once it expires or is absent
+    (a caller that predates B3 gets exactly the old behavior)."""
+    sw = settling_window or {}
+    if not sw.get("active"):
+        return float(tranche_pp_max)
+    cap = sw.get("effective_cap")
+    if cap is None:
+        return float(tranche_pp_max)
+    return min(float(tranche_pp_max), float(cap))
 
 
 def _flag(entry: dict, reason: str) -> None:
@@ -255,6 +378,8 @@ def reconcile(
     band = float(ov_cfg.get("gap_band_pp", 5.0))
     relative_band_frac = float(ov_cfg.get("relative_band_frac", 0.5))
     max_mag = float(ov_cfg.get("max_magnitude_pp", 15.0))
+    max_mag_rel_frac = float(ov_cfg.get("max_magnitude_rel_frac", 1.0))
+    cap_pct = float((cfg or {}).get("single_sleeve_cap_pct_of_equity", 12.0))
     tranche = float(rex_cfg["tranche_pp_max"])
     enforce = bool(rex_cfg["enforce"])
     min_notional = float(rex_cfg["min_notional_usd"])
@@ -288,8 +413,11 @@ def reconcile(
     }
     rows = {sym: g for sym, g in all_rows.items() if not g.get("off_roster")}
 
-    # D1 — per-sleeve allowed residual (shared helper — rejected/absent shelters nothing).
-    residual = allowed_residuals(override_decisions, max_mag)
+    # D1 — per-sleeve allowed residual (shared helper — rejected/absent shelters
+    # nothing). B1 (k=1.0): relative to each sleeve's OWN reference_pct, mirroring
+    # the identical resolution `validate_trades` performs from its own `rows`.
+    ref_by_sleeve = {sym: float(g.get("reference_pct") or 0) for sym, g in all_rows.items()}
+    residual = allowed_residuals(override_decisions, max_mag, ref_by_sleeve, max_mag_rel_frac)
 
     # Task B (D-B1, session 2026-08-01): the sanctioned literal-cash -> SGOV
     # carve-out sweep (`shared/trade_validation.py`'s SGOV exemption) is a pure
@@ -355,9 +483,14 @@ def reconcile(
     out_of_band = []
     for sym, row in rows.items():
         ref_pct = float(row.get("reference_pct") or 0)
-        gap_signed = float(row.get("current_pct") or 0) - ref_pct
+        cur_pct = float(row.get("current_pct") or 0)
+        gap_signed = cur_pct - ref_pct
         eff_band = _effective_band(band, relative_band_frac, ref_pct)
-        if abs(gap_signed) > eff_band + _EPS_PP:
+        # B2 (G-6): a sleeve inside its normal band can still be OVER the hard
+        # 12% concentration cap (e.g. ref 8%, current 13% — a 5pp gap sits
+        # inside the default 5pp band) — the cap must surface it regardless.
+        breaches_cap = _cap_breach_pp(cur_pct, ref_pct, cap_pct) > _EPS_PP
+        if abs(gap_signed) > eff_band + _EPS_PP or breaches_cap:
             out_of_band.append((sym, gap_signed, row.get("price")))
     out_of_band.sort(key=lambda r: (r[1] < 0, -abs(r[1])))
 
@@ -378,8 +511,13 @@ def reconcile(
     re_risk_required: dict[str, float] = {}
     for sym, gap_signed, _px in out_of_band:
         allowed_r = residual.get(sym, 0.0)
-        eff_band_r = _effective_band(band, relative_band_frac, float(rows[sym].get("reference_pct") or 0))
+        ref_pct_r = float(rows[sym].get("reference_pct") or 0)
+        eff_band_r = _effective_band(band, relative_band_frac, ref_pct_r)
         required_total_r = max(0.0, abs(gap_signed) - max(allowed_r, eff_band_r))
+        # B2 (G-6): the concentration-cap breach is UNSHELTERABLE — no override
+        # can reduce it below what's needed to reach the 12% ceiling.
+        required_total_r = max(required_total_r, _cap_breach_pp(
+            float(rows[sym].get("current_pct") or 0), ref_pct_r, cap_pct))
         if required_total_r <= _EPS_PP:
             continue
         side_r = "sell" if gap_signed > 0 else "buy"
@@ -395,8 +533,13 @@ def reconcile(
     for sym, gap_signed, px in out_of_band:
         abs_gap = abs(gap_signed)
         allowed = residual.get(sym, 0.0)
-        eff_band = _effective_band(band, relative_band_frac, float(rows[sym].get("reference_pct") or 0))
+        ref_pct_sym = float(rows[sym].get("reference_pct") or 0)
+        eff_band = _effective_band(band, relative_band_frac, ref_pct_sym)
         required_total = max(0.0, abs_gap - max(allowed, eff_band))
+        # B2 (G-6, 2026-09-02): the hard concentration ceiling — independent of
+        # the override path, unshelterable, never forces a sell below reference.
+        required_total = max(required_total, _cap_breach_pp(
+            float(rows[sym].get("current_pct") or 0), ref_pct_sym, cap_pct))
         required_today = min(required_total, tranche)
         net_move = move_pp.get(sym, 0.0)
         entry = {

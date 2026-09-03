@@ -113,8 +113,10 @@ def test_partial_pace_shortfall_topped_up():
 
 
 def test_in_band_sleeve_not_reported():
-    # reference 10.0 (not O4's small-reference hybrid-band zone): gap 4 < band 5
-    r = reconcile([_gap("XLP", 14.0, 10.0)], [], [], CFG, _ctx())
+    # reference 10.0 (not O4's small-reference hybrid-band zone): gap 4 < band 5.
+    # Current 11.9 (not B2's 12.0 concentration cap either — see test_reference_
+    # execution's dedicated concentration-cap tests for that boundary).
+    r = reconcile([_gap("XLP", 11.9, 10.0)], [], [], CFG, _ctx())
     assert r["sleeves"] == {}
     assert r["enforced_trades"] == []
 
@@ -122,8 +124,10 @@ def test_in_band_sleeve_not_reported():
 # --- D1: overrides shelter the residual, capped at max_magnitude_pp -----------
 
 def test_accepted_override_covers_gap_within_shelter():
-    """gap 14 <= sheltered 15 -> override_covered, nothing to trade."""
-    gaps = [_gap("QQQ", 16.0, 2.0)]
+    """gap 14 <= sheltered 15 -> override_covered, nothing to trade. Reference
+    20.0 (not O4/B1's small-reference zone: 1.0*20 >= 15) so the plain absolute
+    max_magnitude_pp governs, unaffected by the B1 relative shelter cap."""
+    gaps = [_gap("QQQ", 34.0, 20.0)]
     decs = [_dec("QQQ", magnitude=15.0)]
     r = reconcile(gaps, [], decs, CFG, _ctx())
     assert r["sleeves"]["QQQ"]["status"] == "override_covered"
@@ -131,8 +135,9 @@ def test_accepted_override_covers_gap_within_shelter():
 
 
 def test_override_shelters_at_most_max_magnitude():
-    """D1: gap 18 with a full 15pp accepted override still owes 3pp — synthesized."""
-    gaps = [_gap("SPY", 20.0, 2.0)]
+    """D1: gap 18 with a full 15pp accepted override still owes 3pp — synthesized.
+    Reference 20.0 keeps this above B1's relative-cap zone (1.0*20 >= 15)."""
+    gaps = [_gap("SPY", 38.0, 20.0)]
     decs = [_dec("SPY", magnitude=15.0)]
     r = reconcile(gaps, [], decs, CFG, _ctx())
     e = r["sleeves"]["SPY"]
@@ -160,8 +165,9 @@ def test_no_record_no_trade_synthesized():
 
 
 def test_override_residual_is_per_sleeve():
-    """A QQQ override does not shelter SPY (V1_1 per-sleeve semantics)."""
-    gaps = [_gap("SPY", 17.0, 2.0), _gap("QQQ", 14.0, 2.0)]
+    """A QQQ override does not shelter SPY (V1_1 per-sleeve semantics). QQQ's
+    reference is 20.0 (>= B1's relative-cap threshold for a 15pp override)."""
+    gaps = [_gap("SPY", 17.0, 2.0), _gap("QQQ", 32.0, 20.0)]
     decs = [_dec("QQQ", magnitude=15.0)]
     r = reconcile(gaps, [], decs, CFG, _ctx())
     assert r["sleeves"]["SPY"]["status"] == "enforced"

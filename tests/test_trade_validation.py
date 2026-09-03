@@ -142,18 +142,21 @@ def test_floor_protects_when_window_dips_below_it():
 
 
 def test_away_buy_inside_accepted_residual_passes_outside_clamped():
-    """cur 6, ref 2: with an accepted 10pp override (W=10, hi=12) a buy to 11 passes;
-    a buy to 20 is clamped to the 12% edge."""
-    gaps = [_gap("GLD", 6.0, 2.0)]
+    """cur 24, ref 20 (B1, 2026-09-02: reference bumped from the original 2.0 so
+    a 10pp override stays within the k=1.0 relative shelter cap — min(15,
+    1.0*20)=15 >= 10, so the plain magnitude governs, same as pre-B1): with an
+    accepted 10pp override (W=10, hi=30) a buy to 29 passes; a buy to 38 is
+    clamped to the 30% edge."""
+    gaps = [_gap("GLD", 24.0, 20.0)]
     decs = [_dec("GLD", magnitude=10.0)]
     ok = validate_trades(gaps, [_t("GLD", "buy", 50)], decs, CFG,
-                         _ctx(cash_usd=50_000.0))   # → post 11%
+                         _ctx(cash_usd=50_000.0))   # → post 29%
     assert ok["trades"][0]["validation"]["status"] == "passed"
     clamp = validate_trades(gaps, [_t("GLD", "buy", 140)], decs, CFG,
-                            _ctx(cash_usd=50_000.0))   # → post 20% → clamp at 12%
+                            _ctx(cash_usd=50_000.0))   # → post 38% → clamp at 30%
     t = clamp["trades"][0]
     assert t["validation"]["status"] == "clamped"
-    assert t["quantity"] == 60   # (12−6)pp of $100K at $100
+    assert t["quantity"] == 60   # (30−24)pp of $100K at $100
 
 
 def test_away_buy_with_rejected_override_gets_band_only_window():

@@ -3,7 +3,54 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-08-22 (ALFRED point-in-time backtest harness, branch `feat/20260821-alfred-backtest-harness`).**
+**▶ START HERE — last session 2026-09-02 (reference-degeneracy cycle: growth-flat hole + barbell rule + relative override shelter + concentration cap + settling window, branch `fix/20260902-reference-degeneracy`).**
+Fixes a LIVE, money-moving degeneracy: `shared/quadrants.py::favored_bucket()`
+returned `[]` (no directional read) whenever growth was flat, regardless of a
+confirmed inflation streak — collapsing the entire core book to an identical
+5.782% per sleeve on 2026-09-02 (verified: all 16 core sleeves, `by_quadrant`
+exactly `headcount × 5.782` per quadrant). **A1** extends `favored_bucket`
+symmetrically (`flat+falling → [Q1,Q4]`, `flat+rising → [Q2,Q3]`); this
+self-heals THREE other consumers (`flex/regime.py::resolve_quadrant`,
+`_build_transition_watch`, the perf-history backfill) with zero code changes
+in them. **A1b** makes `no_read_ballast` fire unconditionally on a truly-empty
+bucket (both axes flat), independent of the conviction-score gate, and adds
+`reference_weights.basis`. **A2 is the actual trap**: two of the four
+half-confirmed regimes have an EMPTY intersection (Q1/Q4, Q1/Q2 — opposite
+risk postures); the naive equal-leg-share fix would have manufactured a
+STRUCTURALLY UNFILLABLE reference (~46% of core into SPY/QQQ/SOXX while the
+gate is closed) AND concentrated by headcount artifact. Fixed with a barbell:
+classify each leg by block, reuse the same 60/20 blend split keyed on which
+leg the gate PERMITS, cap the restricted leg at current weight (never a buy
+obligation — VXUS C0/Option-1 precedent), redistribute the freed residual.
+**B1** makes the override shelter relative to reference size (k=1.0, mirrors
+O4's hybrid band) — the exact mechanism that let SOXX reach 19.08% under a
+fully "compliant" 15pp override against a 5.8% reference. **B2** adds a hard,
+override-independent 12%-of-equity concentration ceiling (currently
+non-binding under B1 at today's reference size — documented which bound
+binds first). **B3 (MERGE BLOCKER, verified working)**: a self-initiating
+settling-tranche cap (Table Storage `SettlingWindowState`, no date literal in
+config) reduces the tranche pace to 3pp for 5 sessions after any
+reference-engine change — generic safety valve, not a one-off. **C1**
+(describe-only, decision gate **#88**): staleness-damped axis confidence +
+an explicit bridge-disagreement score, wired to nothing. **D1**: an
+override-saturation alarm (17-19 simultaneous overrides across three prior
+sessions went undetected as anomalous). **D2**: conviction-path `p_up` is now
+mechanically damped toward its own base rate before edge computation
+(08-31 calibration was INVERTED — higher stated confidence predicted WORSE
+outcomes — and the prose fix didn't survive past that session).
+**E1**: `pnl_decomposition`'s top-15 contributor cap was the root cause of
+the 2026-09-02 report citing two different P&L numbers for the same
+position in two sections — removed, `contributors` is now complete. New
+entries **#88-94** for everything deferred (G-4/G-5/G-7 decision gates,
+F-2/F-3/F-6 data-integrity items carried over from the source analysis but
+not investigated this cycle, F-4's cash-rebuild-step question). Suite
+1479→1546 (67 new tests), every new/modified test confirmed failing on
+pre-fix source (P0 probe + targeted `git stash` isolation per task), ruff
+clean. **B3 verified working end-to-end** (the merge-blocking prerequisite).
+**Auto-merge: NO, human review required — this fix generates large
+enforcement trades on the first post-merge run.**
+
+**▶ Prior session 2026-08-22 (ALFRED point-in-time backtest harness, branch `feat/20260821-alfred-backtest-harness`).**
 Builds FOLLOWUPS **#23**'s harness — the gate on the entire signal track — and
 tunes NOTHING (deliberately). Five tasks, all offline in `scripts/`, zero
 collector/runtime imports (verified by grep): **A** `alfred_cache.py`
@@ -486,6 +533,112 @@ wiped them.
 ---
 
 ## Open
+
+### 88. G-4 decision gate — wire the leading inflation bridge to govern when realized core is stale (HIGH — architecture decision, blocking, cross-refs the 2026-09-02 reference-degeneracy cycle)
+From the 2026-09-02 reference-degeneracy cycle (`fix/20260902-reference-degeneracy`,
+Task C1). Core CPI/PCE run 63+ days stale between prints while live proxies
+(oil +21.8% 20d via USO, up from +0.4% three sessions earlier; 5Y breakeven
++18bp/20d; DGS30/DGS10 elevated; Bund/Gilt at multi-year highs) all point the
+other way from the realized-core `direction`. This cycle ships `growth_axis`/
+`inflation_axis.confidence_damped` and `inflation_axis.bridge_disagreement_score`
+as DESCRIBE-ONLY (wired to nothing — see CLAUDE.md's C1 entry). **Open
+question: should the leading bridge govern `inflation_axis.direction` once
+realized core exceeds ~45 days stale?** Recommend at least one full cycle of
+the describe-only fields running live (Jorge watching the damped reading and
+the disagreement score alongside the confirmed direction) before deciding —
+**do not wire this without re-reading A1/A2 (same cycle) first**: a bridge
+that governs could flip inflation to `rising` ([Q2,Q3] bucket, non-empty
+intersection, the A2 barbell never fires) or to `flat` (empty bucket,
+`no_read_ballast`) — either changes the reference a SECOND time in the same
+merge as A1/A2, compounding two live-money changes into one diagnosis.
+
+### 89. G-5 decision gate — streak semantics per new print vs per session, re-timing every filed falsifier (HIGH — architecture decision, needs sequencing, cross-refs the 2026-09-02 reference-degeneracy cycle)
+From the 2026-09-02 reference-degeneracy cycle. The inflation axis's
+confirmation streak (`_confirm_axis_direction`'s `raw_streak`) currently
+counts CONSECUTIVE COLLECTOR RUNS (sessions), not consecutive NEW PRINTS of
+the governing series — so a 24-run streak on a monthly series overstates how
+many independent observations actually confirmed it (most of those 24 runs
+saw the SAME print, just re-read). Switching to counting new prints would be
+more honest, but **re-times every currently-filed falsifier simultaneously**
+(anything referencing a streak length, evidence dated against a streak, or a
+`confirm_sessions`-style gate keyed on this same counter) — this is NOT a
+same-cycle change. Recommend a standalone PR with an explicit migration note
+covering every consumer of `raw_streak`/streak-length language, and — per the
+sequencing note in the cycle that raised it — do NOT let it coincide with any
+reference-engine change (A1/A2, or a future revision) so a single session
+never has to disentangle "the streak semantics changed" from "the reference
+changed" as simultaneous causes of a shifted number.
+
+### 90. Catalyst screen — 0/25 nominated for three consecutive sessions (MEDIUM — data/design gap, needs investigation, cross-refs the 2026-09-02 reference-degeneracy cycle)
+Flagged in the 2026-09-02 reference-degeneracy cycle's source analysis
+(G-7) but NOT investigated this cycle (out of scope — see that cycle's PR
+body). The catalyst-sleeve funnel (`_CATALYST_DISCOVERY_CAP`/`_CATALYST_TOP_N`,
+session 2026-08-10) nominated zero of 25 screened candidates for three
+straight sessions. Needs a live probe of `catalyst_screen`'s per-component
+scores over those sessions to determine whether this is (a) a genuinely
+quiet catalyst environment, (b) a scoring/threshold defect (mirrors the
+flex-conviction path's own 4-session zero-nomination episode that motivated
+the p_up path, 2026-08-14), or (c) a data-freshness/universe-filter bug
+upstream of scoring. Not verified against live data this session (same
+Azure/FRED tenant-access constraint noted in recent sessions) — this entry
+records the observation, not a diagnosis.
+
+### 91. F-2 — frozen-quote feed defect, rotating across multiple ETFs (MEDIUM — data-integrity, needs investigation, cross-refs the 2026-09-02 reference-degeneracy cycle)
+Flagged in the 2026-09-02 reference-degeneracy cycle's source analysis but
+NOT investigated this cycle (out of scope). A frozen/stale-quote symptom
+was observed rotating across AIA/COWZ/IHE/KMLM/USMV/VTIP — different
+tickers on different sessions rather than one persistently bad symbol,
+which argues for a SHARED upstream cause (an FMP endpoint, a caching layer,
+or a rate-limit fallback silently serving a stale cached quote) rather than
+a per-ticker data issue. Needs a live probe correlating the affected
+symbol/session pairs against the collector's actual FMP call log before a
+fix can be designed — not verified against live data this session.
+
+### 92. F-3 — MU 10x price quarantine + flex-orphan reconciliation (MEDIUM — data-integrity, needs investigation, cross-refs the 2026-09-02 reference-degeneracy cycle)
+Flagged in the 2026-09-02 reference-degeneracy cycle's source analysis but
+NOT investigated this cycle (out of scope). Two threads bundled in the
+source analysis: (1) an MU price observation ~10x its plausible range,
+which `price_quarantine` (range_pct/single_day_move_pct, Task E/F7,
+2026-07-23) SHOULD already catch — needs a live check that it actually
+fired rather than silently passing a corrupted print through; (2) MU is
+also this system's canonical flex-orphan example (FOLLOWUPS history: the
+2026-07-15 stale-resting-order incident, CLAUDE.md's "Deployment lessons")
+— confirm the flex-engine reconciliation sweep (`reconcile_ledger`'s
+`orphan_orders`) still correctly scopes to its own `client_order_id` family
+and hasn't regressed. Not verified against live data this session.
+
+### 93. F-4 — literal cash $73.22 vs the 1.5%-of-equity target; needs a pre-buy cash-rebuild step (MEDIUM — architecture decision, cross-refs the 2026-09-02 reference-degeneracy cycle's B3)
+From the 2026-09-02 reference-degeneracy cycle. Literal cash was observed at
+~0.074% of equity against the 1.5% `literal_cash_target_pct` — effectively
+nothing. Once A1/A2's fixed reference starts generating real enforcement
+BUYS (paced by B3's settling window), every buy must be funded by a
+same-session sell or by existing cash; with literal cash this thin, the
+existing `_validate_trades` cash-after-sells clamp will size buys correctly,
+but the SGOV carve-out logic (`sgov_carveout_remaining`, D-B1) has very
+little pre-trade literal-cash budget to work with, which could visibly
+throttle an otherwise-legitimate SGOV composition sweep on the same session
+enforcement is also trying to move core sleeves. **Open question (decision
+gate): does the settling window (B3) need a cash-rebuild step ahead of the
+buy leg** — e.g., prioritizing a literal-cash-to-target sweep before sizing
+the session's core enforcement buys — or does the existing sells-before-buys
+ordering already handle it in practice? Needs at least one live post-merge
+session to observe before designing a fix; do not guess at the interaction
+from zero observed sessions.
+
+### 94. F-6 — EUAD thematic thesis decayed +11.65 → +7.72 → +4.79pp while hysteresis/liquidity floor deliberated (LOW — data-gated, needs review, cross-refs the 2026-09-02 reference-degeneracy cycle)
+Flagged in the 2026-09-02 reference-degeneracy cycle's source analysis but
+NOT investigated this cycle (out of scope). A live EUAD (European defense
+capex) thematic thesis lost roughly 60% of its excess-return edge (+11.65pp
+→ +7.72pp → +4.79pp) across three sessions while `thematic_conviction`'s
+`confirm_sessions=2` hysteresis and an ADV liquidity floor deliberated
+whether to admit it. Open question: can `confirm_sessions=2` plus a
+liquidity floor ever capture a genuinely fast-decaying rotation at all, or
+does the hysteresis discipline that protects against noise on a STABLE
+thesis systematically miss a thesis that decays on the SAME timescale the
+discipline takes to confirm it? Needs a review of `thematic_conviction`'s
+observed confirm/decay timing across more live theses before concluding
+either way — one observed case is not enough to redesign the hysteresis
+bar.
 
 ### 84. Blend-attribution ledger — deliberately deferred pending corrected basket returns (MEDIUM — architecture decision, cross-refs #83)
 The 2026-08-21 chart review's headline number (book trailed an equal-weight
