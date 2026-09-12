@@ -61,7 +61,15 @@ from __future__ import annotations
 
 import math
 
-from shared.quadrants import AMPLIFIER_INTL, AMPLIFIER_US, DAMPER, LEGACY_EXITS
+from shared.quadrants import (
+    DAMPER,
+    LEGACY_EXITS,
+    amplifier_block_pool,
+    amplifier_set,
+    defensive_set,
+    is_amplifier,
+    role_block_of,
+)
 
 # Fallback config if risk-limits.json lacks a reference_execution block (mirror it).
 REFERENCE_EXECUTION_DEFAULTS = {
@@ -73,17 +81,58 @@ REFERENCE_EXECUTION_DEFAULTS = {
     # resolve_settling_tranche_cap below.
     "settling_tranche_pp_max": 3.0,
     "settling_sessions": 5,
+    # A4 (2026-09-12) — bump this opaque tag in the SAME commit as any
+    # reference-engine change to re-arm the settling window; see
+    # `advance_settling_window`. Never a date the window keys off, just an
+    # equality check against the persisted value.
+    "settling_revision": "",
 }
 
 _EPS_PP = 0.05   # sub-0.05pp residue is rounding noise, never a shortfall
+# Frozen config-`selected` baseline. RETAINED as the zero-override fallback only
+# (see `defensive_set`) — every classification below resolves through the
+# override-aware helper so an auto-switched incumbent is recognized. Do NOT
+# reintroduce a bare membership test against this constant (session 2026-09-12).
 _DEFENSIVE = set(DAMPER) | {"SGOV"}
 
 
-def is_de_risk_move(side: str, symbol: str) -> bool:
+def is_de_risk_move(
+    side: str, symbol: str, overrides: dict[str, str] | None = None,
+) -> bool:
     """The D3 classification, deterministic off the quadrants.py block model:
     SELLING an Amplifier or LEGACY_EXITS name, or BUYING a Damper/SGOV name, is
     de-risk; everything else (selling dampers, any risk-on buy) is re-risk and is
     never synthesized.
+
+    ``overrides`` (role_id -> effective incumbent ticker, the SleeveSelectionState
+    map the collector publishes as the snapshot's top-level ``effective_selected``)
+    resolves the blocks through ``amplifier_set``/``defensive_set`` — the same
+    contract every other override-aware helper in ``shared/quadrants.py`` uses.
+
+    Omitted/empty ``overrides`` is NOT byte-identical to the pre-2026-09-12
+    behavior, and deliberately so: the sell-side pool rule below widens the
+    de-risk verdict for the 8 non-selected amplifier-block pool members (SOXX,
+    ACWX, IXUS, EWJ, IEMG, IDMO, VSS, EWZ) from False to True. Every other
+    (side, symbol) pair over the full roster is unchanged, and the change is a
+    strict widening in one direction only — it can convert "flagged, never
+    synthesized" into "synthesized", never the reverse, and never for a name
+    outside an amplifier-block pool. `derive_override_direction` is unchanged for
+    every symbol that previously classified at all (the same 8 move from ``None``
+    to a real direction; no direction reverses).
+
+    **Session 2026-09-12 — why the parameter exists.** Blanket sleeve auto-switch
+    (2026-07-27) made ``sleeve-roles.json``'s ``selected`` a BASELINE, not the live
+    authority; the live authority is ``SleeveSelectionState.selected``. That PR
+    fixed the identical hazard one module over (``trade_validation``'s V1 amplifier
+    gate now resolves ``amplifier_set`` per call) but this module was absent from
+    the documented consumer inventory and kept testing the frozen tuples. After
+    ``semis`` auto-switched SMH→SOXX on 2026-07-27, ``is_de_risk_move("sell",
+    "SOXX")`` returned False, so the required sell of the book's LARGEST amplifier
+    was classified a re-risk shortfall — and re-risk shortfalls are never
+    synthesized (spec §6 asymmetry). SOXX sat ~20% of equity against a 10.164%
+    reference for three consecutive sessions (required move 3.00 / 7.89 / 8.14pp),
+    enforcement reporting and discarding the same obligation each time. The
+    defensive side had the same defect via ``healthcare_def`` XLV→IHE.
 
     LEGACY_EXITS sells were added session 2026-07-15 (Task D1, decision D0): a
     legacy long (AMZN/GOOGL/MCK/...) is being wound down to a 0% reference target
@@ -92,14 +141,39 @@ def is_de_risk_move(side: str, symbol: str) -> bool:
     legacy sell shortfall was flagged `non_compliant_flagged` ("re-risk shortfall
     — never synthesized") and left the book's largest overweight (MCK, 07-14/15)
     unpoliced — the model traded 1.65pp of a 6.56pp required tranche on 07-14 and
-    0.82pp of 4.79pp on 07-15, with no backstop and no override filed either time."""
+    0.82pp of 4.79pp on 07-15, with no backstop and no override filed either time.
+    LEGACY_EXITS is a STATIC tuple (a retired name, not a role incumbent), so it is
+    correctly unaffected by ``overrides``.
+
+    **The SELL side keys on POOL membership, not the incumbent set.** Swapping the
+    frozen tuples for ``amplifier_set(overrides)`` alone would have simply moved
+    the stuck name: SOXX becomes classifiable, but the DESELECTED SMH stops being
+    — and its sanctioned end state is a full exit to zero (auto-switch decision
+    D-G1), reached through exactly this synthesis path. Both are semis ETFs;
+    selling either reduces risk-on exposure. ``amplifier_block_pool()`` classifies
+    every member of an amplifier-block role identically and permanently, which is
+    what "is selling this de-risk?" actually turns on. ``amplifier_set(overrides)``
+    is retained alongside it as a belt-and-braces term for the (shouldn't-happen)
+    case of an override naming a ticker outside its role's own pool.
+
+    The BUY side deliberately stays on the INCUMBENT set. There is no matching
+    regression to guard: a deselected damper's exit is a SELL, which is re-risk
+    under this rule both before and after (unchanged — the D3 asymmetry has always
+    treated damper sells that way), and its buy side is unreachable for synthesis
+    because a zeroed non-selected member can never be underweight."""
     s = (symbol or "").upper()
     if (side or "").lower() == "sell":
-        return s in AMPLIFIER_US or s in AMPLIFIER_INTL or s in LEGACY_EXITS
-    return s in _DEFENSIVE
+        return (
+            s in amplifier_set(overrides)
+            or s in amplifier_block_pool()
+            or s in LEGACY_EXITS
+        )
+    return s in defensive_set(overrides)
 
 
-def derive_override_direction(sleeve: str, gap_signed: float | None) -> str | None:
+def derive_override_direction(
+    sleeve: str, gap_signed: float | None, overrides: dict[str, str] | None = None,
+) -> str | None:
     """Deterministic override direction (session 2026-07-15, Task E1) — shares the
     block model with `is_de_risk_move` so an override's direction can never
     disagree with what enforcement itself would call de-risk vs re-risk for the
@@ -120,6 +194,15 @@ def derive_override_direction(sleeve: str, gap_signed: float | None) -> str | No
     callers must not silently default a direction in that case, only fall back
     to whatever was declared.
 
+    ``overrides`` (session 2026-09-12) resolves the blocks through the same
+    override-aware helpers ``is_de_risk_move`` uses, so the two can never
+    disagree. This matters INDEPENDENTLY of the synthesis bug: an auto-switched
+    incumbent (SOXX, IHE) fell into the unclassifiable ``None`` branch, and
+    ``shared/overrides.py`` then falls back to "whatever the model declared" —
+    so for exactly the sleeves the auto-switch created, the Task E1 deterministic
+    cross-check silently stopped running and the model's SELF-DECLARED override
+    direction stood unchecked. Omitted/empty is the unchanged frozen behavior.
+
     *(Motivating case: 2026-07-14 correctly filed a GLD-above-reference hold as
     de_risk; 2026-07-15 filed the identical situation — plus XLP and TLT, also
     dampers held above reference — as re_risk, backwards, which would have held
@@ -128,9 +211,9 @@ def derive_override_direction(sleeve: str, gap_signed: float | None) -> str | No
     if gap_signed is None or gap_signed == 0:
         return None
     s = (sleeve or "").upper()
-    if s in _DEFENSIVE:
+    if s in defensive_set(overrides):
         return "de_risk" if gap_signed > 0 else "re_risk"
-    if s in AMPLIFIER_US or s in AMPLIFIER_INTL or s in LEGACY_EXITS:
+    if s in amplifier_set(overrides) or s in amplifier_block_pool() or s in LEGACY_EXITS:
         return "re_risk" if gap_signed > 0 else "de_risk"
     return None
 
@@ -239,6 +322,11 @@ def effective_execution_config(cfg: dict) -> dict:
         "settling_sessions": int(rex_cfg.get(
             "settling_sessions", REFERENCE_EXECUTION_DEFAULTS["settling_sessions"]
         )),
+        # A4 (2026-09-12) — the re-arm tag; surfaced so the prompt/report can say
+        # WHICH engine revision the active window belongs to.
+        "settling_revision": str(rex_cfg.get(
+            "settling_revision", REFERENCE_EXECUTION_DEFAULTS["settling_revision"]
+        )),
     }
 
 
@@ -273,7 +361,11 @@ def _cap_breach_pp(current_pct: float, reference_pct: float, cap_pct: float) -> 
 
 
 def advance_settling_window(
-    prior: dict | None, today: str, settling_sessions: int, settling_tranche_pp_max: float,
+    prior: dict | None,
+    today: str,
+    settling_sessions: int,
+    settling_tranche_pp_max: float,
+    revision: str | None = None,
 ) -> dict:
     """B3 (2026-09-02, G-2 merge blocker) — a time-boxed REDUCED tranche cap
     following a reference-engine change (this cycle's A1/A2 fix). Without
@@ -290,16 +382,43 @@ def advance_settling_window(
     the window TODAY, exactly like the axis-confirmation D-A2 first-run rule.
 
     ``prior`` is the previously persisted ``{start_date, sessions_elapsed,
-    last_date}`` (or None on the very first run ever). A second invocation on
-    the SAME ``today`` (a retry) must not double-count a session — it replays
-    the prior session count unchanged.
+    last_date, revision}`` (or None on the very first run ever). A second
+    invocation on the SAME ``today`` (a retry) must not double-count a session —
+    it replays the prior session count unchanged.
+
+    ``revision`` (session 2026-09-12, Task A4) — the reference-engine revision
+    tag from ``risk-limits.json → reference_execution.settling_revision``. The
+    2026-09-02 self-initiating rule only ever arms the window ONCE, on the first
+    run with no persisted state; by the time a LATER reference-engine change
+    ships, state exists and is expired, so the window silently does not re-arm —
+    which is precisely when it is needed most. A ``revision`` differing from the
+    persisted one RESTARTS the window, exactly as if there were no state at all.
+    This keeps B3's "generic safety valve, not a one-off" property and its "no
+    date literal in config" rule: the tag is an opaque string a human bumps in
+    the same commit as the engine change. ``None``/absent on both sides
+    reproduces the pre-2026-09-12 behavior exactly.
+
+    ``sessions_remaining`` COUNTS THE CURRENT SESSION (session 2026-09-12, Task
+    A4). Before this it was ``settling_sessions - sessions_elapsed``, which on
+    the final session of the window reported ``active: true`` alongside
+    ``sessions_remaining: 0`` — observed 2026-09-09, and self-contradictory to
+    anything reading the pair (a reader that trusts ``sessions_remaining``
+    concludes the reduced cap has lapsed while it is in fact still binding). The
+    invariant ``active ⟺ sessions_remaining > 0`` now holds by construction. The
+    window's DURATION is unchanged at ``settling_sessions`` runs — the deliberate
+    choice between the two readings of "zero remaining should be inactive": make
+    the counter inclusive, rather than deactivate a session early and silently
+    shorten a configured 5-session window to 4.
 
     Returns the full window info to both persist (minus ``effective_cap``,
     which is derived, not stored) and surface in the snapshot: ``{active,
     start_date, sessions_elapsed, sessions_remaining, effective_cap,
-    last_date}``.
+    last_date, revision}``.
     """
-    if not prior or not prior.get("start_date"):
+    prior_revision = (prior or {}).get("revision")
+    revision_changed = bool(prior) and prior_revision != revision
+
+    if not prior or not prior.get("start_date") or revision_changed:
         start_date = today
         sessions_elapsed = 1
     elif prior.get("last_date") == today:
@@ -314,9 +433,12 @@ def advance_settling_window(
         "active": active,
         "start_date": start_date,
         "sessions_elapsed": sessions_elapsed,
-        "sessions_remaining": max(0, int(settling_sessions) - sessions_elapsed) if active else 0,
+        "sessions_remaining": (
+            max(0, int(settling_sessions) - sessions_elapsed + 1) if active else 0
+        ),
         "effective_cap": float(settling_tranche_pp_max) if active else None,
         "last_date": today,
+        "revision": revision,
     }
 
 
@@ -332,6 +454,48 @@ def resolve_settling_tranche_cap(tranche_pp_max: float, settling_window: dict | 
     if cap is None:
         return float(tranche_pp_max)
     return min(float(tranche_pp_max), float(cap))
+
+
+def classification_conflict(
+    side: str, symbol: str, overrides: dict[str, str] | None = None,
+) -> str | None:
+    """A5 (session 2026-09-12) — the tripwire that makes a repeat of this
+    session's defect impossible to miss.
+
+    `is_de_risk_move` has just answered "re-risk" for this (side, symbol). Ask a
+    SECOND, INDEPENDENTLY-RESOLVED question — does the symbol belong to an
+    Amplifier-block role (``role_block_of``, pool-based) or read as an amplifier
+    under the live incumbent map (``is_amplifier``)? — and report a conflict when
+    the two disagree. Returns a human-readable description, or None when they
+    agree (the expected state on every run).
+
+    Why this exists: the 2026-07-27→2026-09-12 defect printed "re-risk shortfall"
+    for a required SELL of the book's largest amplifier, three sessions running,
+    and nothing anywhere treated it as anomalous — each individual line of output
+    was well-formed. The check is deliberately routed through a DIFFERENT
+    resolution path than the classifier it audits (role/pool metadata rather than
+    the selected-incumbent sets), so a future regression in the block sets — a
+    revert, a new frozen constant, a role gaining a block — surfaces immediately
+    as a blocking Data Integrity Warning instead of three weeks of silent
+    non-enforcement. Precedent for the prominence: the D1 override-saturation
+    alarm (2026-09-02)."""
+    s = (symbol or "").upper()
+    sd = (side or "").lower()
+    block = role_block_of(s)
+    if sd == "sell" and (block in ("amplifier_us", "amplifier_intl") or is_amplifier(s, overrides)):
+        return (
+            f"{s} SELL classified RE-RISK, but {s} resolves as an AMPLIFIER "
+            f"(role block {block!r}, effective-incumbent amplifier="
+            f"{is_amplifier(s, overrides)}) — selling an amplifier is de-risk by "
+            "the D3 block model, so this shortfall should have been synthesizable"
+        )
+    if sd == "buy" and block in ("damper", "cash"):
+        return (
+            f"{s} BUY classified RE-RISK, but {s} resolves as DEFENSIVE (role "
+            f"block {block!r}) — buying a damper/cash name is de-risk by the D3 "
+            "block model, so this shortfall should have been synthesizable"
+        )
+    return None
 
 
 def _flag(entry: dict, reason: str) -> None:
@@ -360,7 +524,12 @@ def reconcile(
         override_decisions: ``validate_overrides()["decisions"]`` (per-sleeve, V1_1).
         cfg: ``{"override_protocol": {...}, "reference_execution": {...}}``.
         quadrant_ctx: ``{"deployment_gate", "equity_usd", "cash_usd", "date",
-            "exempt_holds"}``.
+            "exempt_holds", "effective_selected"}``. ``effective_selected``
+            (role_id -> incumbent ticker, session 2026-09-12) resolves the
+            Amplifier/Damper blocks for the D3 de-risk classification through
+            the LIVE auto-switched incumbents rather than the frozen config
+            `selected` baseline — see `is_de_risk_move`. Absent/empty keeps the
+            pre-2026-09-12 frozen behavior exactly.
 
     Returns ``{"sleeves": {sym: {status, gap_pp, allowed_residual_pp,
     required_move_total_pp, required_move_today_pp, model_move_pp, reasons,
@@ -389,14 +558,23 @@ def reconcile(
     gate = str(ctx.get("deployment_gate") or "").lower()
     exempt = {str(t).upper() for t in ctx.get("exempt_holds") or ()}
     date_tag = str(ctx.get("date") or "").replace("-", "")
+    # Session 2026-09-12 — the LIVE effective incumbent map (SleeveSelectionState,
+    # published by the collector as the snapshot's top-level `effective_selected`).
+    # Every block classification below resolves through it; absent/empty falls back
+    # to the frozen config-`selected` sets exactly as before.
+    eff_sel = ctx.get("effective_selected") or None
+    defensive = defensive_set(eff_sel)
 
     sleeves: dict[str, dict] = {}
     enforced: list[dict] = []
+    # A5 (2026-09-12) — see `classification_conflict`. Expected EMPTY on every
+    # run; a non-empty list is a blocking Data Integrity Warning, not a nuance.
+    conflicts: list[dict] = []
     summary = {"confirming": 0, "override_covered": 0, "enforced": 0,
                "non_compliant_flagged": 0, "rationed_by_envelope": 0}
     if equity <= 0 or not gaps:
         return {"sleeves": sleeves, "enforced_trades": enforced, "summary": summary,
-                "enforcement_notional_usd": 0.0}
+                "enforcement_notional_usd": 0.0, "classification_conflicts": conflicts}
 
     # Off-roster held names (flex leftovers, e.g. MU) get a gap row so the Tier-1
     # validator can clamp their sells, but band enforcement must NEVER synthesize a
@@ -523,7 +701,7 @@ def reconcile(
         side_r = "sell" if gap_signed > 0 else "buy"
         if side_r == "sell" and sym in exempt:
             continue
-        if not is_de_risk_move(side_r, sym):
+        if not is_de_risk_move(side_r, sym, eff_sel):
             re_risk_required[sym] = min(required_total_r, tranche)
     total_required_re_risk = sum(re_risk_required.values())
     re_risk_envelope_pp = min(total_required_re_risk, tranche) if total_required_re_risk > 0 else 0.0
@@ -571,7 +749,18 @@ def reconcile(
         if side == "sell" and sym in exempt:
             _flag(entry, "exempt hold — never force-sold (Tier-1)")
             continue
-        if not is_de_risk_move(side, sym):
+        if not is_de_risk_move(side, sym, eff_sel):
+            # A5 — cross-check this re-risk verdict against an independently
+            # resolved second opinion BEFORE acting on it (see
+            # `classification_conflict`). Recorded, never acted on: a conflict
+            # means the block model is inconsistent with itself, and silently
+            # "correcting" the classification here would paper over exactly the
+            # kind of defect this tripwire exists to surface.
+            _conflict = classification_conflict(side, sym, eff_sel)
+            if _conflict:
+                conflicts.append({"symbol": sym, "side": side,
+                                  "classified": "re_risk", "detail": _conflict})
+                entry["classification_conflict"] = _conflict
             # M2 (2026-08-06 audit) — a sub-min-notional required move on an
             # out-of-band DAMPER sell (re-risk: trimming an overweight damper
             # toward its floor) must not be a per-session coin flip. Before
@@ -586,7 +775,7 @@ def reconcile(
             # (allowed > 0) licenses a hold instead — that IS the override
             # doing its job, not per-session discretion.
             required_today_usd = required_today / 100.0 * equity
-            if sym in _DEFENSIVE and side == "sell" and allowed <= _EPS_PP and (
+            if sym in defensive and side == "sell" and allowed <= _EPS_PP and (
                 0 < required_today_usd < min_notional
             ):
                 entry["sub_min_notional_action"] = "trim_to_floor"
@@ -620,7 +809,7 @@ def reconcile(
                     "next-session action"
                 ))
             continue
-        if gate == "closed" and side == "buy" and sym not in _DEFENSIVE:
+        if gate == "closed" and side == "buy" and sym not in defensive:
             _flag(entry, "deployment gate closed — only defensive buys may be synthesized")
             continue
         try:
@@ -687,4 +876,5 @@ def reconcile(
         "enforced_trades": enforced,
         "summary": summary,
         "enforcement_notional_usd": round(total_enf_notional, 2),
+        "classification_conflicts": conflicts,
     }

@@ -90,7 +90,6 @@ import math
 
 from shared.quadrants import (
     CORE_ROSTER,
-    DAMPER,
     EXEMPT_HOLDS,
     LEGACY_EXITS,
     amplifier_set,
@@ -101,7 +100,13 @@ from shared.reference_execution import REFERENCE_EXECUTION_DEFAULTS, allowed_res
 
 logger = logging.getLogger(__name__)
 
-_DEFENSIVE = set(DAMPER) | {"SGOV"}
+# NOTE (session 2026-09-12, Task A2 audit): a module-level
+# `_DEFENSIVE = set(DAMPER) | {"SGOV"}` used to sit here, UNREFERENCED by any
+# code path in this module or the suite. It was removed rather than made
+# override-aware: a dead frozen block set is exactly the shape of the defect
+# this session fixed in `shared/reference_execution.py`, and the next person to
+# need one here would reasonably have reached for it. Use
+# `shared/quadrants.py::defensive_set(effective_selected)` instead.
 _EPS_PP = 0.05
 
 

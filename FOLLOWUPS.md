@@ -27,6 +27,35 @@ breakevens govern.** New open items **#100** (wire the bridge to govern — sequ
 AFTER continuous factor tilts), **#101** (no nowcast source exists), **#102**
 (`rate_decomposition` consumer decision + gates G-2/G-3). #78 and #86 untouched.
 
+**Also merged 2026-09-12 — de-risk classifier fix (branch `fix/20260912-derisk-classifier`, PR #49, merged FIRST).**
+`shared/reference_execution.py` was ABSENT from the auto-switch consumer
+inventory and still resolved the Amplifier/Damper blocks against the FROZEN
+config-`selected` sets. After `semis` auto-switched SMH→SOXX (2026-07-27),
+`is_de_risk_move("sell", "SOXX")` read False, so the required sell of the
+book's largest amplifier was classified a RE-RISK shortfall — and re-risk
+shortfalls are never synthesized. SOXX sat ~20% of equity against a 10.164%
+reference for three sessions (required 3.00 / 7.89 / 8.14pp) with enforcement
+reporting and discarding the obligation each time. The identical hazard was
+caught one module over in the SAME 2026-07-27 PR (`trade_validation`'s V1
+gate); this module was simply never added to the list. **The naive fix is a
+trap**: swapping the frozen tuples for `amplifier_set(overrides)` alone makes
+SOXX classifiable but stops classifying the DESELECTED SMH, whose sanctioned
+end state is a full exit to zero (D-G1) through this same path — trading one
+permanently-stuck sleeve for another. The sell side therefore keys on
+amplifier-block POOL membership, which no selection can change. **A2's audit**
+found and fixed two more instances (`_override_sign`'s Phase-5 grading sign —
+which also read `set(DAMPER)`, excluding SGOV, and so graded every cash-sleeve
+override backwards regardless of auto-switch; and `_write_regime_suspect_history`'s
+bucket membership), removed a dead frozen `_DEFENSIVE` in `trade_validation.py`,
+and recorded #99. **A4 (merge blocker)** added a `settling_revision` re-arm tag
+(the 2026-09-02 self-initiating rule arms the window exactly ONCE ever, so it
+would NOT have re-armed for this change) and fixed the `active: true` /
+`sessions_remaining: 0` state seen 09-09. **A5** adds a classification tripwire
+that fires a blocking Data Integrity Warning if the classifier ever again
+disagrees with the role/block metadata. New open items: **#95** (settling window
+is per-sleeve, not a session envelope — 14.21pp moved against a 3.0pp cap),
+**#96**, **#97**, **#98**, **#99**.
+
 **Previous session — 2026-09-02 (reference-degeneracy cycle: growth-flat hole + barbell rule + relative override shelter + concentration cap + settling window, branch `fix/20260902-reference-degeneracy`).**
 Fixes a LIVE, money-moving degeneracy: `shared/quadrants.py::favored_bucket()`
 returned `[]` (no directional read) whenever growth was flat, regardless of a
@@ -558,9 +587,90 @@ wiped them.
 
 ## Open
 
-*(Numbering note: this cycle starts at #100 because the concurrent
-`fix/20260912-derisk-classifier` branch claims #95-99. The two PRs are
-independent and touch no shared files.)*
+### 95. Settling window is applied PER SLEEVE, not as a session-aggregate envelope (HIGH — architecture decision, cross-refs the 2026-09-12 de-risk-classifier cycle + B3/G-2)
+From the 2026-09-12 de-risk-classifier cycle (`fix/20260912-derisk-classifier`,
+Task A4, deliberately left out of scope there). `resolve_settling_tranche_cap`
+reduces `tranche_pp_max`, and `reconcile` applies `tranche_pp_max` **per
+out-of-band sleeve** (`required_move_today = min(required_move_total,
+tranche)`), so a session with N enforceable sleeves can turn over up to N × the
+cap. Observed: **14.21pp of equity moved in a session whose settling cap was
+3.0pp.** This is the same shape as the B6 re-risk envelope fix (2026-08-06
+audit), which solved it for re-risk shortfalls only — a PORTFOLIO-level
+envelope allocated pro-rata, with a `rationed_by_envelope` status — and left
+the de-risk/synthesis side per-sleeve. The de-risk-classifier cycle only
+ARMED the existing per-sleeve window (plus the `settling_revision` re-arm tag
+and the `active`/`sessions_remaining` invariant); converting it to a true
+session-aggregate envelope is a separate change. **Note the interaction that
+makes this more urgent than it was**: that cycle's A1 fix makes several
+amplifier sleeves synthesizable at once for the first time, so the per-sleeve
+reading now has more sleeves to multiply by. Recommend mirroring B6's
+structure rather than inventing a second mechanism — and decide explicitly
+whether the aggregate envelope covers de-risk synthesis alone or is shared
+with B6's re-risk envelope (sharing one budget across both is the more
+conservative reading, and the one a human would expect from the phrase "the
+session's tranche").
+
+### 96. SGOV literal-cash carve-out vs a multi-sleeve liquidation — a guaranteed one-session cash spike above a binding ceiling (MEDIUM — architecture decision, cross-refs #93/#95)
+From the 2026-09-12 de-risk-classifier cycle (analysis §3; out of scope there).
+The carve-out exists so a literal-cash → SGOV sweep reads as a pure cash-sleeve
+composition swap rather than a deviation (D-B1, plus the M1 direction-aware
+narrowing). But the cash sleeve is also where every de-risk SELL lands: a
+session that liquidates several overweight sleeves at once deposits all of that
+notional into literal cash on the same day, pushing the cash sleeve above its
+operative ceiling for at least one session with nothing in the deterministic
+layers able to correct it (the corrective — buying something — is re-risk and
+is never synthesized; D-D1 made that a prompt-layer PERMISSION, not an
+obligation). With #95 unfixed the spike is larger, since more sleeves can
+liquidate in one session. Decide whether the sweep should be paced against the
+same session envelope, whether the shock-3 ceiling should flex for one session
+after a large enforced de-risk, or whether this is simply an accepted transient
+worth disclosing rather than correcting. Do not fix this before #95 — the two
+share the same root (no session-level notion of total movement).
+
+### 97. Wire `confidence_damped` into the barbell's concentration decision (MEDIUM — architecture decision, data-gated, cross-refs #88/G-4)
+From the 2026-09-12 de-risk-classifier cycle (analysis §4). The A2 barbell
+(2026-09-02) concentrates into whichever leg the deployment gate permits, at a
+fixed 60/20 split, with NO input from how confident the underlying axis read
+actually is — while `growth_axis`/`inflation_axis.confidence_damped` (C1, same
+cycle) computes exactly that number and is deliberately wired to nothing. The
+natural pairing is to scale the barbell's concentration by the damped
+confidence, so a half-confirmed regime read on a 63-day-stale core print
+concentrates less hard than a fresh, well-corroborated one. **Gated on #88
+(G-4)**, and subject to the same warning recorded there: do not change what
+`confidence_damped` feeds in the same merge as any other reference-engine
+change, and bump `reference_execution.settling_revision` when it ships so the
+settling window re-arms (see the 2026-09-12 cycle's Task A4).
+
+### 98. ETN/ETF ADV readings implausible — blocks liquidity-floor tuning (LOW — data integrity, needs investigation)
+From the 2026-09-12 de-risk-classifier cycle (analysis §S-1). A reported ADV of
+~$2.4M for an ETN is not credible for the instruments in question, and every
+liquidity-floor decision downstream (`FlexConfig.min_adv_usd`, the catalyst
+screen's `liquidity_below_floor` hard filter, and any future tuning of either)
+rests on that number being right. Until the ADV computation is verified against
+an independent source, treat a "fails the liquidity floor" verdict on a fund as
+UNVERIFIED rather than as evidence about the instrument. Investigate the volume
+field actually used (FMP `historical-price-eod/light` returns close+volume only
+— shares, not dollars: confirm the ×price conversion and the averaging window
+are both applied), then re-check the floor value itself.
+
+### 99. `_div_dollar_vs_intl` reads the frozen `AMPLIFIER_INTL` — stale under intl rotation, a DIFFERENT mechanism from auto-switch (LOW — describe-only, found by the 2026-09-12 A2 audit)
+Found by the Task A2 frozen-set audit (2026-09-12) and deliberately NOT fixed
+there. `collector/handler.py::_div_dollar_vs_intl` computes the book's aggregate
+international weight as holdings ∩ `set(AMPLIFIER_INTL)` — the frozen config
+`selected` of the two rotation roles (VXUS, AIA). The `intl_leader` slot is
+auto-rotated by `intl_governance.leader_pick`, so a book holding EWJ/IEMG/IDMO/
+VSS/EWZ as the live leader has that exposure read as ZERO by the
+`dollar_vs_intl_tilt` divergence detector. **This is NOT an instance of the bug
+that cycle fixed**: `effective_selected` covers SCORECARD roles only (verified —
+`_effective_selected_map` skips `selection != "scorecard"`), so the auto-switch
+map cannot fix it; it needs either `leader_pick` threaded in, or — cleaner — the
+aggregate re-based on the intl roles' full POOLS, since any held intl name is
+intl exposure regardless of which one is the current pick. Describe-only (feeds
+a divergence description, never a weight), which is why it was recorded rather
+than folded into a de-risk-classifier PR. Prefer the pool-based fix and decide
+explicitly whether "aggregate international weight" means the selected names or
+all held intl names — they are different questions and the current code answers
+neither correctly.
 
 ### 100. Wire the breakeven bridge to govern `inflation_axis.direction` when realized core is >45d stale — SEQUENCED AFTER the continuous-factor-tilt work (HIGH — architecture decision, blocking, cross-refs #88/G-4 and the 2026-09-12 breakeven-basis cycle)
 From the 2026-09-12 breakeven-basis cycle (`fix/20260912-breakeven-basis-rate-legs`),

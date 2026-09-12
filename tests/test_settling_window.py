@@ -40,7 +40,9 @@ def test_first_run_ever_self_initiates_no_date_literal():
     assert out["active"] is True
     assert out["start_date"] == "2026-09-03"
     assert out["sessions_elapsed"] == 1
-    assert out["sessions_remaining"] == 4
+    # A4 (2026-09-12): sessions_remaining COUNTS the current session, so the
+    # first of five reads 5 (was 4 under the pre-A4 exclusive counter).
+    assert out["sessions_remaining"] == 5
     assert out["effective_cap"] == 3.0
     assert out["last_date"] == "2026-09-03"
 
@@ -49,7 +51,7 @@ def test_subsequent_session_advances_the_counter():
     prior = {"start_date": "2026-09-03", "sessions_elapsed": 1, "last_date": "2026-09-03"}
     out = advance_settling_window(prior, "2026-09-04", 5, 3.0)
     assert out["sessions_elapsed"] == 2
-    assert out["sessions_remaining"] == 3
+    assert out["sessions_remaining"] == 4      # A4: inclusive of the current session
     assert out["start_date"] == "2026-09-03"   # unchanged
     assert out["active"] is True
 
@@ -60,7 +62,7 @@ def test_same_day_retry_does_not_double_count():
     prior = {"start_date": "2026-09-03", "sessions_elapsed": 1, "last_date": "2026-09-03"}
     out = advance_settling_window(prior, "2026-09-03", 5, 3.0)
     assert out["sessions_elapsed"] == 1
-    assert out["sessions_remaining"] == 4
+    assert out["sessions_remaining"] == 5
 
 
 def test_window_expires_after_settling_sessions():
@@ -73,12 +75,34 @@ def test_window_expires_after_settling_sessions():
 
 
 def test_window_active_through_exactly_settling_sessions():
+    """A4 (2026-09-12) — the FINAL session of the window must not report
+    `active: true` alongside `sessions_remaining: 0`.
+
+    This test previously ASSERTED that self-contradictory pair (observed live
+    2026-09-09): anything reading `sessions_remaining` concluded the reduced cap
+    had lapsed while `effective_cap` was in fact still binding at 3.0pp. The
+    counter is now inclusive of the current session, so the last active session
+    reads 1 and the window's DURATION is unchanged at `settling_sessions` runs
+    (the deliberate alternative — deactivating a session early — would have
+    silently shortened a configured 5-session window to 4)."""
     prior = {"start_date": "2026-09-03", "sessions_elapsed": 4, "last_date": "2026-09-08"}
     out = advance_settling_window(prior, "2026-09-09", 5, 3.0)
     assert out["sessions_elapsed"] == 5
     assert out["active"] is True   # last active session
-    assert out["sessions_remaining"] == 0
+    assert out["sessions_remaining"] == 1
     assert out["effective_cap"] == 3.0
+
+
+def test_active_iff_sessions_remaining_positive():
+    """A4 — the invariant the 09-09 state violated, pinned across the whole
+    lifetime of a window (and one session past its end)."""
+    prior = None
+    for elapsed in range(1, 8):
+        out = advance_settling_window(prior, f"2026-09-{elapsed:02d}", 5, 3.0)
+        assert out["sessions_elapsed"] == elapsed
+        assert out["active"] is (out["sessions_remaining"] > 0), out
+        assert (out["effective_cap"] is not None) is out["active"]
+        prior = out
 
 
 # --- resolve_settling_tranche_cap (pure) -------------------------------------
@@ -146,16 +170,19 @@ def test_load_state_round_trips_saved_entity(monkeypatch):
 
     monkeypatch.setattr(handler, "upsert_entity", _fake_upsert)
     handler._save_settling_window_state(
-        {"start_date": "2026-09-03", "sessions_elapsed": 2, "last_date": "2026-09-04"})
+        {"start_date": "2026-09-03", "sessions_elapsed": 2, "last_date": "2026-09-04",
+         "revision": "rev-A"})
     assert saved["table"] == "SettlingWindowState"
     assert saved["entity"]["PartitionKey"] == "state"
     assert saved["entity"]["RowKey"] == "reference_execution"
     assert saved["entity"]["start_date"] == "2026-09-03"
     assert saved["entity"]["sessions_elapsed"] == 2
+    assert saved["entity"]["revision"] == "rev-A"
 
     monkeypatch.setattr(handler, "query_entities", lambda table, *a, **kw: [saved["entity"]])
     loaded = handler._load_settling_window_state()
-    assert loaded == {"start_date": "2026-09-03", "sessions_elapsed": 2, "last_date": "2026-09-04"}
+    assert loaded == {"start_date": "2026-09-03", "sessions_elapsed": 2,
+                      "last_date": "2026-09-04", "revision": "rev-A"}
 
 
 def test_load_state_non_fatal_on_query_failure(monkeypatch):
