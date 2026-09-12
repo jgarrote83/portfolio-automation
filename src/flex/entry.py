@@ -120,6 +120,7 @@ def build_flex_entry(
     session_minutes_elapsed: int,
     cfg: FlexConfig,
     sleeve_room_usd: float | None = None,
+    session_minutes_remaining: float | None = None,
 ) -> dict:
     symbol = str(candidate.get("symbol") or "").upper()
     sector = candidate.get("sector")
@@ -127,6 +128,8 @@ def build_flex_entry(
     out: dict = {
         "symbol": symbol,
         "sector": sector,
+        "take_profit_price": None,
+        "stop_clamped_to_cap": None,
         "adv_usd": None,
         "gap_pct": None,
         "gap_in_adr": None,
@@ -160,11 +163,23 @@ def build_flex_entry(
     if adv is None or adv < cfg.min_adv_usd:
         return _skip("liquidity_below_min")
 
-    # Entry window (morning-only). Computed from the real session open upstream.
+    # Entry window (N3, session 2026-09-12) — ALL DAY, not morning-only. News
+    # arrives all day; a news-driven sleeve that could only act between 10:00 and
+    # 11:00 ET missed most of its own signal. Two bounds remain, both structural:
+    #   - `vwap_window_min` (kept): session VWAP is meaningless in the first
+    #     minutes, and the VWAP hold is the main confirmation left after regime
+    #     removal.
+    #   - `entry_late_cutoff_min` (new): never OPEN a position with no time left
+    #     to work before the close. Skipped when the caller cannot supply
+    #     minutes-to-close (None) — a missing clock must never silently disable a
+    #     safety bound OR silently block every entry, so it degrades to the
+    #     pre-N3 behaviour of not applying a late bound at all, and the caller
+    #     logs it.
     if session_minutes_elapsed < cfg.vwap_window_min:
         return _skip("pre_window")
-    if session_minutes_elapsed >= cfg.entry_cutoff_min:
-        return _skip("after_cutoff")
+    if (session_minutes_remaining is not None
+            and session_minutes_remaining <= cfg.entry_late_cutoff_min):
+        return _skip("too_close_to_close")
 
     entry_price = _last_close(intraday_bars)
     prev_close = _last_close(daily_bars)
@@ -206,15 +221,38 @@ def build_flex_entry(
     atr_dist = cfg.atr_mult * atr
     orl = opening_range_low(intraday_bars)
     structure_low = min(x for x in (vwap, orl) if x is not None)
-    stop_price = min(entry_price - atr_dist, structure_low)
+    # N2 (session 2026-09-12) — `max_stop_pct` now CLAMPS the stop; it no longer
+    # SKIPS the entry. **Deliberate deviation from a literal reading of the B2
+    # spec table, because the literal reading is un-tradeable** (verified, not
+    # assumed): with `atr_mult` 3.0 and a typical 2%-daily-range liquid name, the
+    # ATR stop distance is ~6% of entry — roughly 4x the new 1.5% cap. Keeping
+    # "skip if wider" would have rejected essentially every liquid candidate,
+    # turning zero-nominations into zero-entries by a different route.
+    #
+    # The spec table's own wording is the clamp instruction: "`atr_mult` retained
+    # only if ATR still bounds the stop; **the 1.5% cap governs**". It also has to
+    # be a clamp for the arithmetic to hold — the +2%/-1.5% breakeven of 43%
+    # assumes the stop IS -1.5%, which a variable ATR-derived stop would not be,
+    # and the bracket's resting stop leg is a fixed price either way.
+    #
+    # Structure still informs the stop where it is TIGHTER than the cap (a nearby
+    # VWAP/opening-range low gives a better R); it can never make it wider.
+    cap_stop = entry_price * (1.0 - cfg.max_stop_pct / 100.0)
+    stop_price = max(min(entry_price - atr_dist, structure_low), cap_stop)
     stop_distance = entry_price - stop_price
     if stop_distance <= 0:
         return _skip("bad_stop")
-    out["stop_price"] = stop_price
+    out["stop_price"] = round(stop_price, 2)
     out["stop_distance"] = stop_distance
     out["stop_pct"] = stop_distance / entry_price * 100.0
-    if out["stop_pct"] > cfg.max_stop_pct:
-        return _skip("stop_too_wide")
+    out["stop_clamped_to_cap"] = stop_price <= cap_stop + 1e-9
+
+    # N2 — the resting take-profit leg of the native OCO bracket. A FIXED % of
+    # entry, not an R-multiple: the bracket's two legs are independent price
+    # levels at the broker, and expressing the target in R would make it drift
+    # with the (ATR-derived, then capped) stop distance rather than being the
+    # +2% the profile actually specifies.
+    out["take_profit_price"] = round(entry_price * (1.0 + cfg.take_profit_pct / 100.0), 2)
 
     # Risk-budget sizing: fixed dollar risk ⟹ a volatile name auto-sizes smaller.
     sizing = size_flex_position(equity, entry_price, stop_distance, cfg, sleeve_room_usd)
@@ -306,6 +344,7 @@ def build_conviction_entry(
     sleeve_room_usd: float | None = None,
     literal_cash_usd: float | None = None,
     sgov_usd: float | None = None,
+    session_minutes_remaining: float | None = None,
 ) -> dict:
     """Task E — the conviction-path Layer 2 entry pipeline, a SEPARATE gate
     sequence from `build_flex_entry` (the catalyst path stays byte-identical;
@@ -338,6 +377,7 @@ def build_conviction_entry(
         "symbol": symbol,
         "sector": sector,
         "path": "conviction",
+        "take_profit_price": None,
         "adv_usd": None,
         "vwap": None,
         "no_chase_limit": None,
@@ -368,10 +408,12 @@ def build_conviction_entry(
     if adv is None or adv < cfg.min_adv_usd:
         return _skip("liquidity_below_min")
 
+    # N3: same all-day window as the catalyst path (see build_flex_entry).
     if session_minutes_elapsed < cfg.vwap_window_min:
         return _skip("pre_window")
-    if session_minutes_elapsed >= cfg.entry_cutoff_min:
-        return _skip("after_cutoff")
+    if (session_minutes_remaining is not None
+            and session_minutes_remaining <= cfg.entry_late_cutoff_min):
+        return _skip("too_close_to_close")
 
     entry_price = _last_close(intraday_bars)
     if entry_price is None or entry_price <= 0:
@@ -404,6 +446,11 @@ def build_conviction_entry(
     out["stop_price"] = stop_price
     out["stop_distance"] = stop_distance
     out["stop_pct"] = stop_distance / entry_price * 100.0
+    # N2: the conviction path also brackets, but keeps its OWN wider stop bound
+    # (`conviction_max_stop_pct`, 10.0) — its stop is the nomination's own
+    # invalidation level, not an ATR distance, and must not be clamped to the
+    # catalyst profile's 1.5%.
+    out["take_profit_price"] = round(entry_price * (1.0 + cfg.take_profit_pct / 100.0), 2)
     if out["stop_pct"] > cfg.conviction_max_stop_pct:
         return _skip("stop_too_wide")
 

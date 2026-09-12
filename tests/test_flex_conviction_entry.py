@@ -27,10 +27,12 @@ def _intraday(closes, rng=0.2, v=1000):
     return [{"o": c, "h": c + rng / 2, "l": c - rng / 2, "c": c, "v": v} for c in closes]
 
 
-def _run(intraday, daily, invalidation=95.0, size_mult=1.0, sector="Technology", minutes=45, **kw):
+def _run(intraday, daily, invalidation=95.0, size_mult=1.0, sector="Technology", minutes=45,
+         minutes_remaining=200, **kw):
     return build_conviction_entry(
         {"symbol": "AVGO", "sector": sector, "invalidation": invalidation},
-        intraday, daily, EQUITY, minutes, CFG, size_mult, **kw,
+        intraday, daily, EQUITY, minutes, CFG, size_mult,
+        session_minutes_remaining=minutes_remaining, **kw,
     )
 
 
@@ -84,10 +86,13 @@ def test_liquidity_below_min_rejected():
     assert r["skip_reason"] == "liquidity_below_min"
 
 
-def test_pre_window_and_after_cutoff():
+def test_entry_window_is_all_day_with_a_late_cutoff_only():
+    """N3 (2026-09-12): same all-day window as the catalyst path."""
     bars = _intraday([100] * 7)
     assert _run(bars, _daily(), minutes=10)["skip_reason"] == "pre_window"
-    assert _run(bars, _daily(), minutes=120)["skip_reason"] == "after_cutoff"
+    assert _run(bars, _daily(), minutes=300)["entry_trigger"] == "pass"
+    late = _run(bars, _daily(), minutes=380, minutes_remaining=10)
+    assert late["skip_reason"] == "too_close_to_close"
 
 
 def test_no_gap_or_vwap_rising_fields_required():

@@ -31,6 +31,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from collector import catalyst_screen  # noqa: E402
+from flex.config import FlexConfig  # noqa: E402
 from flex.entry import build_conviction_entry, build_flex_entry  # noqa: E402
 from flex.separation import FLEX_REENTERABLE, flex_separation_set  # noqa: E402
 
@@ -249,3 +250,81 @@ def test_end_to_end_a_real_shaped_mover_is_nominatable():
     assert cs["rankable"] is True
     assert cs["rankability_reason"] is None
     assert cs["components_available"] == 4
+
+
+# --- B2 (N2/N3/N4): exit profile, bracket order, window, sizing -------------
+
+def test_b2_config_profile():
+    """N2/N4 — the locked profile numbers, pinned so a drift is visible."""
+    c = FlexConfig()
+    assert (c.take_profit_pct, c.max_stop_pct, c.time_stop_days) == (2.0, 1.5, 2)
+    assert c.per_name_cap_pct == 6.0          # N4: 12.0 -> 6.0 (gap risk)
+    assert c.sleeve_cap_pct == 25.0           # Jorge's full sleeve, unchanged
+    assert c.entry_late_cutoff_min == 30      # N3
+    assert not hasattr(c, "first_target_r")   # scale-out retired
+    assert not hasattr(c, "scale_out_fraction")
+    assert not hasattr(c, "entry_cutoff_min")  # morning-only cutoff retired
+
+
+def test_b2_breakeven_arithmetic_is_a_floor_not_the_bar():
+    """The +2%/-1.5% pair implies a 42.9% breakeven win rate IF outcomes were
+    binary. The 2-day time stop adds a third outcome at market, so the true
+    breakeven is HIGHER by an unknown amount. Recorded here because the brief
+    quoted 43% as 'the bar'; S2 measures realized expectancy instead."""
+    c = FlexConfig()
+    binary_breakeven = c.max_stop_pct / (c.take_profit_pct + c.max_stop_pct)
+    assert round(binary_breakeven, 3) == 0.429
+
+
+def test_b2_open_position_places_a_native_bracket_with_both_legs():
+    """N2 — the core mechanism. Verified live against Alpaca paper 2026-09-12
+    (accepted; both legs returned `held`; cancelling the parent cancelled both);
+    this pins the payload the engine actually sends."""
+    import flex.handler as fh
+    sent = {}
+
+    class _Client:
+        def submit_order(self, sym, qty, side, **kw):
+            sent.update({"sym": sym, "qty": qty, "side": side, **kw})
+            return {"id": "o1", "legs": [{"id": "tp", "type": "limit"},
+                                         {"id": "sl", "type": "stop"}]}
+
+    e = {"size_shares": 10, "stop_price": 98.5, "entry_price": 100.0,
+         "take_profit_price": 102.0}
+    ledger = {}
+    decisions = {"orders_issued": [], "orders_suppressed": []}
+    import unittest.mock as _m
+    with _m.patch.object(fh, "write_ledger", lambda *_a, **_k: None), \
+         _m.patch.object(fh, "_record_trade_history", lambda *_a, **_k: None):
+        ok = fh._open_position(_Client(), ledger, "XYZ", e, {"rationale": "r"},
+                               "2026-09-12", decisions, [])
+    assert ok is True
+    assert sent["order_class"] == "bracket"
+    assert sent["take_profit"] == {"limit_price": 102.0}
+    assert sent["stop_loss"] == {"stop_price": 98.5}
+    # BOTH child legs tracked, so a later cancel/replace can never orphan the
+    # take-profit leg.
+    assert set(ledger["XYZ"]["order_ids"]) == {"o1", "tp", "sl"}
+
+
+def test_b2_open_position_falls_back_to_oto_rather_than_entering_naked():
+    """A builder that produced no take-profit level must still get its
+    protective stop — never enter naked because the profit leg is missing."""
+    import flex.handler as fh
+    sent = {}
+
+    class _Client:
+        def submit_order(self, sym, qty, side, **kw):
+            sent.update(kw)
+            return {"id": "o1", "legs": [{"id": "sl", "type": "stop"}]}
+
+    e = {"size_shares": 5, "stop_price": 98.5, "entry_price": 100.0,
+         "take_profit_price": None}
+    import unittest.mock as _m
+    with _m.patch.object(fh, "write_ledger", lambda *_a, **_k: None), \
+         _m.patch.object(fh, "_record_trade_history", lambda *_a, **_k: None):
+        fh._open_position(_Client(), {}, "XYZ", e, {"rationale": "r"},
+                          "2026-09-12", {"orders_issued": [], "orders_suppressed": []}, [])
+    assert sent["order_class"] == "oto"
+    assert sent["stop_loss"] == {"stop_price": 98.5}
+    assert "take_profit" not in sent

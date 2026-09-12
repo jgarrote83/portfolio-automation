@@ -33,22 +33,28 @@ def _entry(**kw):
     return base
 
 
-def test_scale_out_at_first_target_then_breakeven():
-    # current 110 → R = (110-100)/4 = 2.5 ≥ 2 → scale out half, stop → breakeven.
+def test_scale_out_is_RETIRED_a_winner_is_left_to_the_bracket():
+    """N2 (2026-09-12): no scale-out. A position at +2.5R is not touched by the
+    engine — the resting take-profit limit at entry x 1.02 is what closes it, and
+    it fills CONTINUOUSLY at the broker rather than on the next ~15-minute tick."""
     r = build_flex_exit_state(_entry(), _intraday([110] * 7), _daily(), CFG, NOW)
-    assert r["next_action"] == "scale_out"
-    assert r["scale_out_qty"] == 5
-    assert r["target_stop"] == 100.0
+    assert r["next_action"] == "hold"
+    assert r["scale_out_qty"] is None
+    assert r["target_stop"] is None
+    assert r["stop_move_needed"] is False
 
 
-def test_trail_moves_stop_up():
-    # current 105 (R=1.25, no scale), VWAP support ~103 above the ATR trail (99) → trail to ~103.
+def test_trail_is_RETIRED_the_stop_rests_at_the_broker():
+    """N2: no trail. Dropping the trailing leg is precisely what ALLOWS the
+    native OCO bracket (`trailing_stop` cannot be a bracket leg), which is what
+    removes the ~15-minute exit-resolution caveat for BOTH exits."""
     r = build_flex_exit_state(
         _entry(), _intraday([103, 103, 103, 103, 103, 103, 105]), _daily(), CFG, NOW,
     )
-    assert r["next_action"] == "trail"
-    assert r["target_stop"] > 96.0
-    assert r["target_stop"] < 105.0
+    assert r["next_action"] == "hold"
+    assert r["trail_stop"] is None
+    assert r["target_stop"] is None
+    assert r["stop_move_needed"] is False
 
 
 def test_time_stop_fires_after_horizon():

@@ -256,8 +256,8 @@ the closed gate that day.)*
 > `trades[]` array. Instead you **nominate** catalyst candidates in a
 > `flex_nominations[]` array (schema in the Output format section); a deterministic
 > intraday engine (`src/flex/`) confirms each on its own clock — gap-vs-ADR, VWAP
-> hold + slope, ATR-risk sizing — and owns the entry, the stop, the scale-out, the
-> trail, and the time-stop. **You never compute a flex price, stop, or share count.**
+> hold + slope, ATR-risk sizing — and owns the entry, the bracket's two resting
+> exits, and the time-stop. **You never compute a flex price, stop, or share count.**
 
 #### The Separation Contract (do not blend the two engines)
 
@@ -270,9 +270,11 @@ Everything else is separate:
 - **Core** = the role-based all-weather book, weight-only, governed by the quadrant
   call, conviction-scaled concentration, the 0.1% floor, the cash sleeve, and the
   monthly/event cadence. Core trades go in `trades[]`.
-- **Flex** = days-long single-name **catalyst** trades, entered on intraday
-  confirmation and exited by a mechanical ATR stop / scale-out / trail / time-stop,
-  managed continuously by the engine. Flex ideas go in `flex_nominations[]`.
+- **Flex** = short-hold single-name **news-momentum** trades (~2 trading days),
+  entered on intraday confirmation and exited by a NATIVE OCO BRACKET placed at
+  entry — a resting **+2% take-profit limit** and a resting **−1.5% stop**, both at
+  the broker — or by a **2-day time stop** at market. There is no trail and no
+  scale-out (retired 2026-09-12). Flex ideas go in `flex_nominations[]`.
 - **Never blend.** Flex does NOT use conviction-scaled concentration, the 0.1%
   floor, the cash-sleeve band, or any review-based hold. Core does NOT use VWAP,
   ATR, catalysts, gaps, or intraday data. A flex idea is never a core weight change,
@@ -497,9 +499,20 @@ per-name **entry** decision (`entry_trigger` /
 `skip_reason` / `binding` / `size_shares`), and the per-name **exit** state
 (`next_action` / `r_multiple` / `trail_stop`). **When `flex_state.reconciliation.status`
 is `ok`, echo these numbers; never recompute or override them.** In the Portfolio
-review table, each `[FLEX]` row's note states the engine's `next_action` (hold /
-trailing / scaled-out / time-stop). If `flex_state` is absent (engine disabled or no
-run yet), say so and move on — do not invent flex levels, stops, or exits.
+review table, each `[FLEX]` row's note states the engine's `next_action`. Since
+2026-09-12 that is only **hold** or **time_stop**: the +2%/−1.5% exits rest at the
+broker as bracket legs and are never engine-managed, so `trail_stop`/`target_stop`/
+`scale_out_qty` are always null and `trailing`/`scaled-out` can no longer occur —
+**never narrate a flex position as "trailing" or "scaled out"**. If `flex_state` is
+absent (engine disabled or no run yet), say so and move on — do not invent flex
+levels, stops, or exits.
+
+**The sleeve may be DISABLED.** When `FLEX_ENABLED` is off the collector still
+publishes `catalyst_screen.ledger`/`.nominated` every session (the screen runs in
+the collector, not the engine), but no entries occur. If `flex_state` is absent
+while `catalyst_screen.nominated` is non-empty, say plainly that the sleeve is in
+an observation window and the names were screened but not traded — do NOT report
+them as positions or imply they were acted on.
 
 **`flex_state.as_of` staleness (carried from PR #40's stale-read fix, S-2 in the
 PR #41 review).** The collector runs pre-market, before today's first in-hours

@@ -17,15 +17,26 @@ EQUITY = 1_000_000.0
 ENTRY = 100.0
 
 
-def test_constant_dollar_risk_where_budget_governs():
-    # Stops in the budget-governing band (~3.3%–4%): risk budget binds, equal risk.
+def test_risk_budget_is_INERT_at_the_new_stop_width():
+    """N4 (2026-09-12) — the documented consequence, pinned so a future stop-width
+    change that silently hands control back to the risk budget is caught.
+
+    At `per_name_cap_pct` 6.0 the budget only governs once the stop exceeds
+    0.40/6.0 = 6.67% of entry. The catalyst profile's stop is capped at 1.5%, so
+    `per_name_cap` binds on EVERY catalyst entry and `risk_budget_pct` is inert.
+    Realized risk falls to 6% x 1.5% = 0.09%, well under the 0.40% budget — which
+    is intended: with a fixed tight stop, single-name CONCENTRATION is the real
+    exposure, not per-trade risk."""
     cfg = FlexConfig()
-    a = size_flex_position(EQUITY, ENTRY, 3.5, cfg)   # 3.5% stop
-    b = size_flex_position(EQUITY, ENTRY, 4.0, cfg)   # 4.0% stop
-    assert a["binding"] == "risk_budget"
-    assert b["binding"] == "risk_budget"
-    assert round(a["realized_risk_pct"], 2) == 0.40
-    assert round(b["realized_risk_pct"], 2) == 0.40
+    # The profile's actual stop width -> the cap binds.
+    tight = size_flex_position(EQUITY, ENTRY, ENTRY * 0.015, cfg)
+    assert tight["binding"] == "per_name_cap"
+    assert round(tight["realized_risk_pct"], 3) == 0.09
+    assert round(tight["notional_pct"], 2) == 6.00
+    # The budget only re-binds past a stop the catalyst profile can never produce.
+    wide = size_flex_position(EQUITY, ENTRY, ENTRY * 0.08, cfg)
+    assert wide["binding"] == "risk_budget"
+    assert round(wide["realized_risk_pct"], 2) == 0.40
 
 
 def test_per_name_cap_binds_and_suppresses_risk_for_tight_stops():

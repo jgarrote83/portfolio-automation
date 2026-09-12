@@ -119,6 +119,12 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
         snapshot, held_symbols=held_syms, exclude=daytrade_syms,
     )
     minutes = _session_minutes(client, today, now_et)
+    # N3: minutes REMAINING in the session, for the late-entry cutoff. None when
+    # the calendar is unreadable — `build_flex_entry` then applies no late bound
+    # (degrades to pre-N3 behaviour) rather than silently blocking every entry.
+    minutes_left = _session_minutes_remaining(client, today, now_et)
+    if minutes_left is None:
+        logger.warning("session minutes-to-close unavailable — late-entry cutoff not applied")
     # Flex Sleeve Performance Ledger Task B: read the funnel's catalyst_score
     # per symbol directly from the snapshot rather than trusting the model's
     # nomination JSON to echo it back — it's already reachable here.
@@ -171,6 +177,7 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
             cand, minute_bars.get(sym, []), daily_bars.get(sym, []),
             equity, minutes if minutes is not None else -1, cfg,
             sleeve_room_usd=sleeve_room,
+            session_minutes_remaining=minutes_left,
         )
         decisions["entries"].append(e)
         if e["entry_trigger"] == "pass" and not dry_run:
@@ -201,6 +208,7 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
             size_mult=float(conv.get("applied_size_mult") or 0.0),
             sleeve_room_usd=sleeve_room,
             literal_cash_usd=literal_cash_usd, sgov_usd=sgov_usd,
+            session_minutes_remaining=minutes_left,
         )
         decisions["entries"].append(e)
         if e["entry_trigger"] == "pass" and not dry_run:
@@ -374,20 +382,50 @@ def _open_position(client, ledger, sym, e, nom, today, decisions, executions, ca
                     path: str = "catalyst") -> bool:
     qty = int(e["size_shares"])
     stop_price = round(float(e["stop_price"]), 2)
+    take_profit_price = e.get("take_profit_price")
     try:
-        # Native OTO: entry buy + protective stop child that arms on fill (no naked long).
-        order = client.submit_order(
-            sym, qty, "buy", order_type="market", time_in_force="day",
-            order_class="oto", stop_loss={"stop_price": stop_price},
-            client_order_id=_coid(today, sym, "entry"))
-        _issued(decisions, executions, sym, "entry_oto", order)
+        if take_profit_price:
+            # N2 (session 2026-09-12) — NATIVE OCO BRACKET: entry buy + a resting
+            # take-profit LIMIT + a resting protective STOP, OCO'd so a fill on
+            # one cancels the other. This is the architectural win the fixed
+            # profile buys: the old design could not take profit at a price
+            # (`trailing_stop` cannot be a bracket leg), so the spec settled for
+            # an engine-managed pair with ~15-minute exit resolution
+            # (Flex_Catalyst_Engine_v1.0 §10.1: "A first-target hit and reversal
+            # inside a 15-min bucket can be missed"). With no trailing leg BOTH
+            # exits now rest at the broker and fill CONTINUOUSLY — a +2% limit
+            # fills whenever the price is touched, not on the next tick.
+            #
+            # The no-naked-long invariant is UNCHANGED: the stop is a bracket
+            # child that arms on fill, exactly as the OTO stop did.
+            order = client.submit_order(
+                sym, qty, "buy", order_type="market", time_in_force="day",
+                order_class="bracket",
+                take_profit={"limit_price": round(float(take_profit_price), 2)},
+                stop_loss={"stop_price": stop_price},
+                client_order_id=_coid(today, sym, "entry"))
+            _issued(decisions, executions, sym, "entry_bracket", order)
+        else:
+            # Defensive fallback: a builder that produced no take-profit level
+            # still gets its protective stop. Never enter naked because the
+            # profit leg is missing.
+            logger.warning("%s: no take_profit_price — falling back to OTO entry", sym)
+            order = client.submit_order(
+                sym, qty, "buy", order_type="market", time_in_force="day",
+                order_class="oto", stop_loss={"stop_price": stop_price},
+                client_order_id=_coid(today, sym, "entry"))
+            _issued(decisions, executions, sym, "entry_oto", order)
     except Exception as ex:  # noqa: BLE001
-        logger.exception("OTO entry for %s failed", sym)
+        logger.exception("Bracket entry for %s failed", sym)
         decisions["orders_suppressed"].append({"symbol": sym, "reason": f"entry_error:{ex}"})
         return False
 
     legs = order.get("legs") or []
-    stop_ids = [str(leg.get("id")) for leg in legs if str(leg.get("type", "")).startswith("stop")]
+    # Track BOTH child legs: the stop (so the no-naked-long repair path can see
+    # it) and the take-profit limit (so a cancel/replace never orphans it).
+    stop_ids = [str(leg.get("id")) for leg in legs
+                if str(leg.get("type", "")).startswith("stop")
+                or str(leg.get("type", "")) == "limit"]
     catalyst = catalyst or {}
     ledger[sym] = new_entry(
         sym, float(e["entry_price"]), today, stop_price, qty,
@@ -761,6 +799,23 @@ def _session_minutes(client, today, now_et) -> float | None:
         return (now_et - open_et).total_seconds() / 60.0
     except Exception:  # noqa: BLE001
         logger.exception("session-minutes calc failed")
+        return None
+
+
+def _session_minutes_remaining(client, today, now_et) -> float | None:
+    """N3 — minutes until the session CLOSE, from the broker calendar's own
+    `close` field. Reading the real close (not open + a hardcoded 390) is what
+    makes this correct on a half-day; an early close is exactly the session where
+    opening a position with no time to work is worst."""
+    try:
+        cal = client.get_calendar(today, today)
+        if not cal:
+            return None
+        ch, cm = (int(x) for x in str(cal[0]["close"]).split(":"))
+        close_et = now_et.replace(hour=ch, minute=cm, second=0, microsecond=0)
+        return (close_et - now_et).total_seconds() / 60.0
+    except Exception:  # noqa: BLE001
+        logger.exception("session minutes-to-close calc failed")
         return None
 
 
