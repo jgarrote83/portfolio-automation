@@ -3,6 +3,15 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
+**⚠ CORRECTION — entry #98 was WRONG and has been rewritten (2026-09-12).** It
+claimed `avg_dollar_volume` had a units bug and blocked `MIN_ADV_USD` tuning on
+that basis. A live FMP probe disproved it: ETN's real 20d ADV is **$723M**, the
+computation is correct, and **`MIN_ADV_USD = $50M` must not be tuned (G-4
+closed)**. The actual defect is narration integrity — the analyzer published
+another ticker's ledger row (IDWM, $2,360.91) as ETN's, mis-scaled ~1000×, while
+asserting $1.5B for the same ticker 24 lines earlier. New entry **#103** proposes
+the deterministic guard. If you are reading #98 from an older copy, re-read it.
+
 **▶ START HERE — last session 2026-09-12 (breakeven basis + rate-leg decomposition, branch `fix/20260912-breakeven-basis-rate-legs`).**
 The bridge preferred the **5y5y forward** breakeven "least contaminated by
 near-term noise" — sound for a divergence detector, backwards for a regime
@@ -641,17 +650,52 @@ concentrates less hard than a fresh, well-corroborated one. **Gated on #88
 change, and bump `reference_execution.settling_revision` when it ships so the
 settling window re-arms (see the 2026-09-12 cycle's Task A4).
 
-### 98. ETN/ETF ADV readings implausible — blocks liquidity-floor tuning (LOW — data integrity, needs investigation)
-From the 2026-09-12 de-risk-classifier cycle (analysis §S-1). A reported ADV of
-~$2.4M for an ETN is not credible for the instruments in question, and every
-liquidity-floor decision downstream (`FlexConfig.min_adv_usd`, the catalyst
-screen's `liquidity_below_floor` hard filter, and any future tuning of either)
-rests on that number being right. Until the ADV computation is verified against
-an independent source, treat a "fails the liquidity floor" verdict on a fund as
-UNVERIFIED rather than as evidence about the instrument. Investigate the volume
-field actually used (FMP `historical-price-eod/light` returns close+volume only
-— shares, not dollars: confirm the ×price conversion and the averaging window
-are both applied), then re-check the floor value itself.
+### 98. The analyzer fabricated a per-ticker ADV by misattributing another ticker's ledger row — narration integrity, NOT a data bug (MEDIUM — cross-refs the 09-02 SOXX/GLD P&L break and #103)
+**REWRITTEN 2026-09-12 after a live probe. The original entry was wrong and is
+superseded in full — do not act on its "units bug" hypothesis.**
+
+The original entry (filed the same day, from the 09-11 report's narrative) claimed
+a ~$2.4M ADV for ETN was implausible, hypothesised a units bug in
+`avg_dollar_volume`, and blocked `MIN_ADV_USD` tuning pending investigation.
+**Every part of that is now disproven empirically** (live FMP probe, EasyGrids
+credentials, 2026-09-12):
+
+| symbol | `avg_dollar_volume` (20d) | vs the $50M floor |
+|---|---|---|
+| ETN  | **$723,062,795** | PASS |
+| AAPL | $13,498,422,913 | PASS |
+| RH   | $116,253,632 | PASS |
+| ANAB | $25,089,123 | correctly FAILS |
+
+- **`avg_dollar_volume` is CORRECT.** It is `mean(close × volume)` over 20 bars,
+  fed from `historical-price-eod/light`'s `price`/`volume` fields — real dollar
+  volume, no units error, no bad path. Recorded here so nobody re-opens it.
+- **`MIN_ADV_USD = $50M` is CORRECT and must not be tuned** (decision gate G-4
+  CLOSED). The 88% `liquidity_below_min` rejection rate is the floor doing its
+  job against a discovery universe of OTC/foreign micro-caps (IDWM, REBN, FANDF,
+  HGRAF, SRTSF, ODMUF, GYYMF, MHPSY) — the fix for that is the discovery
+  universe, not the floor.
+
+**The real defect, which is a different and more dangerous one:** ETN has NO
+`adv_usd` anywhere in the 09-11 snapshot — it appears only in `flex_candidates`,
+`stock_news` and `flex_eligibility.candidates`, none of which carry that field.
+The only ADV values in the snapshot live at
+`catalyst_screen.ledger[*].basis.adv_usd`, and `ledger[0]` is **IDWM at
+$2,360.91**. The analyzer published that value **as ETN's**, mis-scaled ~1000×
+into "$2.4M", for a ticker absent from the ledger entirely — while asserting a
+contradictory **"ETN … (ADV $1.5B — above minimum)"** roughly 24 lines earlier in
+the SAME report (~625× apart, never reconciled).
+
+Same family as the **2026-09-02 SOXX/GLD P&L contradiction** (CLAUDE.md, E1): a
+per-ticker figure fabricated or misattributed in narration and published without
+reconciliation against the block it supposedly came from. It is more dangerous
+than a data bug precisely because the number looked plausible — it was taken at
+face value, hypothesised into a units bug, propagated into an implementation
+prompt, and filed here as a backlog item before a probe caught it. The internal
+contradiction inside the report was the available tell and it was not spent.
+
+**The deterministic guard this argues for is its own entry — see #103.** Nothing
+in this entry is a code change; it is a correction of the record.
 
 ### 99. `_div_dollar_vs_intl` reads the frozen `AMPLIFIER_INTL` — stale under intl rotation, a DIFFERENT mechanism from auto-switch (LOW — describe-only, found by the 2026-09-12 A2 audit)
 Found by the Task A2 frozen-set audit (2026-09-12) and deliberately NOT fixed
@@ -726,6 +770,45 @@ distribution is observed rather than assumed, and (b) decision gates **G-2**
 (`identity_tolerance_bp` = 15, proposed) and **G-3** (`real_share_pct` bands 65/35,
 proposed) being confirmed — both are currently unreviewed defaults and neither has
 been validated against live data.
+
+### 103. Deterministic guard — every per-ticker figure the report cites must resolve to a named snapshot path (MEDIUM — narration integrity, cross-refs #98 and the 09-02 SOXX/GLD break)
+Raised by the 2026-09-12 probe that rewrote **#98**. Two incidents now share one
+shape, three weeks apart:
+
+- **2026-09-02** — the report published "SOXX −$1,073.93 / GLD −$783.87" in one
+  section and "−$1,035.61 / −$340.97" in another, with the second section's own
+  row-sum not matching the first section's claimed total. Root cause found and
+  fixed (`_build_pnl_decomposition`'s top-15 `contributors` cap, CLAUDE.md E1) —
+  but the fix addressed the DATA that made the contradiction possible, not the
+  narration that published two irreconcilable numbers without noticing.
+- **2026-09-11** — the report published an ADV for **ETN**, a ticker that has no
+  `adv_usd` field anywhere in the snapshot, by taking `catalyst_screen.ledger[0]`
+  (IDWM, $2,360.91), mis-scaling it ~1000× to "$2.4M", and stating it ~24 lines
+  after asserting $1.5B for the same ticker. See #98 for the full probe.
+
+Both are the same defect class: **a per-ticker number that is not traceable to a
+block that actually contains it, published alongside a contradictory figure with
+no reconciliation.** This class is more dangerous than a data bug because the
+output is individually plausible — the 09-11 figure was believed, hypothesised
+into a units bug, written into an implementation prompt, and filed as a backlog
+item before a live probe caught it.
+
+**Proposed guard (deterministic, post-response, mirrors the D1 override-saturation
+alarm's shape):** for each per-ticker figure the report cites, require a named
+snapshot path, and assert the cited ticker is actually present in that block. A
+ticker absent from the source block must never receive a value from it. Fire a
+blocking Data Integrity Warning on violation rather than silently correcting.
+
+**Design questions to settle before building** (this is NOT a small task, which is
+why it is its own entry rather than a line in #98): how a figure is bound to its
+path without making the prompt unusably verbose; whether the check runs over the
+markdown (fragile, regex-shaped) or over a structured `cited_figures[]` block the
+model must emit alongside the report (cleaner, but a new contract the model has to
+honor and can silently under-populate); and whether the second half — contradiction
+detection between two figures for one ticker within a report — is separable from
+the first. Recommend starting with the citation-binding half only; the
+contradiction check is the harder problem and benefits from having the bindings
+already in place.
 
 ### 88. G-4 decision gate — wire the leading inflation bridge to govern when realized core is stale (HIGH — architecture decision, blocking, cross-refs the 2026-09-02 reference-degeneracy cycle)
 From the 2026-09-02 reference-degeneracy cycle (`fix/20260902-reference-degeneracy`,
