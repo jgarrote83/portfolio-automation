@@ -28,8 +28,6 @@ from shared.overrides import OVERRIDE_DEFAULTS, validate_overrides
 from shared.quadrants import (
     CORE_ROSTER,
     EXEMPT_HOLDS,
-    active_quadrant,
-    benchmark_etf_for,
     concentrate_names,
     quadrant_allocation_bucket,
 )
@@ -1419,17 +1417,16 @@ def _write_trade_history(date_str: str, trades_obj: dict, snapshot: dict | None 
     quadrant_projected_6m = trades_obj.get("quadrant_projected_6m") or ""
     risk_score = trades_obj.get("risk_score")
 
-    # Entry metadata for the conviction-sleeve flex review (computed here, NOT
-    # taken from the LLM): the active quadrant at entry, its representative sleeve
-    # ETF, and the snapshot entry price. Persisted write-once on a flex BUY so the
-    # collector's `_build_flex_review` can score the name against its benchmarks.
+    # Entry metadata for the flex review (computed here, NOT taken from the LLM):
+    # the snapshot entry price, persisted write-once on a flex BUY.
+    #
+    # Session 2026-09-12 (B1/R1): `entry_quadrant` / `flex_benchmark_etf` are no
+    # longer stamped. Regime is removed from the flex sleeve entirely, and the
+    # review's opportunity-cost benchmark is re-pointed to SPY (G3 re-pointed,
+    # not deleted — see collector `_classify_flex_review`). Historical rows keep
+    # their stamped values; nothing reads them any more.
     snap = snapshot or {}
     prices = snap.get("prices") or {}
-    entry_quadrant = active_quadrant(
-        (snap.get("growth_axis") or {}).get("direction"),
-        (snap.get("inflation_axis") or {}).get("direction"),
-    )
-    entry_bench_etf = benchmark_etf_for(entry_quadrant)
 
     def _entry_price(symbol: str) -> float | None:
         row = prices.get(symbol) or {}
@@ -1472,11 +1469,9 @@ def _write_trade_history(date_str: str, trades_obj: dict, snapshot: dict | None 
                 "risk_score":           risk_score,
             }
             if is_flex_buy:
-                # Conviction-sleeve entry metadata (write-once on the flex BUY).
+                # Flex entry metadata (write-once on the flex BUY).
                 entity["entry_date"] = date_str
                 entity["entry_price"] = _entry_price(t.get("symbol", ""))
-                entity["entry_quadrant"] = entry_quadrant
-                entity["flex_benchmark_etf"] = entry_bench_etf
             upsert_entity("TradeHistory", entity)
         except Exception as e:  # noqa: BLE001
             logger.error("TradeHistory upsert failed for %s: %s", trade_id, e)

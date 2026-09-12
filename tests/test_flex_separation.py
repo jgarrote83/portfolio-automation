@@ -21,7 +21,7 @@ from flex.config import FlexConfig  # noqa: E402
 from flex.entry import build_flex_entry  # noqa: E402
 from flex.exit_state import build_flex_exit_state  # noqa: E402
 from flex.handler import _enums, _flex_nominations  # noqa: E402
-from flex.regime import FLEX_REENTERABLE, flex_separation_set  # noqa: E402
+from flex.separation import FLEX_REENTERABLE, flex_separation_set  # noqa: E402
 
 # Intraday/flex-only concepts; must NEVER appear in a core weight change.
 _INTRADAY_FIELDS = {"vwap", "vwap_slope", "atr14", "gap_in_adr", "stop_price", "size_shares"}
@@ -103,7 +103,7 @@ def test_flex_entry_carries_intraday_not_core_fields():
     e = build_flex_entry(
         {"symbol": "NVDA", "sector": "Technology"},
         _intraday([100, 100.5, 101, 101.5, 102, 102.5, 103]), _daily(),
-        "Q1", 1_000_000.0, 45, FlexConfig(),
+        1_000_000.0, 45, FlexConfig(),
     )
     keys = set(e)
     assert _INTRADAY_FIELDS <= keys

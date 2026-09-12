@@ -180,7 +180,7 @@ XSD, PPA, EUAD are **held names being wound down** (the AMZN/GOOGL exempt-hold d
 retired — QQQ retains the mega-cap exposure at index weight). Their reference target is **0**;
 you liquidate them in tranches (see "Execute toward the reference"), and the validator
 **allows a legacy name to be sold to zero** (floor bypassed) but **rejects any buy** of one
-("legacy exit — core re-entry prohibited"). **INTC/MCK/PPA/EUAD have core re-entry prohibited but are flex-nominatable while flat** — they are seeded in the static `flex_candidates` list and may re-enter as flex catalyst theses, subject to regime fit and the gatekeeper like any other flex candidate. AMZN/GOOGL/DBA/TIP/XSD are not re-enterable (neither core nor flex).
+("legacy exit — core re-entry prohibited"). **INTC/MCK/PPA/EUAD have core re-entry prohibited but are flex-nominatable while flat** — they are seeded in the static `flex_candidates` list and may re-enter as flex theses, subject to the gatekeeper like any other flex candidate (regime fit is no longer checked — removed 2026-09-12). AMZN/GOOGL/DBA/TIP/XSD are not re-enterable (neither core nor flex).
 
 **Intl pool unwinds (distinct from legacy exits — never label these `[LEGACY EXIT]`):** a
 held pool member that is not its role's `selected` incumbent (nor, for `intl_leader`, the
@@ -261,7 +261,10 @@ the closed gate that day.)*
 
 #### The Separation Contract (do not blend the two engines)
 
-The **only** thing Flex shares with Core is the **active quadrant** (regime fit).
+The **only** thing Flex shares with Core is the **separation set**
+(`flex_separation_set` — Core already governs that ticker, so Flex must not touch
+it). That is book-collision prevention, NOT a regime opinion. Regime was removed
+from the flex sleeve entirely on 2026-09-12 (B1/R1): no quadrant, no regime fit.
 Everything else is separate:
 
 - **Core** = the role-based all-weather book, weight-only, governed by the quadrant
@@ -307,37 +310,20 @@ For each catalyst idea, emit one `flex_nominations[]` entry. A good nomination:
    the earnings leg specifically — cite whatever dated catalyst it does have
    (contract milestone, legislative date, thematic inflection). Absence of an
    earnings date must never be treated as a defect; see `catalyst_score` below.
-2. **States regime fit as CONTEXT, not a gate (demoted session 2026-08-10 —
-   regime_fit is no longer a hard veto in the engine, `src/flex/entry.py`).** A
-   monthly-vintage macro quadrant has no business vetoing a 5-day catalyst trade —
-   cadence mismatch. Still name the candidate's `sector` and `flex_quadrant.resolved`
-   (the collector's resolved quadrant: pinned axes → `active`; **borderline** 2-quadrant
-   `favored_bucket` → the member with the better trailing 5-day benchmark return,
-   `basis: "borderline_5d_tiebreak"`), and say whether it fits per the map below — but
-   a mismatch is a WEAKER thesis, not a disqualified one. Weigh it alongside the other
-   `catalyst_score` components (next item): a strong dated catalyst with weak regime
-   fit can still be a good nomination; a weak catalyst leaning entirely on regime fit
-   is not. `flex_quadrant.resolved == ""` (`basis: "unresolved"`) means no regime read
-   at all — treat regime fit as UNKNOWN for that name (neither a plus nor a minus),
-   never as a mismatch.
+2. **Regime plays NO part in a flex nomination (removed entirely, session
+   2026-09-12, B1/R1).** There is no quadrant, no `flex_quadrant` block, no
+   sector→quadrant map, and no regime-fit reading anywhere in this sleeve. The
+   2026-08-10 demotion's own reasoning — *a monthly-vintage macro quadrant has no
+   business vetoing a multi-day trade, cadence mismatch* — is now applied in full.
+   **Never mention regime fit, quadrant fit, or a sector's quadrant when
+   nominating or declining a flex name.** A sector is descriptive colour only.
 
-   **The engine's sector→quadrant map (unchanged; still the source of truth — do not
-   free-associate a sector to a quadrant — the 2026-07-20 report wrongly put
-   "NEE/XLU … better in Q1/Q2 reflation"; utilities are Q3/Q4 defensives):**
-
-   | FMP `sector` | Fits quadrant(s) |
-   |---|---|
-   | Technology | Q1 |
-   | Communication Services | Q1 |
-   | Consumer Cyclical | Q1, Q2 |
-   | Industrials | Q2 |
-   | Financial Services | Q2 |
-   | Basic Materials | Q2, Q3 |
-   | Energy | Q2, Q3 |
-   | Utilities | Q3, Q4 |
-   | Consumer Defensive | Q3, Q4 |
-   | Healthcare | Q3, Q4 |
-   | Real Estate | Q4 |
+   What is NOT removed, and must never be conflated with regime: the
+   **separation set** (`flex_separation_set`, `flex_eligibility`). That is
+   book-collision prevention — Core already governs that ticker — and it is an
+   absolute gate that blocks every POOL member of every role, not just the
+   selected incumbent. Cite `flex_eligibility` for un-nominatability, never a
+   regime reason.
 3. **Clears a basic quality/liquidity screen** — a real, liquid, profitable name.
    The engine independently rejects anything below a minimum average dollar volume
    (thin names break the intraday VWAP read). If fundamentals/price are missing from
@@ -443,7 +429,7 @@ run, the collector screens a DISCOVERY universe (genuinely new names — never h
 never previously nominated — sourced from the market-wide earnings calendar
 `earnings_calendar_market` and market-wide congressional flow) and ranks it by a
 deterministic `catalyst_score`: the EQUAL-WEIGHTED mean of up to seven components
-(`earnings_proximity`, `news_recency`, `news_tone`, `momentum`, `regime_fit_score`,
+(`earnings_proximity`, `news_recency`, `news_tone`, `momentum`, `volume_surge`,
 `political_flow`, `relative_strength` — 60-day total-return excess vs SPY, added
 2026-08-14 after EUAD's +16-22pp 60d excess sat unused in `regional_rotation` for
 four straight sessions while feeding nothing into this ranking), each independently
@@ -457,15 +443,35 @@ report and is not the kind of individual-insider-conviction target the political
 signal measures. For a fund candidate (FMP's own `isEtf`/`isFund` profile booleans —
 `catalyst_screen.ledger[].basis.is_fund` — never a sector-string guess), these two
 are `components_not_applicable`, DISTINCT from `components_missing` (a component that
-COULD resolve but hasn't this session). Rankability is a DOUBLE-CLAUSE guard:
-`components_applicable >= 4` AND `components_available >= 4` — both required. Do not
-conflate the two counts: a candidate with only 2 structurally-possible components,
-both populated, is still NOT rankable (the applicable-count clause vetoes it
-independently of how fully its narrow set happens to be populated) — never read
-"components_missing is empty" alone as evidence of a well-covered candidate; check
-`components_applicable` too. The top-ranked rankable names are pre-merged into
-`flex_candidates` (`source: "screened"`, alongside the existing `"static"`/`"dynamic"`
-names) so they already carry a price and profile like any other candidate. Read
+COULD resolve but hasn't this session).
+
+**Rankability is a REQUIRED-COMPONENT SET, not a count (R2, session 2026-09-12).**
+A count treated every component as interchangeable, which is how a strategy meant to
+trade on NEWS ended up rankable on momentum and regime fit alone. A candidate is
+`rankable` only when ALL of:
+1. **`news_recency` is present** — this is a news strategy; no recent news, no thesis;
+2. **at least one price confirmation** (`momentum` or `volume_surge`) is present —
+   news with no tape response is a story, not a trade;
+3. at least `min_components_rankable` (3) components are available overall.
+
+`rankability_reason` names the FIRST unmet condition (`missing_required:news_recency`
+/ `missing_price_confirmation` / `insufficient_components:N<3`) — quote it verbatim
+when explaining why a name was not nominated; never guess at the cause.
+
+**`earnings_proximity` gates NOTHING.** It contributes to the score when a forward
+date exists and is otherwise simply absent. A catalyst is opportunistic — nothing in
+this sleeve waits for one, and a name must never be described as un-nominatable for
+lacking a dated catalyst.
+
+**Discovery universe = MOVERS ∩ RECENT NEWS (N1, session 2026-09-12).**
+`(most_active ∪ biggest_gainers)`, intersected with names having news inside
+`catalyst_screen.news_window_hours` (24), above `min_price_usd` ($5.00), above the ADV
+floor, minus held / separation-set / non-re-enterable-legacy / quarantined names. The
+previous universe (yesterday's earnings reporters ∪ congressional flow) could not
+nominate by construction: 88% of it died on the liquidity floor (OTC/foreign
+micro-caps) and the survivors lacked a fourth component. The top-ranked rankable names
+are pre-merged into `flex_candidates` (`source: "movers"`, alongside the existing
+`"static"`/`"dynamic"` names) so they already carry a price and profile like any other candidate. Read
 `catalyst_screen.ledger` for the full scored pool (including screened-out and thin-
 coverage names, each with its `screen_reason`, `components_missing`, and
 `components_not_applicable`) and `catalyst_screen.nominated` for the names that
@@ -487,7 +493,7 @@ reasoning enums (`primary_trigger`, `thesis_type` — typically `catalyst` —
 #### Reading flex_state — echo when reconciled; the paper account is canonical
 
 The engine merges its computed state back into the snapshot as `flex_state`: the
-quadrant it used, the per-name **entry** decision (`entry_trigger` /
+per-name **entry** decision (`entry_trigger` /
 `skip_reason` / `binding` / `size_shares`), and the per-name **exit** state
 (`next_action` / `r_multiple` / `trail_stop`). **When `flex_state.reconciliation.status`
 is `ok`, echo these numbers; never recompute or override them.** In the Portfolio
@@ -1225,8 +1231,9 @@ you are watching for it. Update each status every report; retire faded themes.
   inputs). Ask: which tier has demand visibility already knowable from Tier-1
   public capex but has not yet re-rated?
 - A theme-derived candidate enters the flex pipeline as a **`flex_nominations[]`
-  entry** (`flex_source: "thematic"`); the intraday engine confirms regime fit,
-  liquidity, and the VWAP/ATR entry before it gets capital. Themes at `crowded`
+  entry** (`flex_source: "thematic"`); the intraday engine confirms liquidity and
+  the VWAP/ATR entry before it gets capital (regime fit is NOT checked — removed
+  2026-09-12). Themes at `crowded`
   status may not generate nominations — only trim signals on existing exposure.
 - Cyclicality check: state where the candidate sits in its own industry cycle,
   not just in the theme (memory is a commodity with brutal down-cycles; buying
@@ -1621,7 +1628,6 @@ A single JSON snapshot for one trading day containing:
 - `labor_signals` — four-signal labor-market scorecard (jobless claims trend, payrolls momentum, unemployment + Sahm Rule, wages vs Fed funds), composite -8..+8 with label `labor_strong` / `neutral` / `labor_softening` / `labor_breaking`
 - `market_shock` — short-horizon shock detector: 1d/5d price moves (SPY/DXY/VIX) with z-scores + news keyword scan, composite `shock_level` 0-3 with `triggers` and `news_examples`
 - `growth_axis` — **pre-computed growth-direction read** (the quadrant growth axis): `direction` (`rising`/`falling`/`flat`/`indeterminate`) from the GDPNow current-quarter vintage trajectory (`gdpnow_trajectory`, oldest→newest), `confidence`, `basis`, `as_of` (the realtime **vintage** date of the newest vintage row used — GDPNow freshness is vintage recency, NOT the observation-quarter start), and `confirming` hard data. **Echo `direction` and `basis` VERBATIM as their literal enum values** (`basis` `within_quarter_vintages`/`prior_quarter_tail`/`cross_quarter_fallback`/`no_gdpnow_data`; confidence is fixed by basis — `prior_quarter_tail`⇒medium, `cross_quarter_fallback`⇒low — never invent "cross-quarter fallback" for a `prior_quarter_tail` read).
-- `flex_quadrant` — **the quadrant the FLEX engine treats as in force** (borderline 5-day benchmark tiebreak, D1): `resolved` (Q1-Q4 or `""`), `basis` (`active`/`borderline_5d_tiebreak`/`favored_single`/`unresolved`), `favored_bucket`, `benchmark_returns_5d` (per member `{etf, r5}`), `window_trading_days`. **Flex nominations must assert fit against `flex_quadrant.resolved`, not the raw axes** — see the Flex section. Core still reasons against the strict `active_quadrant`; this block governs the flex sleeve only.
 - `inflation_axis` — **pre-computed inflation-direction read**: `direction` from realized core (PCE-first) 3m-annualized vs YoY, with headline CPI + an oil-price-trend energy overlay (`oil_proxy_20d_pct` when `oil_trend_source == "USO_proxy"`, else `oil_wti_20d_pct`/`oil_brent_20d_pct`); breakevens secondary, with a non-binding `bridge_direction` for the gap between monthly prints — **always name the tenor from `bridge_basis`** (shortest-first: `breakeven_5y` → `breakeven_10y` → `breakeven_5y5y`; see the Inflation axis section). **Echo `direction`.**
 - `rate_decomposition` — **DESCRIBE-ONLY split of the 20d nominal-yield move into its real and inflation-expectation legs** (`DGS10 = DFII10 + T10YIE`): `nominal_delta_20d_bp`, `real_delta_20d_bp`, `breakeven_delta_20d_bp`, `real_share_pct`, `dominant_driver` (`real_rate`/`inflation`/`mixed`), `identity_residual_bp` + `identity_warning`, `note`. **Add one context line quoting `dominant_driver` and the three leg deltas whenever `available` is true** — a breakeven is a difference and cannot say which leg moved, and rising nominals with flat breakevens is a growth/policy shock, not an inflation one (it bears directly on duration ballast like TLT/IEF). **Wired to nothing — it must not drive a trade, a sizing call, or an override this cycle; cite it as context only.** `available: false` ⟹ say nothing about it. If `identity_warning` is true, surface it under the Data Integrity Warning heading with all three levels and their `as_of` dates.
 - `fomc_stance` — the RAW manually-maintained stance file (`config/fomc-stance.json`: `stance` + `as_of`), kept for reference. **The stance you must use is the resolved `policy_axis`.**
@@ -2214,8 +2220,8 @@ Then the numbered sections, in this order:
    consecutive days, no engagement with the record it had just filed.)*
 6. **Themes & flex pipeline** — the theme ledger (each active theme: status,
    tier where opportunity remains, signals being watched); the **flex nominations**
-   you are emitting this run in `flex_nominations[]` (candidate, dated catalyst,
-   asserted regime fit, source); and the **flex engine state** — echo each held flex
+   you are emitting this run in `flex_nominations[]` (candidate, catalyst if any,
+   source — never a regime-fit assertion); and the **flex engine state** — echo each held flex
    name's `next_action` from `flex_state` (hold / trailing / scaled-out / time-stop)
    and each evaluated nomination's `entry_trigger` / `skip_reason`. You do not size,
    stop, or exit flex names here — the engine does; you report what it computed.

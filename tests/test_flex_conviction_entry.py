@@ -27,11 +27,10 @@ def _intraday(closes, rng=0.2, v=1000):
     return [{"o": c, "h": c + rng / 2, "l": c - rng / 2, "c": c, "v": v} for c in closes]
 
 
-def _run(intraday, daily, invalidation=95.0, size_mult=1.0, sector="Technology",
-         quadrant="Q1", minutes=45, **kw):
+def _run(intraday, daily, invalidation=95.0, size_mult=1.0, sector="Technology", minutes=45, **kw):
     return build_conviction_entry(
         {"symbol": "AVGO", "sector": sector, "invalidation": invalidation},
-        intraday, daily, quadrant, EQUITY, minutes, CFG, size_mult, **kw,
+        intraday, daily, EQUITY, minutes, CFG, size_mult, **kw,
     )
 
 
@@ -113,7 +112,7 @@ def test_size_mult_zero_yields_zero_shares():
 def test_no_bars_skips():
     r = build_conviction_entry(
         {"symbol": "AVGO", "sector": "Technology", "invalidation": 95.0},
-        [], [], "Q1", EQUITY, 45, CFG, 1.0,
+        [], [], EQUITY, 45, CFG, 1.0,
     )
     assert r["skip_reason"] == "no_bars"
 
@@ -201,7 +200,7 @@ def test_KNOWN_LIMITATION_ladder_collapses_to_one_share_count_thin_literal_cash(
     for band, mult in bands.items():
         r = build_conviction_entry(
             {"symbol": "AVGO", "sector": "Technology", "invalidation": 96.0},
-            _intraday([100] * 7), _daily(), "Q1", equity, 45, CFG, mult,
+            _intraday([100] * 7), _daily(), equity, 45, CFG, mult,
             literal_cash_usd=literal_cash, sgov_usd=sgov,
         )
         results[band] = r["size_shares"]
@@ -216,7 +215,7 @@ def test_KNOWN_LIMITATION_ladder_collapses_to_one_share_count_thin_literal_cash(
     assert all(r["funding_clamped"] for r in (
         build_conviction_entry(
             {"symbol": "AVGO", "sector": "Technology", "invalidation": 96.0},
-            _intraday([100] * 7), _daily(), "Q1", equity, 45, CFG, mult,
+            _intraday([100] * 7), _daily(), equity, 45, CFG, mult,
             literal_cash_usd=literal_cash, sgov_usd=sgov,
         ) for mult in bands.values()
     ))

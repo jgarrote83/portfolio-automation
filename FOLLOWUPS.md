@@ -3,6 +3,24 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
+**▶ START HERE — last session 2026-09-12 (flex news-momentum rewrite, part B1 — branch `feat/20260912-flex-news-momentum-b1`).**
+Regime removed from the flex sleeve ENTIRELY (R1), rankability rewritten as a
+required-component set (R2), discovery universe replaced with movers ∩ recent
+news (N1). **The brief's causal weighting was backwards and the probe corrected
+it:** 88% of the old universe (66 of 75 across 09-09/10/11) died on the LIQUIDITY
+floor with zero components computed — OTC/foreign micro-caps — so N1 is the
+binding fix and R2 is cleanup. `FLEX_ENABLED` was `true` all along (the engine
+ran and found nothing enterable). Live acceptance probe: 96 movers → 7 discovered
+→ 7/7 rankable → 7 nominated (ORCL/AAPL/HPE/SMR/SPCX/F/NVDA), against zero in
+every reviewed session — and cheaper (17 FMP calls vs ~50). **Ships DRY**
+(`FLEX_ENABLED=false`) so the new universe is validated out-of-sample before the
+OLD exit profile can trade it. New entries **#104-#107**. (**#34 is NOT resolved** — the brief claimed the
+movers probe would resolve it, but #34 is the `global_overnight` tone block and
+needs INDEX/forex quotes, a different endpoint family; it is now partially
+answered, see the entry.)
+**B2 follows**: exit profile, native OCO brackets, all-day window,
+`per_name_cap_pct` 12→6, kill switch, at-close grading.
+
 **⚠ CORRECTION — entry #98 was WRONG and has been rewritten (2026-09-12).** It
 claimed `avg_dollar_volume` had a units bug and blocked `MIN_ADV_USD` tuning on
 that basis. A live FMP probe disproved it: ETN's real 20d ADV is **$723M**, the
@@ -715,6 +733,50 @@ than folded into a de-risk-classifier PR. Prefer the pool-based fix and decide
 explicitly whether "aggregate international weight" means the selected names or
 all held intl names — they are different questions and the current code answers
 neither correctly.
+
+### 104. Trailing-stop flex design SUPERSEDED for the entry path, retained and retrievable (LOW — record-keeping, cross-refs B2)
+`docs/specs/Flex_Trailing_Stop_v1.0.md` is superseded for the entry path by B2's
+fixed take-profit / fixed stop / native OCO bracket profile. **Do not delete it.**
+The trailing design may return if the fixed-target profile underperforms — that
+is a live possibility, not a formality: a fixed +2%/−1.5% pair caps the right
+tail, and a trailing stop exists precisely to let a winner run. If B2's realized
+expectancy (see #106) comes in positive but thin, "we capped our winners" is the
+first hypothesis to test, and this spec is where the prior design lives.
+
+### 105. `relative_strength` is a 60-DAY component inside a ~2-day strategy (LOW — likely noise, data-gated on #106)
+`catalyst_screen`'s `relative_strength` component measures 60-day total-return
+excess vs SPY. B2's hold is ~2 days. A 60-day relative-strength reading has
+almost no bearing on a 2-day news trade, so it is probably diluting the composite
+rather than informing it — it is kept for now only because it is FREE (already
+computed daily in `regional_rotation`) and because removing a component on
+reasoning alone is exactly the unfalsifiable-prior move FOLLOWUPS #23 forbids.
+**Revisit once graded outcome rows exist** (#106): if `relative_strength` shows
+no relationship to realized R-multiple across ≥20 closed trades, drop it. Note
+it is NOT one of the price-confirmation components (R2), so it can never make a
+candidate rankable on its own.
+
+### 106. `MIN_ADV_USD` tuning — UNBLOCKED and settled at $50M; do not revisit without new evidence (LOW — closed, recorded to prevent re-litigation)
+This entry existed to block ADV tuning pending a probe. **The probe ran
+(2026-09-12) and settled it: `avg_dollar_volume` is correct and $50M is correct.**
+ETN $723M / AAPL $13.5B / RH $116M / ANAB $25M (correctly failing). Decision gate
+G-4 is CLOSED — leave the floor alone. The 88% rejection rate that prompted the
+question was the floor working against a bad universe, which N1 fixed; the live
+probe's new universe produced ZERO `liquidity_below_min` rejections at the same
+$50M floor. Recorded rather than deleted so a future session does not re-open it
+from the original (wrong) premise — see #98 for the full correction.
+
+### 107. Is `confirm_sessions` hysteresis compatible with a ~2-day horizon at all? (MEDIUM — architecture decision, blocking for the flex-conviction path under B2)
+The flex-conviction path applies a per-symbol confirm/release hysteresis
+(`_confirm_flex_conviction_entry`, `FlexConvictionState`, `confirm_sessions`)
+inherited from the thematic overlay, where a multi-week horizon makes a
+2-session confirmation delay cheap. **Under B2's ~2-day hold that delay consumes
+most of the trade.** A signal confirmed on session 2 and released on session 4
+has a one-session window to act — and the collector's own one-session lag
+(`_build_flex_conviction` reads the PRIOR day's nominations) sits on top of that.
+Either the hysteresis is wrong for this horizon, or the conviction path is, and
+the question has never been asked directly. **Settle it before B2 relies on the
+conviction path**; the catalyst path (which B1's N1 universe feeds) has no such
+hysteresis and is unaffected. Cross-refs #70/#73/#74.
 
 ### 100. Wire the breakeven bridge to govern `inflation_axis.direction` when realized core is >45d stale — SEQUENCED AFTER the continuous-factor-tilt work (HIGH — architecture decision, blocking, cross-refs #88/G-4 and the 2026-09-12 breakeven-basis cycle)
 From the 2026-09-12 breakeven-basis cycle (`fix/20260912-breakeven-basis-rate-legs`),
@@ -2356,6 +2418,26 @@ flex names. A risk-tone instrument, not an alpha predictor — record this frami
   tone (hours, pre-open). Three cadences, three consumers; #34 never feeds the
   quadrant axes or the regional tilt — it feeds the flex layer and §2 market context
   only.
+- **ENDPOINT AVAILABILITY — PARTIALLY ANSWERED by live probe, 2026-09-12** (run
+  during the B1 flex cycle, which needed a different FMP endpoint family and so
+  had the key to hand). This is the "verify availability BEFORE implementation"
+  step below, done for the index/forex leg:
+
+  | input | symbol | Starter |
+  |---|---|---|
+  | Nikkei | `^N225` | **OK** (price + changePercentage) |
+  | STOXX 50 | `^STOXX50E` | **OK** |
+  | USD/JPY | `USDJPY` | **OK** |
+  | KOSPI | `^KS11` | **HTTP 402 Payment Required** — not on Starter |
+  | DAX | `^GDAXI` | **HTTP 402 Payment Required** — not on Starter |
+
+  So: Asia is covered by Nikkei alone (KOSPI drops, exactly as this entry
+  already anticipated — "KOSPI dropped if unavailable"); Europe is covered by
+  STOXX 50 alone (DAX drops — NEW information, this entry assumed both); the
+  carry-stress leg is fully available. **Still unverified: the US pre-market leg**
+  (SPY/QQQ pre-market via the Alpaca IEX feed) — a different provider, not
+  probed. Note the KOSPI loss weakens sub-point (c) specifically (the
+  KOSPI/Nikkei semis read-through becomes Nikkei-only).
 - **Inputs (verify availability BEFORE implementation; degrade gracefully):**
   US pre-market: SPY + QQQ pre-market last vs prior close via the Alpaca data API
   (IEX feed, 4:00 AM+ coverage) — preferred over futures (no CME data needed).

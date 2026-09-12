@@ -6,10 +6,16 @@ gates in order; the first failure short-circuits with a ``skip_reason`` and
 ``entry_trigger == "fail"``. Missing data never raises and never forces a
 trade.
 
-Pipeline: regime fit (computed + surfaced, INFORMATIONAL only as of session
-2026-08-10 — see ``regime_fit`` below) → liquidity (ADV) → entry window →
-gap-vs-ADR (raises the bar, never auto-skips) → VWAP hold + slope → ATR stop /
-max-stop / risk-budget sizing.
+Pipeline: liquidity (ADV) → entry window → gap-vs-ADR (raises the bar, never
+auto-skips) → VWAP hold + slope → ATR stop / max-stop / risk-budget sizing.
+
+**Regime is GONE from this module (session 2026-09-12, B1/R1).** It was demoted
+from a hard veto to an informational field on 2026-08-10 with the reasoning "a
+monthly-vintage macro quadrant has no business vetoing a 5-day catalyst trade —
+cadence mismatch". That argument was right and is now applied in full: the
+quadrant is not read, computed, or surfaced anywhere in the flex sleeve. What
+survives is ``flex/separation.py`` — book-collision prevention, never a regime
+opinion, and the two must never be conflated again.
 """
 from __future__ import annotations
 
@@ -26,7 +32,6 @@ from flex.indicators import (
     session_vwap,
     vwap_slope,
 )
-from flex.regime import regime_fit
 
 # For a big gap (already priced in), require price to hold this far above VWAP
 # (× ATR) before entering — the "stronger VWAP hold" that distinguishes
@@ -111,12 +116,10 @@ def build_flex_entry(
     candidate: dict,
     intraday_bars: list[dict],
     daily_bars: list[dict],
-    quadrant: str,
     equity: float,
     session_minutes_elapsed: int,
     cfg: FlexConfig,
     sleeve_room_usd: float | None = None,
-    quadrant_basis: str = "",
 ) -> dict:
     symbol = str(candidate.get("symbol") or "").upper()
     sector = candidate.get("sector")
@@ -124,9 +127,6 @@ def build_flex_entry(
     out: dict = {
         "symbol": symbol,
         "sector": sector,
-        "quadrant": quadrant,
-        "quadrant_basis": quadrant_basis,
-        "regime_fit": None,
         "adv_usd": None,
         "gap_pct": None,
         "gap_in_adr": None,
@@ -153,18 +153,6 @@ def build_flex_entry(
 
     if not intraday_bars or not daily_bars:
         return _skip("no_bars")
-
-    # Regime fit (the shared quadrant input) — DEMOTED from a hard entry veto to
-    # an informational field (session 2026-08-10, catalyst-sleeve-funnel Task E).
-    # A monthly-vintage macro quadrant has no business vetoing a 5-day catalyst
-    # trade — cadence mismatch. Still computed and still surfaced (the basis —
-    # active / borderline_5d_tiebreak / favored_single / unresolved — shows WHY a
-    # quadrant was or wasn't in force) so `flex_state` and the catalyst scorer can
-    # consume it, but a miss no longer short-circuits the pipeline; liquidity,
-    # window, VWAP, and sizing all still run. Preserves the D1 (2026-07-21) fix:
-    # an unresolved quadrant (`quadrant` falsy) still yields `regime_fit=False`
-    # here, but that no longer resurrects the old G1 freeze either.
-    out["regime_fit"] = regime_fit(sector, quadrant)
 
     # Liquidity screen — tied to IEX-VWAP validity.
     adv = avg_dollar_volume(daily_bars)
@@ -311,13 +299,11 @@ def build_conviction_entry(
     candidate: dict,
     intraday_bars: list[dict],
     daily_bars: list[dict],
-    quadrant: str,
     equity: float,
     session_minutes_elapsed: int,
     cfg: FlexConfig,
     size_mult: float,
     sleeve_room_usd: float | None = None,
-    quadrant_basis: str = "",
     literal_cash_usd: float | None = None,
     sgov_usd: float | None = None,
 ) -> dict:
@@ -351,10 +337,7 @@ def build_conviction_entry(
     out: dict = {
         "symbol": symbol,
         "sector": sector,
-        "quadrant": quadrant,
-        "quadrant_basis": quadrant_basis,
         "path": "conviction",
-        "regime_fit": None,
         "adv_usd": None,
         "vwap": None,
         "no_chase_limit": None,
@@ -379,8 +362,6 @@ def build_conviction_entry(
 
     if not intraday_bars or not daily_bars:
         return _skip("no_bars")
-
-    out["regime_fit"] = regime_fit(sector, quadrant)
 
     adv = avg_dollar_volume(daily_bars)
     out["adv_usd"] = adv
