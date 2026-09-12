@@ -259,7 +259,7 @@ def test_composite_drops_absent_components_from_mean():
         "news_recency": 1.0,
         "news_tone": 1.0,
         "momentum": 1.0,
-        "regime_fit_score": 1.0,
+        "volume_surge": 1.0,
         "political_flow": None,
         "relative_strength": None,
     }
@@ -276,7 +276,7 @@ def test_composite_below_min_coverage_is_not_rankable():
         "news_recency": None,
         "news_tone": None,
         "momentum": 1.0,
-        "regime_fit_score": 1.0,
+        "volume_surge": 1.0,
         "political_flow": 1.0,
     }
     cs = composite_score(comps)
@@ -287,7 +287,7 @@ def test_composite_below_min_coverage_is_not_rankable():
 def test_composite_all_absent_scores_none():
     comps = {k: None for k in (
         "earnings_proximity", "news_recency", "news_tone",
-        "momentum", "regime_fit_score", "political_flow",
+        "momentum", "volume_surge", "political_flow",
     )}
     cs = composite_score(comps)
     assert cs["score"] is None
@@ -310,7 +310,7 @@ def test_applicable_components_fund_excludes_earnings_and_political():
 def test_omitting_applicable_preserves_original_unconditional_behavior():
     comps = {
         "earnings_proximity": None, "news_recency": 1.0, "news_tone": 1.0,
-        "momentum": 1.0, "regime_fit_score": 1.0, "political_flow": None,
+        "momentum": 1.0, "volume_surge": 1.0, "political_flow": None,
         "relative_strength": None,
     }
     with_none = composite_score(comps, None)
@@ -323,7 +323,7 @@ def test_omitting_applicable_preserves_original_unconditional_behavior():
 def test_fund_candidate_classifies_earnings_and_political_as_not_applicable():
     comps = {
         "earnings_proximity": None, "news_recency": 1.0, "news_tone": 1.0,
-        "momentum": 1.0, "regime_fit_score": 1.0, "political_flow": None,
+        "momentum": 1.0, "volume_surge": 1.0, "political_flow": None,
         "relative_strength": 1.0,
     }
     cs = composite_score(comps, applicable_components(is_fund=True))
@@ -339,8 +339,8 @@ def test_double_clause_guard_vetoes_low_applicable_count_even_when_fully_populat
     # even conceptually possible, BOTH populated -- an available-only bar
     # (2 >= 2) would trivially pass. The applicable-count clause must
     # independently veto it regardless.
-    comps = {"momentum": 1.0, "regime_fit_score": 1.0}
-    cs = composite_score(comps, applicable=("momentum", "regime_fit_score"))
+    comps = {"momentum": 1.0, "volume_surge": 1.0}
+    cs = composite_score(comps, applicable=("momentum", "volume_surge"))
     assert cs["components_available"] == 2
     assert cs["components_applicable"] == 2
     assert cs["rankable"] is False   # vetoed despite 100% coverage of its applicable set
@@ -349,7 +349,7 @@ def test_double_clause_guard_vetoes_low_applicable_count_even_when_fully_populat
 def test_narrow_applicable_set_with_enough_populated_and_enough_applicable_passes():
     comps = {
         "news_recency": 1.0, "news_tone": 1.0, "momentum": 1.0,
-        "regime_fit_score": 1.0, "relative_strength": 1.0,
+        "volume_surge": 1.0, "relative_strength": 1.0,
     }
     applicable = applicable_components(is_fund=True)  # 5 applicable
     cs = composite_score(comps, applicable)
@@ -408,7 +408,7 @@ def test_no_earnings_date_but_strong_signal_outranks_weak_earnings_name():
         "news_recency": 1.0,
         "news_tone": 1.0,
         "momentum": 1.0,
-        "regime_fit_score": 1.0,
+        "volume_surge": 1.0,
         "political_flow": None,
     })
     has_earnings_weak = _candidate("WEAK", {
@@ -416,7 +416,7 @@ def test_no_earnings_date_but_strong_signal_outranks_weak_earnings_name():
         "news_recency": 0.1,
         "news_tone": None,
         "momentum": 0.1,
-        "regime_fit_score": 0.0,
+        "volume_surge": 0.0,
         "political_flow": None,
     })
     result = build_ranking_ledger([no_earnings_strong, has_earnings_weak], top_n=5)
@@ -435,7 +435,7 @@ def test_thin_coverage_never_nominated_regardless_of_score():
         "news_recency": 1.0,
         "news_tone": 1.0,
         "momentum": None,
-        "regime_fit_score": None,
+        "volume_surge": None,
         "political_flow": None,
     })
     well_covered = _candidate("COVERED", {
@@ -443,7 +443,7 @@ def test_thin_coverage_never_nominated_regardless_of_score():
         "news_recency": 0.5,
         "news_tone": 0.5,
         "momentum": 0.5,
-        "regime_fit_score": None,
+        "volume_surge": None,
         "political_flow": None,
     })
     result = build_ranking_ledger([thin_but_perfect, well_covered], top_n=5)
@@ -458,7 +458,7 @@ def test_thin_coverage_never_nominated_regardless_of_score():
 def test_hard_screen_failures_never_scored_or_nominated():
     held = _candidate("HELD", {
         "earnings_proximity": 1.0, "news_recency": 1.0, "news_tone": 1.0,
-        "momentum": 1.0, "regime_fit_score": 1.0, "political_flow": 1.0,
+        "momentum": 1.0, "volume_surge": 1.0, "political_flow": 1.0,
     }, screen_overrides={"held": True})
     result = build_ranking_ledger([held], top_n=5)
     row = result["ledger"][0]
@@ -472,11 +472,11 @@ def test_hard_screen_failures_never_scored_or_nominated():
 def test_ties_broken_by_components_available():
     fewer = _candidate("FEWER", {
         "earnings_proximity": 1.0, "news_recency": 1.0, "news_tone": 1.0,
-        "momentum": 1.0, "regime_fit_score": None, "political_flow": None,
+        "momentum": 1.0, "volume_surge": None, "political_flow": None,
     })
     more = _candidate("MORE", {
         "earnings_proximity": 1.0, "news_recency": 1.0, "news_tone": 1.0,
-        "momentum": 1.0, "regime_fit_score": 1.0, "political_flow": 1.0,
+        "momentum": 1.0, "volume_surge": 1.0, "political_flow": 1.0,
     })
     result = build_ranking_ledger([fewer, more], top_n=1)
     assert result["nominated"] == ["MORE"]
@@ -486,7 +486,7 @@ def test_top_n_cuts_the_rest():
     cands = [
         _candidate(f"S{i}", {
             "earnings_proximity": None, "news_recency": 1.0, "news_tone": None,
-            "momentum": 1.0, "regime_fit_score": 1.0, "political_flow": 1.0,
+            "momentum": 1.0, "volume_surge": 1.0, "political_flow": 1.0,
         })
         for i in range(5)
     ]

@@ -138,7 +138,7 @@ def test_split_response_no_watch_candidates_key_unchanged():
 # ---------------------------------------------------------------------------
 
 def test_flex_reenterable_contains_expected_names():
-    from flex.regime import FLEX_REENTERABLE
+    from flex.separation import FLEX_REENTERABLE
     assert "INTC" in FLEX_REENTERABLE
     assert "MCK" in FLEX_REENTERABLE
     assert "PPA" in FLEX_REENTERABLE
@@ -147,7 +147,7 @@ def test_flex_reenterable_contains_expected_names():
 
 def test_flex_separation_set_includes_core_roster_members(monkeypatch):
     """SOXX (semis pool member) must appear in the separation set when flat."""
-    from flex.regime import flex_separation_set
+    from flex.separation import flex_separation_set
     from shared.quadrants import CORE_ROSTER
     sep = flex_separation_set(set())
     # All CORE_ROSTER members should be separated (FLEX_REENTERABLE ones may be
@@ -159,7 +159,7 @@ def test_flex_separation_set_includes_core_roster_members(monkeypatch):
 
 def test_flex_separation_set_carves_out_flat_reenterable():
     """Flat FLEX_REENTERABLE names must NOT be in the separation set."""
-    from flex.regime import flex_separation_set, FLEX_REENTERABLE
+    from flex.separation import flex_separation_set, FLEX_REENTERABLE
     sep = flex_separation_set(set())   # nothing held
     for sym in FLEX_REENTERABLE:
         assert sym not in sep, f"Flat {sym} should be carved out of separation set"
@@ -167,7 +167,7 @@ def test_flex_separation_set_carves_out_flat_reenterable():
 
 def test_flex_separation_set_keeps_held_reenterable():
     """A held FLEX_REENTERABLE name IS in the separation set (separate via exclude)."""
-    from flex.regime import flex_separation_set
+    from flex.separation import flex_separation_set
     sep = flex_separation_set({"INTC"})
     assert "INTC" in sep
 
@@ -218,7 +218,7 @@ def test_dynamic_separation_set_member_dropped(tmp_path, monkeypatch):
     from shared.quadrants import CORE_ROSTER
     # SOXX should be in CORE_ROSTER (semis pool member); if it isn't for some reason,
     # fall back to any CORE_ROSTER member that's not FLEX_REENTERABLE
-    from flex.regime import FLEX_REENTERABLE
+    from flex.separation import FLEX_REENTERABLE
     test_sym = "SOXX"
     if test_sym not in CORE_ROSTER:
         test_sym = next(s for s in CORE_ROSTER if s not in FLEX_REENTERABLE)

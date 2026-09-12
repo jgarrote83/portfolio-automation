@@ -145,11 +145,17 @@ _FLEX_ELIGIBILITY_SENTINELS = (
 # split (missing_data vs not_applicable) + the double-clause rankability
 # guard, so "components_missing is empty" alone is never read as full
 # coverage for a fund with a structurally narrow applicable set.
+# R2 (2026-09-12): the DOUBLE-CLAUSE COUNT bar is replaced by a
+# required-component set. The applicable-vs-missing distinction survives intact
+# (it is a different, still-correct idea); the count sentinels are superseded.
 _APPLICABLE_SET_SENTINELS = (
     "components_not_applicable",
-    "components_applicable >= 4",
-    "components_available >= 4",
     "is_fund",
+    "REQUIRED-COMPONENT SET, not a count",
+    "`news_recency` is present",
+    "at least one price confirmation",
+    "rankability_reason",
+    "`earnings_proximity` gates NOTHING",
 )
 
 # PR #41 review round — M-A "also fix" (surface the clamped-but-nonzero cash-

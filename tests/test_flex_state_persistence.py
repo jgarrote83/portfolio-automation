@@ -35,8 +35,8 @@ def test_closed_tick_with_no_existing_file_skips_the_write(monkeypatch):
     monkeypatch.setattr(fh, "append_jsonl_blob", lambda *a, **k: None)
 
     decisions = {"entries": [], "exits": [], "reconcile": {}}
-    fh._persist("2026-08-12", decisions, quadrant="", ledger=_ledger(),
-                executions=[], quadrant_basis="market_closed")
+    fh._persist("2026-08-12", decisions, ledger=_ledger(),
+                executions=[], market_closed=True)
 
     flex_state_writes = [w for w in written if w[0] == "flex-state"]
     assert flex_state_writes == []
@@ -44,11 +44,11 @@ def test_closed_tick_with_no_existing_file_skips_the_write(monkeypatch):
 
 def test_closed_tick_with_existing_file_carries_entries_forward(monkeypatch):
     """A closed tick LATER in the day (or overnight) must preserve the last
-    real in-hours tick's entries/exits/quadrant/quadrant_basis, not overwrite
+    real in-hours tick's entries/exits, not overwrite
     them with the current (empty) closed-tick values."""
     real_entries = [{"symbol": "AVGO", "entry_trigger": "fail", "skip_reason": "vwap_not_rising"}]
     existing_blob = {
-        "as_of": "2026-08-11", "quadrant": "Q1", "quadrant_basis": "active",
+        "as_of": "2026-08-11", "some_prior_field": "preserved",
         "reconcile": {"repairs": []}, "exits": [], "entries": real_entries,
         "held": [],
     }
@@ -58,21 +58,23 @@ def test_closed_tick_with_existing_file_carries_entries_forward(monkeypatch):
     monkeypatch.setattr(fh, "append_jsonl_blob", lambda *a, **k: None)
 
     decisions = {"entries": [], "exits": [], "reconcile": {"repairs": ["x"]}}
-    fh._persist("2026-08-11", decisions, quadrant="", ledger=_ledger(),
-                executions=[], quadrant_basis="market_closed")
+    fh._persist("2026-08-11", decisions, ledger=_ledger(),
+                executions=[], market_closed=True)
 
     flex_state_writes = [w for w in written if w[0] == "flex-state"]
     assert len(flex_state_writes) == 1
     _, _, obj = flex_state_writes[0]
     assert obj["entries"] == real_entries          # carried forward, not erased
-    assert obj["quadrant"] == "Q1"                 # carried forward
-    assert obj["quadrant_basis"] == "active"        # carried forward
+    # R1 (2026-09-12): the two regime fields this used to assert are gone. An
+    # ARBITRARY prior key is the stronger probe anyway -- it pins that the
+    # `**existing` spread carries the whole blob forward, not a named allow-list.
+    assert obj["some_prior_field"] == "preserved"   # carried forward
     assert obj["reconcile"] == {"repairs": ["x"]}   # administrative field DOES refresh
     assert obj["held"] == sorted(_ledger().keys())  # administrative field DOES refresh
 
 
 def test_in_hours_tick_always_writes_its_own_real_evaluation(monkeypatch):
-    """An in-hours tick (quadrant_basis != 'market_closed') is unchanged --
+    """An in-hours tick (market_closed=False) is unchanged --
     it always writes its own real evaluation, never reads back or merges."""
     read_calls = []
     written = []
@@ -82,16 +84,16 @@ def test_in_hours_tick_always_writes_its_own_real_evaluation(monkeypatch):
 
     new_entries = [{"symbol": "AVGO", "entry_trigger": "pass"}]
     decisions = {"entries": new_entries, "exits": [], "reconcile": {}}
-    fh._persist("2026-08-11", decisions, quadrant="Q1", ledger=_ledger(),
-                executions=[], quadrant_basis="active")
+    fh._persist("2026-08-11", decisions, ledger=_ledger(),
+                executions=[], market_closed=False)
 
     assert read_calls == []   # never reads back on an in-hours tick
     flex_state_writes = [w for w in written if w[0] == "flex-state"]
     assert len(flex_state_writes) == 1
     _, _, obj = flex_state_writes[0]
     assert obj["entries"] == new_entries
-    assert obj["quadrant"] == "Q1"
-    assert obj["quadrant_basis"] == "active"
+    assert obj["exits"] == []
+    assert "quadrant" not in obj and "quadrant_basis" not in obj   # R1: regime gone
 
 
 def test_full_day_tick_sequence_ends_with_real_activity_intact(monkeypatch):
@@ -118,20 +120,19 @@ def test_full_day_tick_sequence_ends_with_real_activity_intact(monkeypatch):
     # Pre-market closed ticks (00:00 - 09:15 ET) -- file starts absent.
     for _ in range(3):
         fh._persist(today, {"entries": [], "exits": [], "reconcile": {}},
-                    quadrant="", ledger=ledger, executions=[], quadrant_basis="market_closed")
+                    ledger=ledger, executions=[], market_closed=True)
     assert (("flex-state", f"{today}.json")) not in store  # still absent
 
     # In-hours real evaluation tick (e.g. 10:00 ET) -- AVGO declines on VWAP.
     real_entries = [{"symbol": "AVGO", "entry_trigger": "fail", "skip_reason": "vwap_not_rising"}]
     fh._persist(today, {"entries": real_entries, "exits": [], "reconcile": {}},
-                quadrant="Q1", ledger=ledger, executions=[], quadrant_basis="active")
+                ledger=ledger, executions=[], market_closed=False)
 
     # Post-close closed ticks (16:00 ET onward, including the final tick of the day).
     for _ in range(5):
         fh._persist(today, {"entries": [], "exits": [], "reconcile": {}},
-                    quadrant="", ledger=ledger, executions=[], quadrant_basis="market_closed")
+                    ledger=ledger, executions=[], market_closed=True)
 
     final = store[("flex-state", f"{today}.json")]
     assert final["entries"] == real_entries
-    assert final["quadrant"] == "Q1"
-    assert final["quadrant_basis"] == "active"
+    assert "quadrant" not in final and "quadrant_basis" not in final   # R1: regime gone

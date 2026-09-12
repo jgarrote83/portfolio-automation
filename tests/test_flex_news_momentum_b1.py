@@ -1,0 +1,251 @@
+"""B1 (session 2026-09-12) — regime removal (R1), rankability rewrite (R2), and
+the movers discovery universe (N1).
+
+THE DROUGHT'S CAUSE, measured before any code was written. Live ledger,
+`daily-snapshots/2026-09-{09,10,11}.json`:
+
+    date    universe  liquidity_below_min  reached scoring
+    09-09      25         23 (92%)              2
+    09-10      25         21 (84%)              4
+    09-11      25         22 (88%)              3
+    TOTAL      75         66 (88.0%)            9 (12.0%)
+
+88% died on the LIQUIDITY floor before a single component was computed
+(`components_available: 0`), because the discovery universe was OTC/foreign
+micro-caps (IDWM, REBN, FANDF, HGRAF, SRTSF, ODMUF, GYYMF, MHPSY). The 12% that
+reached scoring got exactly 3 components against a bar of 4. So R2 (the
+component bar) is real but secondary; **N1 (the universe) is the binding fix** —
+the causal weighting in the original brief was backwards, corrected by probe.
+
+`avg_dollar_volume` and `MIN_ADV_USD = $50M` were BOTH verified correct by live
+probe (ETN $723M, AAPL $13.5B, RH $116M, ANAB $25M correctly failing) — the 88%
+rejection rate was the floor doing its job. See FOLLOWUPS #98.
+
+Run: PYTHONPATH=src pytest tests/test_flex_news_momentum_b1.py
+"""
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from collector import catalyst_screen  # noqa: E402
+from flex.entry import build_conviction_entry, build_flex_entry  # noqa: E402
+from flex.separation import FLEX_REENTERABLE, flex_separation_set  # noqa: E402
+
+NOW = "2026-09-12 14:00:00"
+
+
+# --- R1: regime is gone from the flex sleeve ---------------------------------
+
+def test_flex_regime_module_no_longer_exists():
+    """R1: `flex/regime.py` is deleted outright. `flex_separation_set` and
+    `FLEX_REENTERABLE` survive in `flex/separation.py` — book-collision
+    prevention was never a regime concept and must not be deleted with one."""
+    with pytest.raises(ModuleNotFoundError):
+        __import__("flex.regime")
+    assert FLEX_REENTERABLE == frozenset({"INTC", "MCK", "PPA", "EUAD"})
+    assert callable(flex_separation_set)
+
+
+def test_entry_builders_take_no_quadrant_argument():
+    """Pinned at the signature level so a future change cannot quietly
+    reintroduce a regime input to either entry profile."""
+    import inspect
+    for fn in (build_flex_entry, build_conviction_entry):
+        params = set(inspect.signature(fn).parameters)
+        assert "quadrant" not in params, fn.__name__
+        assert "quadrant_basis" not in params, fn.__name__
+
+
+def test_separation_set_is_pool_based_and_survives_intact():
+    """R1 explicitly preserves this: it blocks EVERY pool member, not just the
+    selected incumbent, which is also why it is immune to the auto-switch
+    staleness class that produced the 2026-09-12 de-risk classifier defect."""
+    from shared.quadrants import roles_config
+    sep = flex_separation_set(frozenset())
+    pool_members = {str(m).upper() for r in roles_config() for m in r.get("pool", ())}
+    assert pool_members <= sep, sorted(pool_members - sep)
+    # a flat re-enterable legacy name is NOT blocked; held, it is
+    assert "INTC" not in flex_separation_set(frozenset())
+    assert "INTC" in flex_separation_set(frozenset({"INTC"}))
+
+
+def test_regime_fit_score_is_gone_from_the_components():
+    assert "regime_fit_score" not in catalyst_screen.COMPONENTS
+    assert "volume_surge" in catalyst_screen.COMPONENTS
+
+
+# --- R2: required-component rankability, not a bare count --------------------
+
+def test_news_recency_is_mandatory():
+    """This is a NEWS strategy. A candidate with no recent news has no thesis,
+    however well everything else scores — the exact failure the old count bar
+    allowed (rankable on momentum + regime fit alone)."""
+    ok, reason = catalyst_screen.rankability(
+        {"momentum": 1.0, "relative_strength": 1.0, "news_tone": 0.5, "volume_surge": 1.0},
+        catalyst_screen.COMPONENTS)
+    assert ok is False
+    assert reason == "missing_required:news_recency"
+
+
+def test_price_confirmation_is_mandatory():
+    """News with no tape response is a story, not a trade. Either momentum or
+    volume_surge satisfies it — they are alternatives, not both required."""
+    base = {"news_recency": 0.9, "news_tone": 0.5, "political_flow": 0.4}
+    ok, reason = catalyst_screen.rankability(base, catalyst_screen.COMPONENTS)
+    assert (ok, reason) == (False, "missing_price_confirmation")
+    assert catalyst_screen.rankability({**base, "momentum": 0.6}, catalyst_screen.COMPONENTS)[0]
+    assert catalyst_screen.rankability({**base, "volume_surge": 0.6}, catalyst_screen.COMPONENTS)[0]
+
+
+def test_earnings_proximity_never_gates_rankability():
+    """R2's core: the old universe (yesterday's reporters) could never satisfy a
+    14-day FORWARD earnings window, so requiring it was unsatisfiable by
+    construction. A catalyst is now purely opportunistic."""
+    comps = {"news_recency": 0.9, "momentum": 0.6, "news_tone": 0.5}
+    ok_without, _ = catalyst_screen.rankability(comps, catalyst_screen.COMPONENTS)
+    ok_with, _ = catalyst_screen.rankability(
+        {**comps, "earnings_proximity": 1.0}, catalyst_screen.COMPONENTS)
+    assert ok_without is True and ok_with is True
+    # ...and it still CONTRIBUTES to the score when present.
+    assert (catalyst_screen.composite_score({**comps, "earnings_proximity": 1.0})["score"]
+            > catalyst_screen.composite_score(comps)["score"])
+
+
+def test_insufficient_components_still_vetoes():
+    """The "mostly unmeasured" guard survives the rewrite, at 3."""
+    ok, reason = catalyst_screen.rankability(
+        {"news_recency": 0.9, "momentum": 0.6}, catalyst_screen.COMPONENTS)
+    assert ok is False and reason.startswith("insufficient_components:2<3")
+
+
+def test_a_required_component_that_is_not_applicable_cannot_be_required():
+    """If `news_recency` were ever made non-applicable for some instrument,
+    requiring it would be the 'judged against a bar it can never structurally
+    clear' failure `applicable_components` exists to prevent."""
+    applicable = tuple(c for c in catalyst_screen.COMPONENTS if c != "news_recency")
+    ok, reason = catalyst_screen.rankability(
+        {"momentum": 1.0, "news_tone": 0.5, "relative_strength": 1.0}, applicable)
+    assert ok is True, reason
+
+
+def test_absent_vs_zero_is_unchanged():
+    """The load-bearing rule R2 must not disturb: an absent component drops OUT
+    of the mean, it is never averaged in as 0.0."""
+    two = catalyst_screen.composite_score(
+        {"news_recency": 1.0, "momentum": 1.0, "news_tone": None})
+    assert two["score"] == 1.0            # not 0.667
+    assert two["components_available"] == 2
+
+
+# --- N1: volume_surge -------------------------------------------------------
+
+def test_volume_surge_measures_todays_volume_against_its_own_trailing_average():
+    bars = [{"c": 10.0, "v": 1_000_000} for _ in range(20)] + [{"c": 10.0, "v": 3_000_000}]
+    assert catalyst_screen.volume_surge_from_bars(bars, 20) == 3.0
+    assert catalyst_screen.volume_surge_score(3.0, 3.0) == 1.0
+
+
+def test_volume_surge_is_one_sided():
+    """Below-average volume is the ABSENCE of a surge, not a negative signal —
+    deliberately unlike momentum's symmetric clamp."""
+    assert catalyst_screen.volume_surge_score(1.0, 3.0) == 0.0
+    assert catalyst_screen.volume_surge_score(0.2, 3.0) == 0.0
+    assert catalyst_screen.volume_surge_score(2.0, 3.0) == 0.5
+
+
+def test_volume_surge_absent_on_thin_history_never_fabricates_average():
+    assert catalyst_screen.volume_surge_from_bars([{"c": 1.0, "v": 5}] * 5, 20) is None
+    assert catalyst_screen.volume_surge_from_bars([{"c": 1.0, "v": 0}] * 25, 20) is None
+    assert catalyst_screen.volume_surge_score(None) is None
+
+
+# --- N1: hours-based news recency -------------------------------------------
+
+def test_news_recency_is_measured_in_hours():
+    """A 7-DAY lookback on a sleeve that holds ~2 days scored a 6-day-old
+    headline at 0.14 and counted it as "news"."""
+    items = [{"publishedDate": "2026-09-12 08:00:00"}]
+    hrs = catalyst_screen.hours_since_latest_news(items, NOW)
+    assert hrs == 6.0
+    assert catalyst_screen.news_recency_score(hrs, 24) == 0.75
+    assert catalyst_screen.news_recency_score(30.0, 24) is None   # past the window
+
+
+def test_date_only_timestamp_reads_as_midnight_never_fabricates_freshness():
+    items = [{"publishedDate": "2026-09-12"}]
+    assert catalyst_screen.hours_since_latest_news(items, NOW) == 14.0
+
+
+# --- N1: the movers discovery universe --------------------------------------
+
+def _rows(*specs):
+    return [{"symbol": s, "price": p} for s, p in specs]
+
+
+def test_movers_universe_requires_recent_news():
+    """The news intersection is the POINT, not a filter: a mover with no recent
+    news is a price move without a reason."""
+    rows = _rows(("AAA", 50.0), ("BBB", 50.0))
+    news = {"AAA": [{"publishedDate": "2026-09-12 12:00:00"}]}
+    syms, dropped = catalyst_screen.movers_discovery_symbols(
+        rows, news, NOW, set(), 25, 24, 5.0)
+    assert syms == ["AAA"]
+    assert dropped["BBB"] == "no_recent_news"
+
+
+def test_movers_universe_applies_the_price_floor():
+    """G-7: the live mover union is ~19% sub-$1 and ~42% sub-$5 — a
+    pump-and-dump surface the ADV floor alone does not defend, since a $1 stock
+    can trade $50M on the day it is being promoted."""
+    rows = _rows(("PENNY", 0.65), ("REAL", 50.0))
+    news = {"PENNY": [{"publishedDate": NOW}], "REAL": [{"publishedDate": NOW}]}
+    syms, dropped = catalyst_screen.movers_discovery_symbols(
+        rows, news, NOW, set(), 25, 24, 5.0)
+    assert syms == ["REAL"]
+    assert dropped["PENNY"] == "below_min_price"
+
+
+def test_movers_universe_respects_exclusions_and_cap():
+    rows = _rows(("AAA", 50.0), ("BBB", 50.0), ("CCC", 50.0))
+    news = {s: [{"publishedDate": NOW}] for s in ("AAA", "BBB", "CCC")}
+    syms, _ = catalyst_screen.movers_discovery_symbols(
+        rows, news, NOW, {"AAA"}, 25, 24, 5.0)
+    assert syms == ["BBB", "CCC"]
+    capped, _ = catalyst_screen.movers_discovery_symbols(
+        rows, news, NOW, set(), 2, 24, 5.0)
+    assert len(capped) == 2
+
+
+def test_movers_universe_never_admits_a_separation_set_member():
+    """SPY/TLT/XLF are routinely in the live mover list and are core pool
+    members. The separation set is an absolute gate and survives N1 intact."""
+    sep = flex_separation_set(frozenset())
+    blocked = sorted(sep)[:3]
+    rows = _rows(*[(s, 100.0) for s in blocked], ("NEWNAME", 100.0))
+    news = {s: [{"publishedDate": NOW}] for s in blocked + ["NEWNAME"]}
+    syms, _ = catalyst_screen.movers_discovery_symbols(
+        rows, news, NOW, sep, 25, 24, 5.0)
+    assert syms == ["NEWNAME"]
+
+
+def test_end_to_end_a_real_shaped_mover_is_nominatable():
+    """The whole point of B1: a liquid, newsy mover must now reach `rankable`.
+    Mirrors the live probe (2026-09-12), which took a 96-name mover union to 7
+    discovered, 7/7 screened in, 7/7 rankable — ORCL/AAPL/HPE/SMR/SPCX/F/NVDA —
+    against 0 nominations in every session of the prior universe."""
+    comps = {
+        "news_recency": catalyst_screen.news_recency_score(6.0, 24),
+        "news_tone": catalyst_screen.news_tone_score(True, 2, 0),
+        "momentum": catalyst_screen.momentum_score(5.0),
+        "volume_surge": catalyst_screen.volume_surge_score(2.5, 3.0),
+        "earnings_proximity": None,      # no catalyst — must not matter
+        "political_flow": None,
+        "relative_strength": None,
+    }
+    cs = catalyst_screen.composite_score(comps)
+    assert cs["rankable"] is True
+    assert cs["rankability_reason"] is None
+    assert cs["components_available"] == 4

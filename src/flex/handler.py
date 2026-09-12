@@ -6,7 +6,7 @@ clock here). All decision logic lives in the pure modules (`reconcile`, `entry`,
 them in the mandatory order, issues idempotent orders, and persists state.
 
 Order of operations (mandatory): STEP 0 reconcile FIRST → clock gate → read
-quadrant + nominations → fetch bars → manage held names → enter (morning window
+nominations → fetch bars → manage held names → enter (morning window
 only) → persist flex-state / flex-decisions / flex-executions / ledger.
 
 ``dry_run=True`` computes and persists the would-do state but places no orders.
@@ -23,10 +23,9 @@ from flex.entry import build_conviction_entry, build_flex_entry
 from flex.exit_state import build_flex_exit_state
 from flex.ledger import new_entry, read_ledger, write_ledger
 from flex.reconcile import reconcile_ledger
-from flex.regime import flex_separation_set
+from flex.separation import flex_separation_set
 from shared.clients.alpaca import AlpacaClient
 from shared.keyvault import load_secrets
-from shared.quadrants import active_quadrant
 from shared.storage import (
     append_jsonl_blob,
     read_json_blob,
@@ -100,13 +99,14 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
         is_open = False
     if not is_open:
         decisions["orders_suppressed"].append({"reason": "market_closed"})
-        _persist(today, decisions, quadrant="", ledger=ledger, executions=executions,
-                 quadrant_basis="market_closed")
+        _persist(today, decisions, ledger=ledger, executions=executions,
+                 market_closed=True)
         return {"status": "closed", "date": today, "reconcile": decisions["reconcile"]}
 
-    # ── STEP 2 — quadrant (deterministic shared input) + nominations ─────────
+    # ── STEP 2 — nominations ─────────────────────────────────────────────────
+    # Regime removed entirely (session 2026-09-12, B1/R1): there is no quadrant
+    # to resolve, so this step is nominations only. See flex/entry.py's docstring.
     snapshot = read_json_blob("daily-snapshots", f"{today}.json") or {}
-    quadrant, quadrant_basis = _resolve_quadrant(snapshot)
     daytrade_syms = _daytrade_ledger_symbols()
     held_syms = frozenset(str(p.get("symbol") or "").upper() for p in positions if p.get("symbol"))
     nominations = _flex_nominations(read_trades(today), held_symbols=held_syms, exclude=daytrade_syms)
@@ -169,8 +169,8 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
         cand = {"symbol": sym, "sector": _sector_for(sym, snapshot, nom)}
         e = build_flex_entry(
             cand, minute_bars.get(sym, []), daily_bars.get(sym, []),
-            quadrant, equity, minutes if minutes is not None else -1, cfg,
-            sleeve_room_usd=sleeve_room, quadrant_basis=quadrant_basis,
+            equity, minutes if minutes is not None else -1, cfg,
+            sleeve_room_usd=sleeve_room,
         )
         decisions["entries"].append(e)
         if e["entry_trigger"] == "pass" and not dry_run:
@@ -197,9 +197,9 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
         }
         e = build_conviction_entry(
             cand, minute_bars.get(sym, []), daily_bars.get(sym, []),
-            quadrant, equity, minutes if minutes is not None else -1, cfg,
+            equity, minutes if minutes is not None else -1, cfg,
             size_mult=float(conv.get("applied_size_mult") or 0.0),
-            sleeve_room_usd=sleeve_room, quadrant_basis=quadrant_basis,
+            sleeve_room_usd=sleeve_room,
             literal_cash_usd=literal_cash_usd, sgov_usd=sgov_usd,
         )
         decisions["entries"].append(e)
@@ -225,10 +225,9 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
         flex_trades.upsert_equity_point(mark)
     except Exception:  # noqa: BLE001
         logger.exception("sleeve equity-mark write failed (non-fatal)")
-    _persist(today, decisions, quadrant=quadrant, ledger=ledger, executions=executions,
-             quadrant_basis=quadrant_basis)
+    _persist(today, decisions, ledger=ledger, executions=executions, market_closed=False)
     return {
-        "status": "ok", "date": today, "quadrant": quadrant, "quadrant_basis": quadrant_basis,
+        "status": "ok", "date": today,
         "held": len(ledger), "entries_evaluated": len(decisions["entries"]),
         "orders_issued": len(decisions["orders_issued"]),
     }
@@ -453,23 +452,6 @@ def _issued(decisions, executions, symbol, kind, order) -> None:
     }
     decisions["orders_issued"].append(rec)
     executions.append({**rec, "submitted_at": _now_utc_iso()})
-
-
-def _resolve_quadrant(snapshot: dict) -> tuple[str, str]:
-    """The quadrant in force for flex entries + its basis.
-
-    Prefers the collector's precomputed ``flex_quadrant`` block (which resolves a
-    borderline regime via the 5-day benchmark tiebreak — decision D1). Falls back
-    to the strict ``active_quadrant(axes)`` when the block is absent or malformed,
-    so old snapshots behave exactly as before (fail-closed, backward compatible)."""
-    fq = snapshot.get("flex_quadrant")
-    if isinstance(fq, dict) and fq.get("basis") and fq.get("resolved") is not None:
-        return str(fq.get("resolved") or ""), str(fq.get("basis") or "")
-    q = active_quadrant(
-        ((snapshot.get("growth_axis") or {}).get("direction")),
-        ((snapshot.get("inflation_axis") or {}).get("direction")),
-    )
-    return q, ("active" if q else "unresolved")
 
 
 def _flex_nominations(trades_doc, held_symbols: frozenset[str] = frozenset(),
@@ -806,7 +788,7 @@ def _symbols_notional(positions, symbols) -> float:
     return total
 
 
-def _persist(today, decisions, quadrant, ledger, executions, quadrant_basis: str = "") -> None:
+def _persist(today, decisions, ledger, executions, market_closed: bool = False) -> None:
     """Persist this tick's state, decisions log, and executions.
 
     2026-08-14 fix (flex-state stale-read incident): `flex-state/{date}.json`
@@ -834,13 +816,19 @@ def _persist(today, decisions, quadrant, ledger, executions, quadrant_basis: str
       collector's walkback falls through to the PRIOR trading day's file,
       which (by this same rule) correctly holds ITS last real activity.
     - On a market-closed tick, if today's file DOES already exist (a real
-      in-hours tick ran earlier today), carry its `entries`/`exits`/
-      `quadrant`/`quadrant_basis` forward untouched — only the administrative
+      in-hours tick ran earlier today), carry its `entries`/`exits`
+      forward untouched — only the administrative
       fields (`as_of`, `reconcile`, `held`) refresh every tick.
-    - An in-hours tick (`quadrant_basis != "market_closed"`) is unchanged:
-      always writes its own real evaluation.
+    - An in-hours tick (`market_closed is False`) is unchanged: always writes
+      its own real evaluation.
+
+    Session 2026-09-12 (B1/R1): the closed-tick sentinel was previously encoded
+    as `quadrant_basis == "market_closed"` — a regime-shaped field carrying a
+    non-regime meaning. Regime is gone from the sleeve, so the sentinel is now
+    an explicit `market_closed` flag; the PR #40 carry-forward behaviour above
+    is otherwise unchanged and still pinned by its own tests.
     """
-    if quadrant_basis == "market_closed":
+    if market_closed:
         try:
             existing = read_json_blob("flex-state", f"{today}.json")
         except Exception:  # noqa: BLE001
@@ -859,7 +847,7 @@ def _persist(today, decisions, quadrant, ledger, executions, quadrant_basis: str
         # else: no real tick has run yet today — deliberately skip the write.
     else:
         flex_state = {
-            "as_of": today, "quadrant": quadrant, "quadrant_basis": quadrant_basis,
+            "as_of": today,
             "reconcile": decisions.get("reconcile", {}),
             "exits": decisions.get("exits", []),
             "entries": decisions.get("entries", []),

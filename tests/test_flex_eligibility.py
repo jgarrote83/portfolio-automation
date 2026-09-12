@@ -18,7 +18,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from collector.handler import _build_flex_eligibility  # noqa: E402
-from flex.regime import FLEX_REENTERABLE, flex_separation_set  # noqa: E402
+from flex.separation import FLEX_REENTERABLE, flex_separation_set  # noqa: E402
 from shared.quadrants import LEGACY_EXITS, roles_config  # noqa: E402
 
 

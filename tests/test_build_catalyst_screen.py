@@ -39,7 +39,7 @@ def test_relative_strength_populates_when_close_history_available():
     result = _build_catalyst_screen(
         discovery=["ETF1"], profiles_by_symbol=profiles, bars_by_symbol=bars,
         earnings_market_rows=[], stock_news=[], congressional=[],
-        quadrant="Q2", quadrant_basis="active", held=set(), exclude=set(),
+        held=set(), exclude=set(),
         legacy_blocked=set(), min_adv_usd=50_000_000.0, today=TODAY, top_n=5,
         close_by_date=close_by_date,
     )
@@ -55,7 +55,7 @@ def test_fund_candidate_gets_earnings_and_political_marked_not_applicable():
     result = _build_catalyst_screen(
         discovery=["ETF1"], profiles_by_symbol=profiles, bars_by_symbol=bars,
         earnings_market_rows=[], stock_news=[], congressional=[],
-        quadrant="Q2", quadrant_basis="active", held=set(), exclude=set(),
+        held=set(), exclude=set(),
         legacy_blocked=set(), min_adv_usd=50_000_000.0, today=TODAY, top_n=5,
     )
     row = next(r for r in result["ledger"] if r["symbol"] == "ETF1")
@@ -70,7 +70,7 @@ def test_single_stock_candidate_has_no_not_applicable_components():
     result = _build_catalyst_screen(
         discovery=["NVDA"], profiles_by_symbol=profiles, bars_by_symbol=bars,
         earnings_market_rows=[], stock_news=[], congressional=[],
-        quadrant="Q1", quadrant_basis="active", held=set(), exclude=set(),
+        held=set(), exclude=set(),
         legacy_blocked=set(), min_adv_usd=50_000_000.0, today=TODAY, top_n=5,
     )
     row = next(r for r in result["ledger"] if r["symbol"] == "NVDA")
@@ -85,7 +85,7 @@ def test_isfund_field_alone_also_marks_not_applicable():
     result = _build_catalyst_screen(
         discovery=["MF1"], profiles_by_symbol=profiles, bars_by_symbol=bars,
         earnings_market_rows=[], stock_news=[], congressional=[],
-        quadrant="Q2", quadrant_basis="active", held=set(), exclude=set(),
+        held=set(), exclude=set(),
         legacy_blocked=set(), min_adv_usd=50_000_000.0, today=TODAY, top_n=5,
     )
     row = next(r for r in result["ledger"] if r["symbol"] == "MF1")
@@ -98,7 +98,7 @@ def test_relative_strength_absent_without_close_history():
     result = _build_catalyst_screen(
         discovery=["ETF1"], profiles_by_symbol=profiles, bars_by_symbol=bars,
         earnings_market_rows=[], stock_news=[], congressional=[],
-        quadrant="Q2", quadrant_basis="active", held=set(), exclude=set(),
+        held=set(), exclude=set(),
         legacy_blocked=set(), min_adv_usd=50_000_000.0, today=TODAY, top_n=5,
         # close_by_date omitted entirely -- must degrade gracefully, not crash.
     )
@@ -126,8 +126,6 @@ def test_strong_no_earnings_candidate_beats_weak_earnings_candidate():
         earnings_market_rows=earnings_rows,
         stock_news=stock_news,
         congressional=congressional,
-        quadrant="Q1",
-        quadrant_basis="active",
         held=set(),
         exclude=set(),
         legacy_blocked=set(),
@@ -140,11 +138,14 @@ def test_strong_no_earnings_candidate_beats_weak_earnings_candidate():
     weak_row = next(r for r in result["ledger"] if r["symbol"] == "WEAK")
     assert strong_row["screened_in"] is True
     assert strong_row["components"]["earnings_proximity"] is None  # no date at all
-    assert strong_row["components"]["regime_fit_score"] == 1.0    # Technology fits Q1
     assert weak_row["components"]["earnings_proximity"] == 1.0     # reports today
-    assert weak_row["components"]["regime_fit_score"] == 0.0       # Utilities doesn't fit Q1
-    # STRONG must not be handicapped for lacking a date it never had.
+    # R2 (2026-09-12): `earnings_proximity` is OPPORTUNISTIC. STRONG must not be
+    # handicapped for lacking a date it never had, and WEAK's date must not
+    # rescue an otherwise-weak name.
     assert strong_row["score"] >= weak_row["score"]
+    # ...and the date gates NOTHING: rankability turns on news + price
+    # confirmation, never on having a catalyst.
+    assert "earnings" not in (strong_row.get("rankability_reason") or "")
     assert "STRONG" in result["nominated"]
 
 
@@ -158,8 +159,6 @@ def test_held_and_excluded_symbols_are_hard_screened_out():
         earnings_market_rows=[],
         stock_news=[],
         congressional=[],
-        quadrant="Q1",
-        quadrant_basis="active",
         held={"HELDSYM"},
         exclude={"SEPSYM"},
         legacy_blocked=set(),
@@ -184,8 +183,6 @@ def test_below_liquidity_floor_screened_out():
         earnings_market_rows=[],
         stock_news=[],
         congressional=[],
-        quadrant="Q1",
-        quadrant_basis="active",
         held=set(),
         exclude=set(),
         legacy_blocked=set(),
@@ -206,8 +203,6 @@ def test_no_bars_at_all_screened_out_for_insufficient_history():
         earnings_market_rows=[],
         stock_news=[],
         congressional=[],
-        quadrant="Q1",
-        quadrant_basis="active",
         held=set(),
         exclude=set(),
         legacy_blocked=set(),
@@ -235,8 +230,6 @@ def test_political_flow_only_counts_purchase_rows():
         earnings_market_rows=[],
         stock_news=[],
         congressional=congressional,
-        quadrant="Q1",
-        quadrant_basis="active",
         held=set(),
         exclude=set(),
         legacy_blocked=set(),
@@ -248,7 +241,11 @@ def test_political_flow_only_counts_purchase_rows():
     assert row["basis"]["political_purchase_count"] == 2  # sale not counted
 
 
-def test_quadrant_and_basis_and_universe_echoed_in_block():
+def test_block_echoes_the_n1_r2_contract():
+    """R1/R2/N1 (2026-09-12): the block no longer echoes `quadrant`/
+    `quadrant_basis` (regime is gone), and DOES echo the rankability contract +
+    discovery screens — so a zero-nomination session is diagnosable from the
+    snapshot alone rather than by reading the source."""
     result = _build_catalyst_screen(
         discovery=[],
         profiles_by_symbol={},
@@ -256,8 +253,6 @@ def test_quadrant_and_basis_and_universe_echoed_in_block():
         earnings_market_rows=[],
         stock_news=[],
         congressional=[],
-        quadrant="Q3",
-        quadrant_basis="borderline_5d_tiebreak",
         held=set(),
         exclude=set(),
         legacy_blocked=set(),
@@ -265,9 +260,12 @@ def test_quadrant_and_basis_and_universe_echoed_in_block():
         today=TODAY,
         top_n=15,
     )
-    assert result["quadrant"] == "Q3"
-    assert result["quadrant_basis"] == "borderline_5d_tiebreak"
+    assert "quadrant" not in result and "quadrant_basis" not in result
     assert result["discovery_universe"] == []
     assert result["top_n"] == 15
     assert result["ledger"] == []
-    assert result["nominated"] == []
+    assert result["required_component"] == "news_recency"
+    assert set(result["price_confirmation_components"]) == {"momentum", "volume_surge"}
+    assert result["news_window_hours"] == 24
+    assert result["min_price_usd"] == 5.00
+    assert result["discovery_source"] == "movers"

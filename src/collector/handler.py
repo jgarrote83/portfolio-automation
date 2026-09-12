@@ -33,7 +33,6 @@ from shared.quadrants import (
     QUADRANT_BENCHMARK_ETF,
     QUADRANT_CONCENTRATE,
     active_quadrant,
-    benchmark_etf_for,
     concentrate_names,
     defensive_set,
     favored_bucket,
@@ -50,7 +49,7 @@ from shared.quadrants import (
 )
 from flex.config import load_flex_config
 from flex.indicators import avg_dollar_volume
-from flex.regime import FLEX_REENTERABLE, flex_separation_set, regime_fit_score, resolve_quadrant
+from flex.separation import FLEX_REENTERABLE, flex_separation_set
 from shared.reference_execution import (
     REFERENCE_EXECUTION_DEFAULTS,
     advance_settling_window,
@@ -322,6 +321,19 @@ _CATALYST_EARNINGS_HORIZON_DAYS = 14
 # get_stock_news article limit — bumped from the held-only default (30) now
 # that the symbol list is much larger (decision gate 3, PR body).
 _CATALYST_NEWS_LOOKBACK_DAYS = 7
+# N1 (2026-09-12) — the news window for the MOVERS discovery intersection AND
+# the `news_recency` component's own decay horizon, in HOURS. The old 7-CALENDAR-DAY
+# lookback paired a week-old headline (still scoring 0.14) with a sleeve that
+# holds ~2 days. Decision gate G-2: 24 proposed, not confirmed.
+_FLEX_NEWS_WINDOW_H = 24
+# N1 hard price screen (amendment G-7, proposed). The live mover union is ~19%
+# sub-$1 and ~42% sub-$5 — a pump-and-dump surface the ADV floor alone does not
+# defend ($1 x 50M shares clears a $50M floor on the day a name is promoted).
+_FLEX_MIN_PRICE_USD = 5.00
+# Trailing window + cap for the volume_surge component (N1): today's volume as a
+# multiple of its own trailing average. 3.0x or more scores a full 1.0.
+_CATALYST_VOLUME_WINDOW_D = 20
+_CATALYST_VOLUME_CAP_X = 3.0
 _STOCK_NEWS_LIMIT = 100
 # Trailing trading-day window + symmetric clamp for the momentum component.
 _CATALYST_MOMENTUM_WINDOW_D = 10
@@ -442,7 +454,7 @@ def _load_flex_candidates(
     Sanitization of dynamic names (each drop logged at INFO):
     - Uppercased; must match ``^[A-Z][A-Z0-9.\\-]{0,9}$``
     - Not currently held (in ``exclude``)
-    - Not in ``flex.regime.flex_separation_set(exclude)`` (core roster separation)
+    - Not in ``flex.separation.flex_separation_set(exclude)`` (core roster separation)
     - Not a ``LEGACY_EXITS`` name that is NOT ``FLEX_REENTERABLE``
     - Not already present (dedup)
 
@@ -451,7 +463,7 @@ def _load_flex_candidates(
     dynamic list is exactly the newest trades file's emission; re-emit a name to
     keep it in the funnel (A-G1 default: simplest, no stale ledger). See FOLLOWUPS #8 v2.
     """
-    from flex.regime import FLEX_REENTERABLE, flex_separation_set
+    from flex.separation import FLEX_REENTERABLE, flex_separation_set
 
     # --- Static seed ---------------------------------------------------------
     static_names: list[str] = []
@@ -1054,8 +1066,6 @@ def _build_catalyst_screen(
     earnings_market_rows: list[dict],
     stock_news: list[dict],
     congressional: list[dict],
-    quadrant: str,
-    quadrant_basis: str,
     held: set[str],
     exclude: set[str],
     legacy_blocked: set[str],
@@ -1063,18 +1073,22 @@ def _build_catalyst_screen(
     today: str,
     top_n: int,
     close_by_date: dict[str, dict[str, float]] | None = None,
+    now_iso: str | None = None,
 ) -> dict:
     """Task D (2026-08-10 catalyst-sleeve funnel, G3 fix) — scores the catalyst
     discovery universe and returns the `catalyst_screen` snapshot block.
 
     Everything passed in is ALREADY FETCHED (no I/O here) — this is the
     collector-side glue that shapes raw FMP/Quiver/Finnhub data into
-    `catalyst_screen`'s per-candidate input contract, mirroring
-    `_build_flex_quadrant`'s role for `flex.regime.resolve_quadrant`. The
+    `catalyst_screen`'s per-candidate input contract. The
     flex_candidates MERGE (appending to collector-local mutable lists, running
     the price-quarantine guard) has side effects and stays in `collect()` —
     this function only returns the block, it never mutates its inputs.
     """
+    # N1: `news_recency` is scored in HOURS now, so the screen needs a real
+    # timestamp. Defaults to midnight of `today` when the caller omits it — the
+    # conservative (older) reading, never fabricated freshness.
+    now_iso = now_iso or f"{today} 00:00:00"
     earnings_dates: dict[str, str] = {}
     for r in earnings_market_rows or ():
         sym = str(r.get("symbol") or "").upper()
@@ -1109,6 +1123,8 @@ def _build_catalyst_screen(
         items = news_by_symbol.get(sym) or []
         hits = catalyst_screen.keyword_hits(items, _CATALYST_TONE_KEYWORDS)
         raw_momentum = catalyst_screen.momentum_from_bars(bars, _CATALYST_MOMENTUM_WINDOW_D)
+        raw_volume_surge = catalyst_screen.volume_surge_from_bars(
+            bars, _CATALYST_VOLUME_WINDOW_D)
         raw_rel_strength = catalyst_screen.relative_strength_from_closes(
             close_by_date.get(sym) or {}, spy_closes, _CATALYST_RELATIVE_STRENGTH_WINDOW_D)
         # D-priority-4 (2026-08-14 flex-conviction-path cycle): FMP's own
@@ -1132,14 +1148,14 @@ def _build_catalyst_screen(
                 "earnings_proximity": catalyst_screen.earnings_proximity_score(
                     earnings_dates.get(sym), today, _CATALYST_EARNINGS_HORIZON_DAYS),
                 "news_recency": catalyst_screen.news_recency_score(
-                    catalyst_screen.days_since_latest_news(items, today),
-                    _CATALYST_NEWS_LOOKBACK_DAYS),
+                    catalyst_screen.hours_since_latest_news(items, now_iso),
+                    _FLEX_NEWS_WINDOW_H),
                 "news_tone": catalyst_screen.news_tone_score(
                     bool(items), hits["positive"], hits["negative"]),
                 "momentum": catalyst_screen.momentum_score(
                     raw_momentum, _CATALYST_MOMENTUM_CAP_PCT),
-                "regime_fit_score": regime_fit_score(
-                    profile.get("sector"), quadrant, quadrant_basis),
+                "volume_surge": catalyst_screen.volume_surge_score(
+                    raw_volume_surge, _CATALYST_VOLUME_CAP_X),
                 "political_flow": catalyst_screen.political_flow_score(
                     political_counts.get(sym, 0), _CATALYST_POLITICAL_CAP),
                 "relative_strength": catalyst_screen.relative_strength_score(
@@ -1157,20 +1173,24 @@ def _build_catalyst_screen(
                 "political_purchase_count": political_counts.get(sym, 0),
                 "momentum_raw_pct": raw_momentum,
                 "relative_strength_raw_pct": raw_rel_strength,
-                "quadrant": quadrant,
-                "quadrant_basis": quadrant_basis,
             },
         })
 
     result = catalyst_screen.build_ranking_ledger(candidates, top_n)
     return {
         "available": True,
-        "quadrant": quadrant,
-        "quadrant_basis": quadrant_basis,
         "discovery_universe": discovery,
         "discovery_cap": _CATALYST_DISCOVERY_CAP,
         "top_n": top_n,
         "min_components_rankable": _CATALYST_MIN_COMPONENTS,
+        # N1/R2 (2026-09-12) — the rankability contract and the discovery
+        # screens, echoed so a zero-nomination session is diagnosable from the
+        # snapshot alone rather than by reading the source.
+        "required_component": catalyst_screen.REQUIRED_COMPONENT,
+        "price_confirmation_components": list(catalyst_screen.PRICE_CONFIRMATION_COMPONENTS),
+        "news_window_hours": _FLEX_NEWS_WINDOW_H,
+        "min_price_usd": _FLEX_MIN_PRICE_USD,
+        "discovery_source": "movers",
         "ledger": result["ledger"],
         "nominated": result["nominated"],
     }
@@ -2768,23 +2788,40 @@ def run() -> None:
         | flex_separation_set(set(tickers))
         | (set(LEGACY_EXITS) - FLEX_REENTERABLE)
     )
-    _catalyst_discovery = catalyst_screen.discovery_symbols(
-        [r.get("symbol") for r in _earn_market_rows],
-        [(r.get("Ticker") or r.get("ticker") or "") for r in congressional],
-        _catalyst_exclude,
-        _CATALYST_DISCOVERY_CAP,
-    )
-    logger.info("Catalyst discovery universe (%d, cap=%d): %s",
-                len(_catalyst_discovery), _CATALYST_DISCOVERY_CAP, _catalyst_discovery)
+    # N1 (2026-09-12) — MOVERS discovery. Two market-wide calls (not per-symbol);
+    # endpoint availability verified live on Starter 2026-09-12 (FOLLOWUPS #34).
+    # Non-fatal: an endpoint failure degrades to an empty mover list, which
+    # yields an empty discovery set and a `available: True, nominated: []`
+    # catalyst_screen — never a lost snapshot.
+    _mover_rows: list[dict] = []
+    try:
+        _mover_rows = list(fmp.get_most_actives()) + list(fmp.get_biggest_gainers())
+    except Exception:  # noqa: BLE001
+        logger.exception("Movers fetch failed (non-fatal) — discovery will be empty")
 
-    # Task B (G2 fix): news for candidates, not just holdings. A single call
-    # regardless of symbol-list size (verified against the client — see
-    # scripts/probe_fmp_tier.py and tests/test_catalyst_news.py), so extending
-    # the list to held + flex candidates + the full discovery set costs nothing
-    # extra in call count; `limit` is bumped since far more symbols now compete
-    # for the same article pool (decision gate 3, PR body).
-    _news_symbols = list(dict.fromkeys(tickers + flex_candidate_tickers + _catalyst_discovery))
+    # The news intersection needs news BEFORE discovery can be cut, so news is
+    # fetched for the FULL mover union up front. Still ONE call regardless of
+    # symbol-list size (verified against the client — see
+    # scripts/probe_fmp_tier.py and tests/test_catalyst_news.py), so widening
+    # the list costs nothing in call count.
+    _mover_syms = [str((r or {}).get("symbol") or "").upper() for r in _mover_rows]
+    _news_symbols = list(dict.fromkeys(
+        tickers + flex_candidate_tickers + [x for x in _mover_syms if x]))
     stock_news         = fmp.get_stock_news(_news_symbols, limit=_STOCK_NEWS_LIMIT)
+    _news_by_sym = catalyst_screen.group_news_by_symbol(stock_news)
+    _catalyst_discovery, _discovery_dropped = catalyst_screen.movers_discovery_symbols(
+        _mover_rows, _news_by_sym, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        _catalyst_exclude, _CATALYST_DISCOVERY_CAP,
+        _FLEX_NEWS_WINDOW_H, _FLEX_MIN_PRICE_USD,
+    )
+    logger.info(
+        "Catalyst discovery (movers): %d mover rows -> %d discovered (cap=%d); "
+        "dropped: %d no_recent_news, %d below_min_price. Universe: %s",
+        len(_mover_rows), len(_catalyst_discovery), _CATALYST_DISCOVERY_CAP,
+        sum(1 for v in _discovery_dropped.values() if v == "no_recent_news"),
+        sum(1 for v in _discovery_dropped.values() if v == "below_min_price"),
+        _catalyst_discovery,
+    )
     etf_holdings: dict = {etf: fmp.get_etf_holdings(etf) for etf in _ETF_WATCHLIST}
     etf_country: dict  = {etf: fmp.get_etf_country_weights(etf) for etf in _ETF_WATCHLIST}
     etf_sector: dict   = {etf: fmp.get_etf_sector_weights(etf) for etf in _ETF_WATCHLIST}
@@ -3390,24 +3427,8 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Role selection build failed (non-fatal)")
 
-    # --- Flex quadrant (D1, 2026-07-21): borderline 5-day benchmark tiebreak so an
-    # indeterminate active_quadrant never freezes the flex sleeve. Reuses the closes
-    # cache the sleeve scorecard just populated (QQQ/XLI/GLD/TLT are pool members) —
-    # zero extra FMP calls. Non-fatal: on failure the engine falls back to strict axes.
-    flex_quadrant: dict = {}
-    try:
-        flex_quadrant = _build_flex_quadrant(growth_axis, inflation_axis, _sleeve_closes_cache)
-        logger.info(
-            "Flex quadrant: resolved=%s basis=%s bucket=%s",
-            flex_quadrant.get("resolved"), flex_quadrant.get("basis"),
-            flex_quadrant.get("favored_bucket"),
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("Flex quadrant build failed (non-fatal)")
-
     # --- Catalyst screen: score the discovery universe, rank, nominate ------
-    # Task D (G3 fix). Placed after flex_quadrant (needs its resolved quadrant +
-    # basis for the regime_fit_score component). Non-fatal — a failure here
+    # Task D (G3 fix). Non-fatal — a failure here
     # must never block the snapshot; on failure the funnel falls back to the
     # pre-existing static+dynamic flex_candidates only (unchanged behavior).
     catalyst_screen_block: dict = {"available": False}
@@ -3418,8 +3439,6 @@ def run() -> None:
     # on a catalyst-screen failure day.
     _flex_close_cache: dict[str, dict[str, float]] = {}
     try:
-        _cs_quadrant = flex_quadrant.get("resolved") or ""
-        _cs_basis = flex_quadrant.get("basis") or ""
         _flex_cfg = load_flex_config()
 
         # 2 FMP calls per discovery candidate (profile + historical price) — the
@@ -3482,16 +3501,18 @@ def run() -> None:
 
         catalyst_screen_block = _build_catalyst_screen(
             _catalyst_discovery, _cs_profiles, _cs_bars, _earn_market_rows,
-            stock_news, congressional, _cs_quadrant, _cs_basis,
+            stock_news, congressional,
             set(tickers), _catalyst_exclude, set(LEGACY_EXITS) - FLEX_REENTERABLE,
             _flex_cfg.min_adv_usd, today, _CATALYST_TOP_N,
             close_by_date=_flex_close_cache,
+            now_iso=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         )
         _cs_nominated = catalyst_screen_block["nominated"]
 
         # Feed the nominees into flex_candidates (Task D final step) — same
         # mechanism as the pre-existing static/dynamic merge, third provenance
-        # value "screened", so each name's origin stays auditable. Nominees are
+        # value "movers" (N1, 2026-09-12 — was "screened" when the universe was
+        # earnings+congressional), so each name's origin stays auditable. Nominees are
         # ALSO run through the existing price-quarantine guard (F7) for
         # consistency with every other flex candidate, and their already-fetched
         # latest close is merged into `prices` directly — `_build_price_universe`
@@ -3499,7 +3520,7 @@ def run() -> None:
         # no price entry at all this run.
         for _sym in _cs_nominated:
             _nom_profile = dict(_cs_profiles.get(_sym) or {"symbol": _sym})
-            _nom_profile["source"] = "screened"
+            _nom_profile["source"] = "movers"
             _nom_quar, _nom_quar_reason = _quarantine_flex_price(
                 _nom_profile, prices, _prior_prices, company_news, _quarantine_cfg)
             if _nom_quar:
@@ -3507,7 +3528,7 @@ def run() -> None:
                 _nom_profile["quarantine_reason"] = _nom_quar_reason
             flex_candidate_profiles.append(_nom_profile)
             flex_candidate_tickers.append(_sym)
-            _flex_provenance[_sym] = "screened"
+            _flex_provenance[_sym] = "movers"
             _nom_bars = _cs_bars.get(_sym) or []
             if _sym not in prices and _nom_bars:
                 _latest = _nom_bars[-1]  # ascending order — last is most recent
@@ -3910,7 +3931,6 @@ def run() -> None:
         "flex_eligibility": flex_eligibility,
         "flex_conviction": flex_conviction,
         "divergences": divergences,
-        "flex_quadrant": flex_quadrant,
         "flex_state": flex_state,
         "performance": performance,
         "quadrant_performance": quadrant_performance,
@@ -5972,59 +5992,6 @@ def _r5_from_closes(close_map: dict[str, float]) -> float | None:
     if not prior:
         return None
     return round((latest / prior - 1.0) * 100.0, 4)
-
-
-def _build_flex_quadrant(growth_axis: dict, inflation_axis: dict,
-                         closes_cache: dict[str, dict[str, float]] | None) -> dict:
-    """Deterministic resolution of the quadrant the FLEX engine treats as in force
-    (decision D1, 2026-07-21). An indeterminate ``active_quadrant`` must NOT freeze
-    the flex sleeve: when the favored bucket is a 2-quadrant union (e.g. Q3/Q4) it
-    resolves to the member with the better trailing 5-trading-day benchmark return.
-
-    Zero extra FMP calls: the four ``QUADRANT_BENCHMARK_ETF`` names (QQQ/XLI/GLD/TLT)
-    are all scorecard pool members, so their closes are already in ``closes_cache``
-    (the cache ``_sleeve_selection_metrics`` populated). A benchmark missing from the
-    cache → ``resolved: ""``, ``basis: "unresolved"`` (fail-closed). Non-fatal in the
-    caller. See ``flex.regime.resolve_quadrant`` for the resolution rules."""
-    g = (growth_axis or {}).get("direction")
-    i = (inflation_axis or {}).get("direction")
-    bucket = favored_bucket(g, i)
-    cache = closes_cache or {}
-
-    bench_returns_5d: dict[str, dict] = {}
-    bench_r5: dict[str, float] = {}
-    for q in bucket:
-        etf = benchmark_etf_for(q)
-        r5 = _r5_from_closes(cache.get(etf) or cache.get(etf.upper()) or {})
-        bench_returns_5d[q] = {"etf": etf, "r5": r5}
-        if r5 is not None:
-            bench_r5[q] = r5
-
-    resolved, basis = resolve_quadrant(g, i, bench_r5 or None)
-
-    if basis == "unresolved" and not bucket:
-        note = "No directional read (growth flat/unknown) — flex fails closed."
-    elif basis == "unresolved":
-        missing = [q for q in bucket if q not in bench_r5]
-        note = (f"Borderline {bucket} but the trailing {_FLEX_TIEBREAK_WINDOW_D}d "
-                f"benchmark return is unavailable for {missing or bucket} — "
-                "fail-closed, never guess.")
-    elif basis == "borderline_5d_tiebreak":
-        note = (f"Borderline {bucket}: resolved to {resolved} on the better trailing "
-                f"{_FLEX_TIEBREAK_WINDOW_D}d benchmark return.")
-    elif basis == "favored_single":
-        note = f"Single-quadrant favored bucket {bucket} → {resolved}."
-    else:
-        note = f"Both axes pinned → active quadrant {resolved}."
-
-    return {
-        "resolved": resolved,
-        "basis": basis,
-        "favored_bucket": bucket,
-        "benchmark_returns_5d": bench_returns_5d,
-        "window_trading_days": _FLEX_TIEBREAK_WINDOW_D,
-        "note": note,
-    }
 
 
 _AXIS_STATE_TABLE = "AxisDirectionState"
@@ -8892,8 +8859,8 @@ def _sleeve_selection_metrics(fmp: FMPClient, roles: list[dict],
     FMP call each) and reduce to {ticker: {r60, r120, r252, corr_bench_120d}}.
 
     ``cache`` (a ``{ticker: {date: close}}`` dict) may be passed by the caller so the
-    populated closes are reused downstream (e.g. ``_build_flex_quadrant``'s benchmark
-    5d returns) at zero extra FMP cost. Populated in place; own dict if omitted."""
+    populated closes are reused downstream at zero extra FMP cost. Populated in
+    place; own dict if omitted."""
     cache = cache if cache is not None else {}
 
     def _closes(t: str) -> dict[str, float]:
@@ -11224,18 +11191,31 @@ def _div_dollar_vs_intl(paper_account: dict, regional_rotation: dict, today: str
 def _classify_flex_review(
     *,
     days_held: int,
-    excess_vs_etf_pp: float,
     excess_vs_spy_pp: float,
     spy_return_since_entry_pct: float | None,
-    regime_fit_lost: bool,
     cfg: dict,
 ) -> dict:
-    """PURE classifier — the conviction-sleeve dual-benchmark review matrix.
+    """PURE classifier — the flex-sleeve performance review matrix.
 
-    Resolves `spy_direction` (DEADBAND_PP band) → the binding benchmark (SPY when
-    rising/flat, the active-quadrant ETF when falling), then the `review_status`.
-    AHEAD := excess >= LAG_TOL_PP (keeping pace, absorbs noise); BEHIND otherwise.
-    The LLM echoes the status; it computes none of these inputs.
+    **Single-benchmark (SPY) as of session 2026-09-12 (B1/R1).** This was a
+    DUAL-benchmark matrix: SPY bound in a rising/flat tape, and the
+    active-quadrant ETF bound in a drawdown ("SPY is a low bar a defensive name
+    clears just by falling less"). Both the quadrant-ETF leg and the
+    `regime_fit_lost` forced-cut depended on a macro quadrant, and regime is now
+    removed from the flex sleeve entirely. G3's opportunity-cost benchmark is
+    re-pointed to SPY rather than deleted: the system's mission is to beat SPY
+    total return, so SPY is the honest opportunity cost for a flex position, and
+    it carries no regime dependency.
+
+    Consequence, stated plainly: the drawdown carve-out is GONE. A flex name that
+    falls less than a falling SPY no longer earns an "ok" on that basis — it is
+    scored against SPY in every tape. That is a real tightening, and the right
+    one for a sleeve whose thesis is a multi-day move, not defensiveness.
+
+    `spy_direction` is still resolved (DEADBAND_PP) and still reported — it is
+    useful context for the narrative — but it no longer selects a benchmark.
+    AHEAD := excess >= LAG_TOL_PP (keeping pace, absorbs noise); BEHIND
+    otherwise. The LLM echoes the status; it computes none of these inputs.
     """
     review_days = cfg["REVIEW_DAYS"]
     lag = cfg["LAG_TOL_PP"]
@@ -11250,80 +11230,42 @@ def _classify_flex_review(
         spy_dir = "falling"
     else:
         spy_dir = "flat"
-    # SPY binds in a rising/flat tape (the mission is to beat a rising SPY); the
-    # quadrant ETF binds in a drawdown (SPY is a low bar a defensive name clears
-    # just by falling less — the honest test is value added over the sleeve).
-    binding = "etf" if spy_dir == "falling" else "spy"
 
     def _result(status: str, reason: str) -> dict:
         return {
             "review_status": status,
-            "binding_benchmark": binding,
+            "binding_benchmark": "spy",
             "spy_direction": spy_dir,
             "reason": reason,
         }
 
-    # Regime fit is the entry gate; if it is void the position has no thesis —
-    # cut regardless of performance or holding window.
-    if regime_fit_lost:
-        return _result("breaking", "regime fit lost — entry quadrant left the active quadrant")
     if days_held < review_days:
         return _result("ok", f"within holding window (<{review_days}d)")
-
-    ahead_etf = excess_vs_etf_pp >= lag
-    ahead_spy = excess_vs_spy_pp >= lag
-    binding_excess = excess_vs_spy_pp if binding == "spy" else excess_vs_etf_pp
-    binding_ahead = ahead_spy if binding == "spy" else ahead_etf
-
-    if ahead_etf and ahead_spy:
-        return _result("ok", "ahead of both SPY and the quadrant ETF")
-    if binding_ahead:
-        # ahead on the binding benchmark, behind on the non-binding one
-        if binding == "spy":
-            return _result(
-                "ok_flagged",
-                "mission met (ahead SPY) but lagging the quadrant ETF — selection "
-                "weak; a higher-conviction name should bump it",
-            )
-        return _result(
-            "ok",
-            "drawdown: beating the quadrant sleeve (SPY is a low bar while falling)",
-        )
-    # behind on the binding benchmark
-    if binding_excess < brk:
-        return _result(
-            "breaking",
-            f"lagging the binding benchmark ({binding}) by more than {brk}pp",
-        )
-    return _result(
-        "review_due",
-        f"lagging the binding benchmark ({binding}) within the break threshold",
-    )
+    if excess_vs_spy_pp >= lag:
+        return _result("ok", "ahead of SPY")
+    if excess_vs_spy_pp < brk:
+        return _result("breaking", f"lagging SPY by more than {brk}pp")
+    return _result("review_due", "lagging SPY within the break threshold")
 
 
 def _build_flex_review(
     fmp: FMPClient,
     paper_account: dict,
     trade_rows: list[dict],
-    growth_axis: dict,
-    inflation_axis: dict,
     cfg: dict,
     today: date | None = None,
 ) -> dict:
-    """Conviction-sleeve performance review for every HELD flex name.
+    """Flex-sleeve performance review for every HELD flex name.
 
-    Deterministic dual-benchmark scoring (vs SPY and the active-quadrant ETF the
-    name displaced). Reads write-once entry metadata from TradeHistory, computes
-    days_held / returns / excesses / spy_direction / binding benchmark / status,
-    and forces ``breaking`` if the regime moved away from the entry quadrant. The
-    analyzer ECHOES the status and writes only the narrative for ``review_due``.
-    Non-fatal: any name lacking entry/benchmark/return data → status ``unknown``.
+    Deterministic SPY-benchmarked scoring (session 2026-09-12, B1/R1 — the
+    active-quadrant ETF leg and the `regime_fit_lost` forced cut are gone with
+    regime; see `_classify_flex_review`). Reads write-once entry metadata from
+    TradeHistory, computes days_held / returns / excess vs SPY / spy_direction /
+    status. The analyzer ECHOES the status and writes only the narrative for
+    ``review_due``. Non-fatal: any name lacking entry/return data → status
+    ``unknown``.
     """
     today = today or date.today()
-    active_q = active_quadrant(
-        (growth_axis or {}).get("direction"),
-        (inflation_axis or {}).get("direction"),
-    )
 
     # Latest flex-BUY entry row per symbol (carries the write-once entry metadata).
     entry_by_sym: dict[str, dict] = {}
@@ -11361,15 +11303,12 @@ def _build_flex_review(
         entry_price = entry.get("entry_price")
         if entry_price in (None, ""):
             entry_price = entry.get("price_at_rec")  # fallback to the stamped rec price
-        entry_q = entry.get("entry_quadrant") or entry.get("quadrant_current") or ""
-        bench = entry.get("flex_benchmark_etf") or benchmark_etf_for(entry_q)
-
         def _unknown(missing: str) -> dict:
             return {
                 "symbol": sym,
                 "review_status": "unknown",
                 "entry_date": entry_date,
-                "benchmark_etf": bench or None,
+                "benchmark_etf": "SPY",
                 "missing": missing,
                 "note": f"flex review unavailable — missing {missing}; cannot score deterministically",
             }
@@ -11381,53 +11320,38 @@ def _build_flex_review(
         if not entry_date or entry_price is None:
             names.append(_unknown("entry_date/entry_price"))
             continue
-        if not bench:
-            names.append(_unknown("benchmark_etf"))
-            continue
 
-        sym_map, spy_map, bench_map = _series(sym), _series("SPY"), _series(bench)
+        sym_map, spy_map = _series(sym), _series("SPY")
         cur = _close_on_or_before(sym_map, today.isoformat())
         if cur is None:
             cur = float(pos.get("current_price") or 0) or None
         s0 = _close_on_or_before(spy_map, entry_date)
         sn = _close_on_or_before(spy_map, today.isoformat())
-        b0 = _close_on_or_before(bench_map, entry_date)
-        bn = _close_on_or_before(bench_map, today.isoformat())
-        if not all((cur, s0, sn, b0, bn)):
-            names.append(_unknown("price series (symbol/SPY/benchmark)"))
+        if not all((cur, s0, sn)):
+            names.append(_unknown("price series (symbol/SPY)"))
             continue
 
         ret = (cur / entry_price - 1.0) * 100.0
         spy_ret = (sn / s0 - 1.0) * 100.0
-        bench_ret = (bn / b0 - 1.0) * 100.0
         excess_spy = ret - spy_ret
-        excess_etf = ret - bench_ret
         days_held = (today - date.fromisoformat(str(entry_date)[:10])).days
-        regime_fit_lost = bool(active_q) and bool(entry_q) and active_q != entry_q
 
         verdict = _classify_flex_review(
             days_held=days_held,
-            excess_vs_etf_pp=excess_etf,
             excess_vs_spy_pp=excess_spy,
             spy_return_since_entry_pct=spy_ret,
-            regime_fit_lost=regime_fit_lost,
             cfg=cfg,
         )
         names.append({
             "symbol": sym,
             "entry_date": entry_date,
-            "entry_quadrant": entry_q or None,
-            "active_quadrant": active_q or None,
-            "benchmark_etf": bench,
+            "benchmark_etf": "SPY",
             "days_held": days_held,
             "return_since_entry_pct": round(ret, 3),
             "spy_return_since_entry_pct": round(spy_ret, 3),
-            "benchmark_return_since_entry_pct": round(bench_ret, 3),
             "excess_vs_spy_pp": round(excess_spy, 3),
-            "excess_vs_etf_pp": round(excess_etf, 3),
             "spy_direction": verdict["spy_direction"],
             "binding_benchmark": verdict["binding_benchmark"],
-            "regime_fit_lost": regime_fit_lost,
             "review_status": verdict["review_status"],
             "reason": verdict["reason"],
         })

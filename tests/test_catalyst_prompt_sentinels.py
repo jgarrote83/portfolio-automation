@@ -15,10 +15,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 _PROMPT = pathlib.Path(__file__).parent.parent / "src" / "config" / "project-instructions.md"
 
-# regime_fit is demoted from a hard veto to a scored/contextual input.
-_REGIME_DEMOTION_SENTINELS = (
+# R1 (2026-09-12): regime is REMOVED from the flex sleeve entirely -- the
+# 2026-08-10 demotion sentinels are superseded. The prompt must now say so
+# affirmatively, and must NOT carry the old demotion language (which would read
+# as "regime still participates, just weakly").
+_REGIME_REMOVAL_SENTINELS = (
+    "Regime plays NO part in a flex nomination",
+    "Never mention regime fit, quadrant fit, or a sector's quadrant",
+    "book-collision prevention",
+)
+_REGIME_FORBIDDEN = (
     "regime_fit is no longer a hard veto",
     "a mismatch is a WEAKER thesis, not a disqualified one",
+    "flex_quadrant.resolved",
+    "| Technology | Q1 |",          # the sector->quadrant map
 )
 
 # The catalyst_screen ranking contract the model reads but never computes.
@@ -27,7 +37,7 @@ _CATALYST_SCREEN_SENTINELS = (
     "you never compute this score, only read it",
     "catalyst_screen.ledger",
     "catalyst_screen.nominated",
-    "source: \"screened\"",
+    "source: \"movers\"",
 )
 
 # Absent-vs-zero doctrine must be explicit in the prompt, not just the code.
@@ -41,10 +51,19 @@ def _text() -> str:
     return _PROMPT.read_text(encoding="utf-8")
 
 
-def test_regime_fit_demotion_documented():
+def test_regime_removal_documented():
     text = _text()
-    for s in _REGIME_DEMOTION_SENTINELS:
-        assert s in text, f"missing regime-fit-demotion sentinel: {s!r}"
+    for s in _REGIME_REMOVAL_SENTINELS:
+        assert s in text, f"missing regime-removal sentinel: {s!r}"
+
+
+def test_no_residual_regime_fit_doctrine_in_the_flex_section():
+    """The old demotion language and the sector->quadrant map must be GONE, not
+    merely contradicted elsewhere — a prompt that says both is worse than one
+    that says the wrong thing consistently."""
+    text = _text()
+    for s in _REGIME_FORBIDDEN:
+        assert s not in text, f"residual regime doctrine still in the prompt: {s!r}"
 
 
 def test_catalyst_screen_contract_documented():

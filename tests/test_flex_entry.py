@@ -22,10 +22,10 @@ def _intraday(closes, rng=0.2, v=1000):
     return [{"o": c, "h": c + rng / 2, "l": c - rng / 2, "c": c, "v": v} for c in closes]
 
 
-def _run(intraday, daily, sector="Technology", quadrant="Q1", minutes=45):
+def _run(intraday, daily, sector="Technology", minutes=45):
     return build_flex_entry(
         {"symbol": "NVDA", "sector": sector},
-        intraday, daily, quadrant, EQUITY, minutes, CFG,
+        intraday, daily, EQUITY, minutes, CFG,
     )
 
 
@@ -60,17 +60,27 @@ def test_pre_window_and_after_cutoff():
     assert _run(bars, _daily(), minutes=120)["skip_reason"] == "after_cutoff"
 
 
-def test_regime_mismatch_reaches_sizing():
-    # Session 2026-08-10 (catalyst-sleeve-funnel Task E): regime_fit is demoted
-    # from a hard veto to an informational field. Utilities does not fit Q1, but
-    # with otherwise-clean structure (identical bars to the passing case above)
-    # the pipeline must reach sizing anyway — liquidity/window/VWAP/stop govern,
-    # not regime.
-    r = _run(_intraday([100, 100.5, 101, 101.5, 102, 102.5, 103]), _daily(), sector="Utilities")
-    assert r["regime_fit"] is False
-    assert r["entry_trigger"] == "pass"
-    assert r["skip_reason"] is None
-    assert r["size_shares"] >= 1
+def test_sector_never_gates_entry():
+    """R1 (2026-09-12) — regime is GONE from the flex sleeve.
+
+    Ported from the deleted `test_flex_quadrant_resolution.py`, which pinned the
+    2026-08-10 demotion of `regime_fit` from a hard veto to an informational
+    field. The demotion's own reasoning ("a monthly-vintage macro quadrant has no
+    business vetoing a multi-day trade — cadence mismatch") is now applied in
+    full: no sector, no quadrant, and no regime field participates in entry
+    admission at all.
+
+    Any sector, with otherwise-clean structure, must reach sizing —
+    liquidity/window/VWAP/stop govern, and nothing else does. `regime_fit` must
+    no longer exist in the output at all, so a future re-introduction of a
+    sector/regime veto fails here."""
+    for sector in ("Utilities", "Technology", "Consumer Defensive", None, "Nonsense Sector"):
+        r = _run(_intraday([100, 100.5, 101, 101.5, 102, 102.5, 103]), _daily(), sector=sector)
+        assert "regime_fit" not in r, f"regime_fit resurfaced for {sector!r}"
+        assert "quadrant" not in r and "quadrant_basis" not in r
+        assert r["entry_trigger"] == "pass", sector
+        assert r["skip_reason"] is None
+        assert r["size_shares"] >= 1
 
 
 def test_big_gap_strong_vwap_passes():

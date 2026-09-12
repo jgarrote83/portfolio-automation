@@ -19,7 +19,7 @@ from flex.entry import size_flex_position  # noqa: E402
 from flex.handler import _coid as flex_coid  # noqa: E402
 from flex.handler import _flex_nominations, _symbols_notional  # noqa: E402
 from flex.reconcile import reconcile_ledger  # noqa: E402
-from flex.regime import flex_separation_set  # noqa: E402
+from flex.separation import flex_separation_set  # noqa: E402
 
 _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 

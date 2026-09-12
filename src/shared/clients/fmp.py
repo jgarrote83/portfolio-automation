@@ -110,6 +110,29 @@ class FMPClient:
             return result["historical"] or []
         return result if isinstance(result, list) else []
 
+    # ---- Movers (N1, session 2026-09-12) -----------------------------------
+    # VERIFIED AVAILABLE ON STARTER by live probe 2026-09-12 (resolves the
+    # endpoint-availability half of FOLLOWUPS #34, open since 2026-07-04):
+    # /most-actives, /biggest-gainers and /biggest-losers each returned 50 rows
+    # of {symbol, name, price, change, changesPercentage, exchange}. TWO calls
+    # per collector run total — these are market-wide lists, not per-symbol.
+    #
+    # NOTE what these rows do NOT carry: no volume, no market cap, no ADV. The
+    # liquidity floor and the price floor are applied DOWNSTREAM by the caller
+    # against real price history (`_build_catalyst_screen`'s hard screen) — a
+    # mover row is a candidate NAME, never evidence that the name is tradeable.
+    # The live probe found the union is ~19% sub-$1 and ~42% sub-$5.
+
+    def get_most_actives(self) -> list[dict]:
+        """Today's most-active names (market-wide). ``[]`` on any failure."""
+        result = self._get("/most-actives", {})
+        return result if isinstance(result, list) else []
+
+    def get_biggest_gainers(self) -> list[dict]:
+        """Today's biggest gainers (market-wide). ``[]`` on any failure."""
+        result = self._get("/biggest-gainers", {})
+        return result if isinstance(result, list) else []
+
     # ---- DayTrade Lab (all verified on Starter 2026-07-07 — spec §2) --------
     def get_shares_float(self, ticker: str) -> dict | None:
         """``{floatShares, outstandingShares, freeFloat, date, ...}`` or None."""
