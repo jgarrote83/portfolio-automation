@@ -115,8 +115,13 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
     # collector.handler._build_flex_conviction) rather than same-day LLM JSON,
     # since it needs the collector's own price cache for base_rate_up. Same
     # separation-set/daytrade exclusion as the catalyst path.
-    conviction_candidates = _flex_conviction_candidates(
-        snapshot, held_symbols=held_syms, exclude=daytrade_syms,
+    # G-8 (2026-09-12): DORMANT by default — see FlexConfig.conviction_path_enabled.
+    # Held conviction positions are still MANAGED to their exits below (the
+    # release-driven exit and the ledger loop are untouched); only NEW conviction
+    # entries are scoped out.
+    conviction_candidates = (
+        _flex_conviction_candidates(snapshot, held_symbols=held_syms, exclude=daytrade_syms)
+        if cfg.conviction_path_enabled else {}
     )
     minutes = _session_minutes(client, today, now_et)
     # N3: minutes REMAINING in the session, for the late-entry cutoff. None when
@@ -295,7 +300,8 @@ def _sweep_orphan_orders(client, orphan_orders: list[dict], decisions: dict) -> 
     unmanaged, until the daily executor's `_cancel_conflicting_orders` collided
     with it days later).
 
-    STRICTLY scoped to `_is_flex_catalyst_order_id` — this is load-bearing: a
+    Scoped to `_is_flex_catalyst_order_id` OR `engine_owned` (§8.2) — this is
+    load-bearing: a
     daily-executor resting order or a DayTrade Lab (`FLEXD-`) order must NEVER be
     touched by this sweep; each is a different engine's own state. Best-effort:
     a cancel failure is logged and never raised — a sweep miss is caught by
@@ -304,7 +310,14 @@ def _sweep_orphan_orders(client, orphan_orders: list[dict], decisions: dict) -> 
     """
     for o in orphan_orders or []:
         cid = str(o.get("client_order_id") or "")
-        if not _is_flex_catalyst_order_id(cid):
+        # §8.2 (2026-09-12): a bracket/OTO CHILD LEG carries a broker-assigned
+        # UUID client_order_id, not `FLEXC-` (verified live). `engine_owned` is
+        # set by `reconcile_ledger` when the order id came out of a ledger row
+        # closed this tick — provably ours, so it is swept even though the
+        # client-order-id test fails. The strict scoping doctrine is intact: a
+        # daily-executor or DayTrade (`FLEXD-`) order is never engine_owned and
+        # never matches the prefix, so it is still never touched.
+        if not (_is_flex_catalyst_order_id(cid) or o.get("engine_owned")):
             continue
         oid = o.get("id")
         if not oid:

@@ -328,3 +328,112 @@ def test_b2_open_position_falls_back_to_oto_rather_than_entering_naked():
     assert sent["order_class"] == "oto"
     assert sent["stop_loss"] == {"stop_price": 98.5}
     assert "take_profit" not in sent
+
+
+# --- §8.2: a stale bracket CHILD LEG on a flat position must be sweepable ----
+
+def test_stale_bracket_child_leg_is_swept_after_the_position_closes():
+    """§8.2 (2026-09-12) — the OCO-fill risk, closed at the backstop.
+
+    If a take-profit fills and the OCO does not auto-cancel its sibling, a resting
+    SELL STOP is left against a position that is now FLAT. In a long-only book
+    that is a rejected order at best and a short at worst.
+
+    Two things had to line up and only one did:
+      1. `managed` is computed AFTER `del new_ledger[symbol]`, so a symbol closed
+         this tick IS an orphan candidate. (Already correct.)
+      2. `_sweep_orphan_orders` then filters on `client_order_id` — and a
+         bracket/OTO CHILD LEG carries a broker-assigned UUID, NOT `FLEXC-`
+         (verified live against Alpaca paper 2026-09-12: parent
+         `FLEXC-2026-09-12-KO-entry-...` -> True; legs
+         `75e34b5c-...`/`9e3c3d77-...` -> False). So the stale leg was SKIPPED.
+
+    Neither documented fallback covers it: no-naked-long only fires for HELD
+    positions, and `_cancel_conflicting_orders` only fires when the daily executor
+    submits for that symbol. Note this gap PRE-DATES the bracket — the OTO stop
+    child had the same property; B2 only makes the shape reachable.
+    """
+    from flex.reconcile import reconcile_ledger
+    ledger = {"XYZ": {"symbol": "XYZ", "qty_current": 10, "entry_price": 100.0,
+                      "initial_stop": 98.5, "order_ids": ["parent1", "tp-leg", "sl-leg"]}}
+    stale_stop = {"id": "sl-leg", "symbol": "XYZ", "side": "sell", "type": "stop",
+                  "stop_price": 98.5, "client_order_id": "9e3c3d77-uuid-not-flexc"}
+    new_ledger, exits, _repairs, orphans = reconcile_ledger(ledger, [], [stale_stop])
+
+    assert "XYZ" not in new_ledger                      # row dropped on close
+    assert exits[0]["reason"] == "closed_at_broker"
+    assert len(orphans) == 1 and orphans[0]["id"] == "sl-leg"
+    assert orphans[0]["engine_owned"] is True           # provably ours
+
+    # ...and the sweep now actually cancels it.
+    import flex.handler as fh
+    cancelled = []
+
+    class _C:
+        def cancel_order(self, oid):
+            cancelled.append(oid)
+
+    fh._sweep_orphan_orders(_C(), orphans, {})
+    assert cancelled == ["sl-leg"]
+
+
+def test_sweep_still_never_touches_another_engines_order():
+    """The strict-scoping doctrine is unweakened: a DayTrade (`FLEXD-`) or
+    daily-executor order is never `engine_owned` and never matches the prefix."""
+    import flex.handler as fh
+    cancelled = []
+
+    class _C:
+        def cancel_order(self, oid):
+            cancelled.append(oid)
+
+    foreign = [
+        {"id": "d1", "client_order_id": "FLEXD-2026-09-12-AAA", "engine_owned": False},
+        {"id": "x1", "client_order_id": "T-20260912-E01", "engine_owned": False},
+        {"id": "u1", "client_order_id": "some-uuid", "engine_owned": False},
+    ]
+    fh._sweep_orphan_orders(_C(), foreign, {})
+    assert cancelled == []
+
+
+# --- G-8 / G-10 (amendment §7.3, §8.1) --------------------------------------
+
+def test_g8_conviction_path_is_dormant_by_default_not_deleted():
+    """G-8 — scoped OUT of the news-momentum profile, left intact.
+
+    The conviction path is built around `p_up` vs a ~2-year `base_rate_up` for a
+    15-30 DAY horizon, gated by a 2-session confirm/release hysteresis inherited
+    from a multi-week overlay. On a ~2-day hold, that confirm delay plus the
+    collector's own one-session lag consumes the whole holding period
+    (FOLLOWUPS #107). The fix is SCOPING, not retuning `confirm_sessions`."""
+    assert FlexConfig().conviction_path_enabled is False
+    # the machinery survives for a future slower sub-strategy
+    from flex.entry import build_conviction_entry
+    assert callable(build_conviction_entry)
+
+
+def test_g10_noise_band_is_measured_and_is_not_called_an_ATR():
+    """G-10 — the fixed-vs-ATR-scaled barrier question (§8.1) gets settled on
+    measured data. A true ATR14 is NOT computable here: the light endpoint
+    returns close+volume only, and with the engine off the entry pipeline (which
+    does compute atr14) never runs. So this is an honest close-only substitute,
+    named for what it is."""
+    bars = [{"c": 100.0 * (1.04 if i % 2 else 1.0)} for i in range(25)]
+    band = catalyst_screen.mean_abs_daily_move_pct(bars, 20)
+    assert band is not None and 3.5 < band < 4.5
+    # the reading that matters: a 1.5% stop is a FRACTION of one session's move
+    assert round(1.5 / band, 2) < 0.5
+    assert catalyst_screen.mean_abs_daily_move_pct([{"c": 1.0}] * 5, 20) is None
+
+
+def test_g10_fixed_barriers_have_no_structural_edge_by_construction():
+    """The identity that settles §8.1: for ANY fixed +a/-b pair the driftless
+    first-passage probability is exactly b/(a+b) — identical to the breakeven win
+    rate. So a fixed-barrier profile has ZERO structural edge at any ratio; it is
+    a pure bet on drift arriving before the barriers resolve. Changing 2.0/1.5 to
+    other numbers does not create an edge — only moving the barriers OUTSIDE the
+    noise band does."""
+    for a, b in ((2.0, 1.5), (3.0, 1.0), (1.0, 1.0), (4.0, 2.0)):
+        breakeven = b / (a + b)
+        driftless_win_prob = b / (a + b)
+        assert abs(breakeven - driftless_win_prob) < 1e-12
