@@ -22,10 +22,11 @@ def _intraday(closes, rng=0.2, v=1000):
     return [{"o": c, "h": c + rng / 2, "l": c - rng / 2, "c": c, "v": v} for c in closes]
 
 
-def _run(intraday, daily, sector="Technology", minutes=45):
+def _run(intraday, daily, sector="Technology", minutes=45, minutes_remaining=200):
     return build_flex_entry(
         {"symbol": "NVDA", "sector": sector},
         intraday, daily, EQUITY, minutes, CFG,
+        session_minutes_remaining=minutes_remaining,
     )
 
 
@@ -43,10 +44,26 @@ def test_below_vwap_fails():
     assert r["skip_reason"] == "below_vwap"
 
 
-def test_stop_too_wide_skips():
+def test_wide_atr_stop_is_CLAMPED_to_the_cap_not_skipped():
+    """N2 (2026-09-12): `max_stop_pct` clamps, it no longer skips.
+
+    With `atr_mult` 3.0 and the new 1.5% cap, a typical liquid name's ATR stop is
+    ~4x the cap — a literal "skip if wider" would have rejected essentially every
+    candidate, turning zero-nominations into zero-entries. The clamp is also what
+    makes the +2%/-1.5% expectancy arithmetic true, and the bracket's resting stop
+    leg is a fixed price either way."""
     r = _run(_intraday([100, 100.5, 101, 101.5, 102, 102.5, 103]), _daily(rng=12.0))
-    assert r["entry_trigger"] == "fail"
-    assert r["skip_reason"] == "stop_too_wide"
+    assert r["entry_trigger"] == "pass"
+    assert r["skip_reason"] is None
+    assert round(r["stop_pct"], 4) == 1.5          # clamped exactly to the cap
+    assert r["stop_clamped_to_cap"] is True
+
+
+def test_structure_may_make_the_stop_TIGHTER_than_the_cap_never_wider():
+    """The clamp is a ceiling on stop WIDTH, not a fixed distance: a nearby
+    structure low still gives a better R when it is closer than the cap."""
+    r = _run(_intraday([100, 100.5, 101, 101.5, 102, 102.5, 103]), _daily(rng=0.05))
+    assert r["stop_pct"] <= 1.5 + 1e-9
 
 
 def test_liquidity_below_min_rejected():
@@ -54,10 +71,25 @@ def test_liquidity_below_min_rejected():
     assert r["skip_reason"] == "liquidity_below_min"
 
 
-def test_pre_window_and_after_cutoff():
+def test_entry_window_is_all_day_with_a_late_cutoff_only():
+    """N3 (2026-09-12): the morning-only 90-minute cutoff is GONE — news arrives
+    all day. Two structural bounds remain: the VWAP window at the open, and a
+    late cutoff so a position is never opened with no time to work."""
     bars = _intraday([100, 100.5, 101, 101.5, 102, 102.5, 103])
     assert _run(bars, _daily(), minutes=10)["skip_reason"] == "pre_window"
-    assert _run(bars, _daily(), minutes=120)["skip_reason"] == "after_cutoff"
+    # Mid-afternoon (formerly "after_cutoff") now ENTERS.
+    assert _run(bars, _daily(), minutes=300)["entry_trigger"] == "pass"
+    # ...but not inside the last 30 minutes.
+    late = _run(bars, _daily(), minutes=380, minutes_remaining=10)
+    assert late["skip_reason"] == "too_close_to_close"
+
+
+def test_missing_clock_does_not_apply_a_late_bound_nor_block_every_entry():
+    """A missing minutes-to-close must degrade to the pre-N3 behaviour (no late
+    bound), never silently block the sleeve. The handler logs it."""
+    bars = _intraday([100, 100.5, 101, 101.5, 102, 102.5, 103])
+    r = _run(bars, _daily(), minutes=380, minutes_remaining=None)
+    assert r["entry_trigger"] == "pass"
 
 
 def test_sector_never_gates_entry():

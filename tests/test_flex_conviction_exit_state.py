@@ -59,12 +59,15 @@ def test_conviction_path_never_time_stops_regardless_of_horizon():
     assert r["next_action"] != "time_stop"
 
 
-def test_conviction_path_still_trails_and_scales_out_normally():
-    # R=2.5 >= first_target_r=2.0 -> scale_out still fires for a conviction
-    # entry -- only the time-stop rule is path-gated, nothing else.
+def test_conviction_path_also_has_no_trail_or_scale_out():
+    """N2 (2026-09-12): scale-out and trail are retired on BOTH paths — they were
+    never path-gated, and both exits now rest at the broker as a bracket. The
+    conviction path's own distinction (no calendar time stop; exit is driven by
+    the collector's release hysteresis) is unchanged and tested below."""
     r = build_flex_exit_state(
         _entry(path="conviction", entry_price=100.0, initial_stop=91.0,
                risk_per_share=4.0, current_stop=96.0),
         _intraday([110] * 7), _daily(), CFG, NOW,
     )
-    assert r["next_action"] == "scale_out"
+    assert r["next_action"] == "hold"
+    assert r["scale_out_qty"] is None and r["trail_stop"] is None

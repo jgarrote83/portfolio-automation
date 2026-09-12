@@ -3,7 +3,24 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-09-12 (flex news-momentum rewrite, part B1 — branch `feat/20260912-flex-news-momentum-b1`).**
+**▶ START HERE — last session 2026-09-12 (flex B2: exit profile + native OCO bracket — branch `feat/20260912-flex-exit-profile-b2`).**
+N2/N3/N4 of the B2 half. Exit profile is now a NATIVE Alpaca OCO bracket (+2%
+take-profit limit / −1.5% stop, both resting at the broker) — dropping the trail
+is what ALLOWS the bracket, which removes the ~15-minute exit-resolution caveat
+for both legs. **Verified live against Alpaca paper**: accepted, both legs `held`,
+parent cancel cancelled both, account left at 0 open orders. **One deliberate
+deviation from the spec table, because the literal reading is un-tradeable:**
+`max_stop_pct` now CLAMPS rather than SKIPS — with `atr_mult` 3.0 the ATR stop is
+~4× the new 1.5% cap, so "skip if wider" would have rejected every liquid name
+(zero-nominations → zero-entries). Entry window is all day with a late cutoff read
+from the broker calendar's real close. `per_name_cap_pct` 12→6 for OVERNIGHT GAP
+risk (a 1.5% stop gives zero gap protection; at 12% a −10% gap costs 1.20pp vs the
+−1.307pp total shortfall under diagnosis) — this does NOT reduce aggregate
+overnight exposure. `risk_budget_pct` is now inert. **STILL OUTSTANDING: S1 (kill
+switch) and S2 (at-close grading + realized expectancy)** — the 42.9% breakeven is
+a FLOOR, not the bar, until S2 measures it. New entry **#108**.
+
+**Previous — 2026-09-12 (flex news-momentum rewrite, part B1 — branch `feat/20260912-flex-news-momentum-b1`).**
 Regime removed from the flex sleeve ENTIRELY (R1), rankability rewritten as a
 required-component set (R2), discovery universe replaced with movers ∩ recent
 news (N1). **The brief's causal weighting was backwards and the probe corrected
@@ -733,6 +750,36 @@ than folded into a de-risk-classifier PR. Prefer the pool-based fix and decide
 explicitly whether "aggregate international weight" means the selected names or
 all held intl names — they are different questions and the current code answers
 neither correctly.
+
+### 108. B2 remainder — S1 kill switch + S2 at-close grading are NOT shipped (HIGH — risk control, blocking before the sleeve trades live)
+The 2026-09-12 B2 PR shipped N2 (bracket exit profile), N3 (all-day window) and
+N4 (`per_name_cap` 12→6). **S1 and S2 from the amendment are NOT in it.**
+
+- **S1 — kill switch, two independent trips.** `flex_kill_switch: {enabled: true,
+  min_closed_trades: 20, hit_rate_floor: 0.45, max_drawdown_pct: 2.0}`. The slow
+  trip catches a signal that does not work; the FAST drawdown trip catches one
+  that blows up, with no trade-count minimum (~$2,000 at current equity ≈ 5-6 full
+  stop-outs, or one bad gap). On trip: stop opening new positions, manage existing
+  ones to their exits normally (never a forced liquidation), emit a blocking Data
+  Integrity Warning, surface state in the snapshot. **Re-enabling is a human
+  action, never automatic.**
+- **S2 — at-close grading.** Phase C grades at 30/60/90d; a 2-day flex trade is
+  closed long before its first horizon, so these trades would otherwise never be
+  scored — and the kill switch DEPENDS on a realized hit rate. Record
+  `exit_reason` (`take_profit`/`stop`/`time_stop`/`gap`) + realized return per
+  exit, compute **realized expectancy per bucket**, and feed it into
+  `flex_conviction.calibration`. **Reset or clearly segment the prior n=2 sample**
+  (G-5, still open) — those entries were generated under a different strategy and
+  pooling them makes the kill switch read a mixture.
+
+**Why this is blocking:** the sleeve is currently `FLEX_ENABLED=false` (B1's dry
+window), so nothing trades. But the moment it is switched on, it runs at a full
+25% sleeve with no automatic brake and no measured expectancy. The 42.9%
+breakeven everyone is quoting is a FLOOR (binary outcomes only; the time stop adds
+a third outcome at market that raises it by an unknown amount) — S2 is what turns
+it into a measured number. **Do not enable the sleeve before S1 and S2 ship.**
+Cross-refs #104 (the trailing design, retrievable if the fixed profile
+underperforms), #105, #107.
 
 ### 104. Trailing-stop flex design SUPERSEDED for the entry path, retained and retrievable (LOW — record-keeping, cross-refs B2)
 `docs/specs/Flex_Trailing_Stop_v1.0.md` is superseded for the entry path by B2's
