@@ -92,14 +92,26 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         //   Paper-only auto-execute at 09:35 ET. NOTE: this overrides the
         //   "Phase 1 clean 30+ days before Phase 2" gate — auto-trading is on.
         { name: 'AUTO_EXECUTE_ENABLED',                      value: 'true' }
-        //   Intraday catalyst Flex engine (flex_intraday, every 15 min, is_open-gated).
-        //   Places live (paper) broker orders. Enabled 2026-07-07 (FOLLOWUPS #33
-        //   residual (iv) — MU flex position unmanaged) after dry-run validation
-        //   (POST /api/flex {"dry_run":true}). NOTE: the engine only manages symbols
-        //   in flex-ledger/ledger.json — pre-engine positions (MU) need a ledger row
-        //   before it will manage them. FLEX_* knobs default in src/flex/config.py;
-        //   override here only if tuning.
-        { name: 'FLEX_ENABLED',                              value: 'true' }
+        //   Intraday news-momentum Flex engine (flex_intraday, every 15 min,
+        //   is_open-gated). Places live (paper) broker orders. Enabled 2026-07-07;
+        //   **DISABLED AGAIN 2026-09-12** for the B1/B2 observation window.
+        //
+        //   WHY OFF: B1 replaced the discovery universe (movers ∩ recent news) and
+        //   B2 replaced the exit profile (native OCO bracket, +2%/-1.5%, 2-day time
+        //   stop, per-name cap 12%→6%). Neither has traded. The sleeve's own
+        //   measured calibration is n=2 / hit_rate 0.0, and the kill switch (S1)
+        //   and at-close grading (S2) are NOT built yet — see FOLLOWUPS #108.
+        //   **Do not flip this back to 'true' before S1 and S2 ship.** With it off
+        //   the collector still publishes catalyst_screen.ledger/.nominated every
+        //   session (the screen runs in the collector, not the engine), so the new
+        //   universe is validated out-of-sample at zero capital risk.
+        //
+        //   This value is the DURABLE one: an `infra/**` deploy replaces the app
+        //   setting set wholesale, so a live `az functionapp config appsettings set`
+        //   alone would be silently reverted here (see CLAUDE.md deployment
+        //   lessons). Change both, or change this.
+        //   FLEX_* knobs default in src/flex/config.py; override here only if tuning.
+        { name: 'FLEX_ENABLED',                              value: 'false' }
         //   DayTrade Lab (daytrade_manage, every 1 min, clock/window-gated).
         //   Ships OFF — places live (paper) broker orders. Flip to 'true' only
         //   after dry-run validation (POST /api/daytrade {"dry_run":true}) AND
