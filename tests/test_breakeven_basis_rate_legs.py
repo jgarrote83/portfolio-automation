@@ -73,23 +73,32 @@ def test_bridge_prefers_the_5y_spot_over_the_5y5y_forward():
 
 
 def test_the_0909_0910_0911_outage_driven_flip_is_gone():
-    """The motivating incident, replayed. Under the OLD order the sequence was
-    flat -> rising -> flat, where BOTH transitions were artifacts of T5YIFR's
-    availability rather than a change in expectations. Under the new order the
-    basis is `breakeven_5y` on all three sessions, so T5YIFR's presence or
-    absence cannot move the reading at all.
+    """The motivating incident, replayed on the LIVE deltas read back from
+    `daily-snapshots/2026-09-{09,10,11}.json` (verified against each snapshot's
+    own recorded `bridge_basis`/`bridge_delta_20d_bp`/`bridge_direction`):
 
-    Note 09-09 reads `flat`, NOT `rising`: the 5Y was +6bp, below the 15bp
-    threshold. The fix removes the outage artifact; it does not manufacture a
-    rising call."""
-    sessions = [(6.0, 4.0, 1.0), (18.0, 14.0, None), (22.0, 17.0, 6.0)]
+        date     be_5y  be_10y  be_5y5y | OLD basis / delta / dir
+        09-09     15.0     8.0      1.0 | breakeven_5y5y   1.0  flat
+        09-10     18.0    10.0     None | breakeven_5y    18.0  rising   <- T5YIFR NULL
+        09-11     22.0    14.0      6.0 | breakeven_5y5y   6.0  flat     <- T5YIFR returns
+
+    Under the OLD order the sequence was flat -> rising -> flat, where BOTH
+    transitions were artifacts of T5YIFR's AVAILABILITY rather than a change in
+    expectations. Under the new order the basis is `breakeven_5y` on all three
+    sessions, so T5YIFR's presence or absence cannot move the reading at all.
+
+    Note 09-09 reads `flat`, NOT `rising` — the 5Y sat at EXACTLY the 15bp
+    threshold and the comparison is strict (`> _be_thr`). The fix removes the
+    outage artifact; it does not manufacture a rising call, not even at the
+    boundary."""
+    sessions = [(15.0, 8.0, 1.0), (18.0, 10.0, None), (22.0, 14.0, 6.0)]
     out = [axis(t5=a, t10=b, t55=c) for a, b, c in sessions]
     assert [x["bridge_basis"] for x in out] == ["breakeven_5y"] * 3
-    assert [x["bridge_delta_20d_bp"] for x in out] == [6.0, 18.0, 22.0]
+    assert [x["bridge_delta_20d_bp"] for x in out] == [15.0, 18.0, 22.0]
     assert [x["bridge_direction"] for x in out] == ["flat", "rising", "rising"]
     # The 09-10 -> 09-11 transition is no longer driven by T5YIFR returning:
     # removing T5YIFR from the 09-11 input changes nothing.
-    assert axis(t5=22.0, t10=17.0, t55=None)["bridge_direction"] == "rising"
+    assert axis(t5=22.0, t10=14.0, t55=None)["bridge_direction"] == "rising"
 
 
 def test_t5yifr_availability_no_longer_moves_the_bridge():
