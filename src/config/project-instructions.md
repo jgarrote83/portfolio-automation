@@ -762,13 +762,21 @@ the datum the block cites, and its as-of date.
   collapsing is flagged as a rear-view artifact and classified by core. **Echo
   `inflation_axis.direction`.** Breakevens are secondary — do **not** call the axis
   "falling" off falling breakevens while `inflation_axis.direction` says otherwise.
-  **Breakeven bridge, non-binding (2026-08-06 audit O1):** monthly core CPI/PCE are
-  60-65d stale for most of the window between prints; `inflation_axis.bridge_direction`
-  (`rising`/`falling`/`flat`, off the already-fresh 5y5y/5y breakevens,
-  `bridge_basis` names which) is a SECONDARY read for that gap. Cite it as
-  "breakevens currently point `{bridge_direction}` between prints" when useful —
-  but it NEVER overrides `direction`, which realized core always governs; never
-  write as if the bridge itself changed the axis call.
+  **Breakeven bridge, non-binding (2026-08-06 audit O1; basis inverted 2026-09-12):**
+  monthly core CPI/PCE are 60-65d stale for most of the window between prints;
+  `inflation_axis.bridge_direction` (`rising`/`falling`/`flat`) is a SECONDARY read
+  for that gap, taken off the already-fresh breakevens in **shortest-tenor-first**
+  order — T5YIE (5Y spot) → T10YIE (10Y) → T5YIFR (5y5y forward, last resort).
+  **You MUST name the tenor you are quoting**, reading it from `bridge_basis`:
+  e.g. "the 5Y breakeven points `rising` (+22bp/20d) between prints". Never present
+  a bridge reading without its tenor, and never describe a `breakeven_5y5y` basis as
+  the near-term inflation impulse — the 5y5y forward is expected average inflation
+  over five years *beginning five years from now*, a long-run ANCHORING measure that
+  is supposed to be slow-moving; quoting it as the current impulse is a category
+  error (it is only ever the basis when both shorter tenors are unavailable, which
+  is itself worth saying out loud). The bridge NEVER overrides `direction`, which
+  realized core always governs; never write as if the bridge itself changed the axis
+  call.
   **Oil's role is symmetric and always a corroborate-or-counter check against the
   CLASSIFICATION, never a cause of it (Task E6, session 2026-08-01):** core CPI/PCE
   drives the direction; oil only ever CONFIRMS it (moving the same way) or COUNTERS
@@ -1614,7 +1622,8 @@ A single JSON snapshot for one trading day containing:
 - `market_shock` — short-horizon shock detector: 1d/5d price moves (SPY/DXY/VIX) with z-scores + news keyword scan, composite `shock_level` 0-3 with `triggers` and `news_examples`
 - `growth_axis` — **pre-computed growth-direction read** (the quadrant growth axis): `direction` (`rising`/`falling`/`flat`/`indeterminate`) from the GDPNow current-quarter vintage trajectory (`gdpnow_trajectory`, oldest→newest), `confidence`, `basis`, `as_of` (the realtime **vintage** date of the newest vintage row used — GDPNow freshness is vintage recency, NOT the observation-quarter start), and `confirming` hard data. **Echo `direction` and `basis` VERBATIM as their literal enum values** (`basis` `within_quarter_vintages`/`prior_quarter_tail`/`cross_quarter_fallback`/`no_gdpnow_data`; confidence is fixed by basis — `prior_quarter_tail`⇒medium, `cross_quarter_fallback`⇒low — never invent "cross-quarter fallback" for a `prior_quarter_tail` read).
 - `flex_quadrant` — **the quadrant the FLEX engine treats as in force** (borderline 5-day benchmark tiebreak, D1): `resolved` (Q1-Q4 or `""`), `basis` (`active`/`borderline_5d_tiebreak`/`favored_single`/`unresolved`), `favored_bucket`, `benchmark_returns_5d` (per member `{etf, r5}`), `window_trading_days`. **Flex nominations must assert fit against `flex_quadrant.resolved`, not the raw axes** — see the Flex section. Core still reasons against the strict `active_quadrant`; this block governs the flex sleeve only.
-- `inflation_axis` — **pre-computed inflation-direction read**: `direction` from realized core (PCE-first) 3m-annualized vs YoY, with headline CPI + an oil-price-trend energy overlay (`oil_proxy_20d_pct` when `oil_trend_source == "USO_proxy"`, else `oil_wti_20d_pct`/`oil_brent_20d_pct`); breakevens secondary, with a non-binding `bridge_direction` for the gap between monthly prints. **Echo `direction`.**
+- `inflation_axis` — **pre-computed inflation-direction read**: `direction` from realized core (PCE-first) 3m-annualized vs YoY, with headline CPI + an oil-price-trend energy overlay (`oil_proxy_20d_pct` when `oil_trend_source == "USO_proxy"`, else `oil_wti_20d_pct`/`oil_brent_20d_pct`); breakevens secondary, with a non-binding `bridge_direction` for the gap between monthly prints — **always name the tenor from `bridge_basis`** (shortest-first: `breakeven_5y` → `breakeven_10y` → `breakeven_5y5y`; see the Inflation axis section). **Echo `direction`.**
+- `rate_decomposition` — **DESCRIBE-ONLY split of the 20d nominal-yield move into its real and inflation-expectation legs** (`DGS10 = DFII10 + T10YIE`): `nominal_delta_20d_bp`, `real_delta_20d_bp`, `breakeven_delta_20d_bp`, `real_share_pct`, `dominant_driver` (`real_rate`/`inflation`/`mixed`), `identity_residual_bp` + `identity_warning`, `note`. **Add one context line quoting `dominant_driver` and the three leg deltas whenever `available` is true** — a breakeven is a difference and cannot say which leg moved, and rising nominals with flat breakevens is a growth/policy shock, not an inflation one (it bears directly on duration ballast like TLT/IEF). **Wired to nothing — it must not drive a trade, a sizing call, or an override this cycle; cite it as context only.** `available: false` ⟹ say nothing about it. If `identity_warning` is true, surface it under the Data Integrity Warning heading with all three levels and their `as_of` dates.
 - `fomc_stance` — the RAW manually-maintained stance file (`config/fomc-stance.json`: `stance` + `as_of`), kept for reference. **The stance you must use is the resolved `policy_axis`.**
 - `policy_axis` — **pre-computed RESOLVED policy stance**: `stance` (hawkish/neutral/dovish/unconfirmed) + `source` (`manual_fresh` / `market_implied` / `unconfirmed`), `market_implied` (`stance`, `dgs2_latest`, `dff_latest`, `dgs2_delta_20d_bp`, `spread_bp`), `manual` (echo + `fresh`), `agreement` (null when either layer is unavailable), `note`. A fresh manual SEP/dot-plot governs; else DGS2 20d momentum; `unconfirmed` only when both are unavailable. **Echo `stance` + `source`.**
 - `regime_gate` — **pre-computed deployment gate**: `status` (`open`/`closed`), `reasons`, `policy_note`, derived from the two axes + the resolved `policy_axis` stance (see `derived_from.policy_source`). **Echo `status` into `deployment_gate`.**

@@ -216,6 +216,34 @@ _RISK_LIMITS_DEFAULTS = {
         ),
         "band": 0.1,
     },
+    "rate_decomposition": {
+        "_note": (
+            "C3/C4 (2026-09-12): DESCRIBE-ONLY decomposition of a 20-session "
+            "nominal-yield move into its real and inflation-expectation legs "
+            "(DGS10 = DFII10 + T10YIE, all three already collected). Answers "
+            "'was that a real-rate shock or an inflation shock', which a "
+            "breakeven — being a DIFFERENCE — cannot answer alone; the book was "
+            "holding TLT 8.42% / IEF 7.63% into exactly that ambiguity on "
+            "2026-09-11. WIRED TO NOTHING this cycle: no consumer reads it, and "
+            "bond_signals is byte-identical (DFII10 already feeds its `systemic` "
+            "sub-score and the 2.5% real-yield hard trigger — this block must "
+            "never duplicate, shadow or alter either). dominant_driver is BANDED, "
+            "not a bare comparison, so a fraction of a basis point cannot flip "
+            "the label: real_share_pct >= real_share_real_rate_min -> 'real_rate', "
+            "<= real_share_inflation_max -> 'inflation', else 'mixed'. "
+            "identity_tolerance_bp gates the C4 cross-check (nominal - real - "
+            "breakeven, on latest levels): a free integrity check on three of the "
+            "axis's most important inputs, in a system with a standing history of "
+            "silent data defects. It warns ONLY when all three legs are fresh — "
+            "differing as-of dates are the expected benign cause and are carried "
+            "in the payload so the reader can dismiss it at a glance. Both bands "
+            "and the tolerance are PROPOSED, not confirmed (decision gates G-2/G-3)."
+        ),
+        "identity_tolerance_bp": 15.0,
+        "real_share_real_rate_min": 65.0,
+        "real_share_inflation_max": 35.0,
+        "staleness_days": 7,
+    },
     "growth_axis_rollover": {
         "_note": (
             "FOLLOWUPS #54: head-to-tail slope alone misreads a trajectory that "
@@ -2966,6 +2994,38 @@ def run() -> None:
         _oil_proxy_cache = {}
     inflation_axis_raw = _build_inflation_axis(macro_data, _oil_proxy_cache, today)
 
+    # --- C3/C4 (2026-09-12): rate_decomposition — DESCRIBE-ONLY, wired to -------
+    # nothing. Splits the 20d nominal move into its real and breakeven legs so a
+    # real-rate shock can be told apart from an inflation shock (a breakeven is a
+    # difference and cannot answer that alone). Non-fatal: a failure must never
+    # lose the snapshot, and `available: False` is a valid, honest degradation.
+    rate_decomposition: dict = {"available": False, "note": "builder failed"}
+    try:
+        rate_decomposition = _build_rate_decomposition(
+            macro_data, today,
+            _load_risk_limits().get("rate_decomposition")
+            or _RISK_LIMITS_DEFAULTS["rate_decomposition"],
+        )
+        if rate_decomposition.get("identity_warning"):
+            logger.warning(
+                "Rate decomposition IDENTITY BREAK: DGS10 %s - DFII10 %s - T10YIE %s "
+                "= %sbp residual (> %sbp tolerance, all legs fresh)",
+                (rate_decomposition.get("legs") or {}).get("nominal", {}).get("latest"),
+                (rate_decomposition.get("legs") or {}).get("real", {}).get("latest"),
+                (rate_decomposition.get("legs") or {}).get("breakeven", {}).get("latest"),
+                rate_decomposition.get("identity_residual_bp"),
+                rate_decomposition.get("identity_tolerance_bp"),
+            )
+        else:
+            logger.info(
+                "Rate decomposition: driver=%s real_share=%s%% residual=%sbp",
+                rate_decomposition.get("dominant_driver"),
+                rate_decomposition.get("real_share_pct"),
+                rate_decomposition.get("identity_residual_bp"),
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Rate decomposition build failed (non-fatal)")
+
     # Session 2026-07-28 (Task A, decision D-2): N=2 confirmation on the CONSUMED
     # `direction` field — a label change (any value, including flat) only reaches
     # every downstream consumer (active_quadrant, reference_weights, regime_gate,
@@ -3835,6 +3895,7 @@ def run() -> None:
         "market_shock": market_shock,
         "growth_axis": growth_axis,
         "inflation_axis": inflation_axis,
+        "rate_decomposition": rate_decomposition,
         "fomc_stance": fomc_stance,
         "policy_axis": policy_axis,
         "regime_gate": regime_gate,
@@ -6582,13 +6643,44 @@ def _build_inflation_axis(
         (_load_divergence_config().get("leading_vs_lagging_inflation") or {})
         .get("breakeven_delta_20d_bp", 15.0)
     )
-    # Prefer the 5y5y forward breakeven (least contaminated by near-term noise,
-    # the same series the leading_vs_lagging_inflation divergence keys on);
-    # fall back to the 5y spot breakeven when 5y5y lacks history.
-    if be_5y5y_delta is not None:
-        bridge_basis, bridge_delta = "breakeven_5y5y", be_5y5y_delta
-    elif be_5y_delta is not None:
+    # C1 (session 2026-09-12) — SHORTEST LIQUID TENOR FIRST: T5YIE (5Y spot) ->
+    # T10YIE (10Y) -> T5YIFR (5y5y forward, LAST RESORT). See §8 of the
+    # inflation-axis rework analysis.
+    #
+    # The previous order preferred the 5y5y "least contaminated by near-term
+    # noise". That rationale is sound for a divergence detector and BACKWARDS
+    # for a regime bridge: the 5y5y forward is the market's expected average
+    # inflation over five years BEGINNING FIVE YEARS FROM NOW — a long-run
+    # ANCHORING measure, deliberately the slowest-moving and least relevant to a
+    # 1-3 month regime call. It is SUPPOSED to be stable. Reading it as "the
+    # inflation bridge" measures whether expectations are anchored, then reports
+    # the answer as though it were the current impulse. This bridge exists
+    # specifically to cover the 60-65d gap between monthly core prints, so it
+    # wants the shortest tenor that is liquid, not the smoothest one.
+    #
+    # Motivating incident (2026-09-09/10/11): bridge_direction read flat ->
+    # rising -> flat across three sessions. The `rising` was not a change in
+    # expectations — T5YIFR was simply NULL on 09-10, so the old order fell
+    # through to the 5Y (+18bp). When T5YIFR returned on 09-11 the bridge
+    # reverted to `flat` on +6bp WHILE THE 5Y HAD MOVED TO +22bp (clearing the
+    # 15bp threshold) and oil sat at +24.4% 20d. The bridge flipped because a
+    # data outage ENDED. Inverting the order removes that failure mode entirely:
+    # T5YIFR becomes last resort rather than first choice, so its availability
+    # no longer swings the reading.
+    #
+    # G-4 (recorded, not acted on): FRED exposes no breakeven SHORTER than 5Y —
+    # its standard set starts at T5YIE because 5Y TIPS are the shortest liquid
+    # on-the-run point (T7YIE/T10YIE/T20YIEM/T30YIEM are all longer). Nothing
+    # speculative was added; T5YIE is the shortest available and is sufficient.
+    # All three series below are already in macro-series.json and fetched every
+    # run — this is a reordering of existing values: zero new API cost, zero new
+    # dependency, no new failure mode.
+    if be_5y_delta is not None:
         bridge_basis, bridge_delta = "breakeven_5y", be_5y_delta
+    elif be_10y_delta is not None:
+        bridge_basis, bridge_delta = "breakeven_10y", be_10y_delta
+    elif be_5y5y_delta is not None:
+        bridge_basis, bridge_delta = "breakeven_5y5y", be_5y5y_delta
     else:
         bridge_basis, bridge_delta = None, None
 
@@ -6639,6 +6731,141 @@ def _build_inflation_axis(
             "CPI/PCE prints — it never overrides `direction`, which realized core "
             "always governs."
         ),
+    }
+
+
+def _build_rate_decomposition(macro_data: dict, today: str, cfg: dict) -> dict:
+    """C3/C4 (session 2026-09-12) — split a nominal-yield move into its real and
+    inflation-expectation legs. **DESCRIBE-ONLY: wired to nothing this cycle.**
+
+    A breakeven is a DIFFERENCE, and the spread alone cannot say which leg moved::
+
+        nominal yield  =  real yield  +  breakeven
+           DGS10       =    DFII10    +   T10YIE
+
+    When nominal yields rise and breakevens do NOT, that is a REAL-RATE shock —
+    growth and policy — not an inflation shock. The book could not previously
+    distinguish the two, and on 2026-09-11 it was holding long-duration ballast
+    (TLT 8.42%, IEF 7.63%) into exactly that ambiguity, with DGS30 at 5.28% and
+    DGS10 at 4.83%. All three series are already collected every run: zero new
+    API cost, zero new dependency.
+
+    ``dominant_driver`` is BANDED, not a bare comparison (config
+    ``risk-limits.json -> rate_decomposition``): ``real_share_pct >=
+    real_share_real_rate_min`` -> ``real_rate``; ``<= real_share_inflation_max``
+    -> ``inflation``; otherwise ``mixed``. A bare ``>`` would flip the label on a
+    fraction of a basis point.
+
+    C4 — ``identity_residual_bp`` (``nominal - real - breakeven``, on the LATEST
+    levels) is a free cross-check on three of the axis's most important inputs.
+    This project has a standing history of silent data defects (MU quoted 10x
+    high for weeks; rotating frozen quotes; an ETN ADV reported at $2.4M against
+    a real ~$1B), and this identity costs nothing to evaluate. ``identity_warning``
+    fires only when the residual exceeds tolerance AND all three legs are fresh —
+    differing as-of dates are the EXPECTED benign cause, so each leg's own
+    ``as_of`` is carried in the payload for the reader to dismiss it at a glance
+    rather than investigate. Observed 2026-09-11: 4.83 - 2.46 = 2.37 vs T10YIE
+    2.40, a 3bp residual, comfortably inside the proposed 15bp tolerance.
+
+    Missing or stale input degrades to ``available: False`` — never a fabricated
+    verdict, the same doctrine as the divergence detectors. ``bond_signals`` is
+    untouched and must stay byte-identical: DFII10 already feeds its ``systemic``
+    sub-score and the 2.5% real-yield hard trigger, and this block neither
+    duplicates, shadows, nor alters either.
+    """
+    rd_cfg = cfg or _RISK_LIMITS_DEFAULTS["rate_decomposition"]
+    tol_bp = float(rd_cfg.get("identity_tolerance_bp", 15.0))
+    real_min = float(rd_cfg.get("real_share_real_rate_min", 65.0))
+    infl_max = float(rd_cfg.get("real_share_inflation_max", 35.0))
+    stale_d = int(rd_cfg.get("staleness_days", 7))
+
+    unavailable = {
+        "available": False, "as_of": None,
+        "nominal_delta_20d_bp": None, "real_delta_20d_bp": None,
+        "breakeven_delta_20d_bp": None, "identity_residual_bp": None,
+        "real_share_pct": None, "dominant_driver": None,
+        "identity_warning": False,
+        "note": "",
+    }
+
+    def _vals(sid: str) -> list[float]:
+        return _macro_vals(macro_data, sid)   # newest-first
+
+    def _as_of(sid: str) -> str | None:
+        for r in macro_data.get(sid) or []:
+            if r.get("value") not in (None, ".", ""):
+                return r.get("date")
+        return None
+
+    legs = {"nominal": "DGS10", "real": "DFII10", "breakeven": "T10YIE"}
+    vals = {k: _vals(sid) for k, sid in legs.items()}
+    as_ofs = {k: _as_of(sid) for k, sid in legs.items()}
+    missing = [legs[k] for k, v in vals.items() if len(v) <= 20]
+    if missing:
+        return {**unavailable,
+                "note": f"unavailable — insufficient history for {', '.join(sorted(missing))}"}
+
+    deltas = {k: round((v[0] - v[20]) * 100.0, 1) for k, v in vals.items()}
+    latest = {k: v[0] for k, v in vals.items()}
+    residual_bp = round((latest["nominal"] - latest["real"] - latest["breakeven"]) * 100.0, 1)
+
+    denom = abs(deltas["real"]) + abs(deltas["breakeven"])
+    real_share = round(abs(deltas["real"]) / denom * 100.0, 1) if denom > 0 else None
+    if real_share is None:
+        driver = None
+    elif real_share >= real_min:
+        driver = "real_rate"
+    elif real_share <= infl_max:
+        driver = "inflation"
+    else:
+        driver = "mixed"
+
+    ages = {k: _days_stale(a, today) for k, a in as_ofs.items()}
+    all_fresh = all(a is not None and a <= stale_d for a in ages.values())
+    warn = abs(residual_bp) > tol_bp and all_fresh
+
+    if driver == "real_rate":
+        note = (f"20d nominal {deltas['nominal']:+.1f}bp is driven by the REAL leg "
+                f"({deltas['real']:+.1f}bp, {real_share:.0f}% of the move) — a growth/policy "
+                f"repricing, not an inflation shock; breakevens {deltas['breakeven']:+.1f}bp.")
+    elif driver == "inflation":
+        note = (f"20d nominal {deltas['nominal']:+.1f}bp is driven by the BREAKEVEN leg "
+                f"({deltas['breakeven']:+.1f}bp, real only {real_share:.0f}% of the move) — "
+                "an inflation-expectations repricing.")
+    elif driver == "mixed":
+        note = (f"20d nominal {deltas['nominal']:+.1f}bp splits between real "
+                f"({deltas['real']:+.1f}bp) and breakeven ({deltas['breakeven']:+.1f}bp) — "
+                f"real share {real_share:.0f}%, inside the {infl_max:.0f}-{real_min:.0f}% "
+                "mixed band; no single dominant driver.")
+    else:
+        note = "both legs flat over 20 sessions — no move to attribute."
+    if warn:
+        note += (f" DATA INTEGRITY: identity residual {residual_bp:+.1f}bp exceeds the "
+                 f"{tol_bp:.0f}bp tolerance with all three legs fresh.")
+
+    return {
+        "available": True,
+        "as_of": as_ofs["nominal"],
+        "nominal_delta_20d_bp": deltas["nominal"],
+        "real_delta_20d_bp": deltas["real"],
+        "breakeven_delta_20d_bp": deltas["breakeven"],
+        "identity_residual_bp": residual_bp,
+        "identity_tolerance_bp": tol_bp,
+        "identity_warning": warn,
+        "real_share_pct": real_share,
+        "dominant_driver": driver,
+        "legs": {
+            "nominal": {"series": "DGS10", "latest": latest["nominal"],
+                        "delta_20d_bp": deltas["nominal"], "as_of": as_ofs["nominal"],
+                        "days_stale": ages["nominal"]},
+            "real": {"series": "DFII10", "latest": latest["real"],
+                     "delta_20d_bp": deltas["real"], "as_of": as_ofs["real"],
+                     "days_stale": ages["real"]},
+            "breakeven": {"series": "T10YIE", "latest": latest["breakeven"],
+                          "delta_20d_bp": deltas["breakeven"], "as_of": as_ofs["breakeven"],
+                          "days_stale": ages["breakeven"]},
+        },
+        "note": note,
     }
 
 

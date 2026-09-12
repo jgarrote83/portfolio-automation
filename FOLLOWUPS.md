@@ -3,7 +3,31 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-09-12 (de-risk classifier fix, branch `fix/20260912-derisk-classifier`).**
+**▶ START HERE — last session 2026-09-12 (breakeven basis + rate-leg decomposition, branch `fix/20260912-breakeven-basis-rate-legs`).**
+The bridge preferred the **5y5y forward** breakeven "least contaminated by
+near-term noise" — sound for a divergence detector, backwards for a regime
+bridge: the 5y5y is expected average inflation over five years *beginning five
+years from now*, a long-run ANCHORING measure that is supposed to be slow-moving.
+Live consequence 09-09/10/11: `bridge_direction` read flat → rising → flat, where
+the `rising` came ONLY from T5YIFR being null that session and the revert came
+ONLY from T5YIFR returning — while the 5Y had moved to +22bp with oil at +24.4%.
+**The bridge flipped because a data outage ended.** C1 inverts to shortest liquid
+tenor first (T5YIE → T10YIE → T5YIFR last resort), which removes the failure mode
+structurally. **C2's premise turned out to be wrong in a useful way:** the
+divergence was documented (by a stale code comment) as keying on the 5y5y, but
+`_div_leading_vs_lagging_inflation` reads `be_5y` and always has — so the feared
+chain to `reference_weights` already ran on the short end, C1 MAKES the two
+consistent without touching the divergence, and a 480-combination sweep proves
+`reference_weights` byte-identical (gate **G-1 does not fire**). C3/C4 add
+`rate_decomposition` (describe-only): `DGS10 = DFII10 + T10YIE`, so a real-rate
+shock can be told apart from an inflation shock — the book was holding TLT 8.42% /
+IEF 7.63% into exactly that ambiguity — plus a free identity cross-check.
+**Scope held: this changed WHICH breakeven the bridge reads, never WHETHER
+breakevens govern.** New open items **#100** (wire the bridge to govern — sequenced
+AFTER continuous factor tilts), **#101** (no nowcast source exists), **#102**
+(`rate_decomposition` consumer decision + gates G-2/G-3). #78 and #86 untouched.
+
+**Also merged 2026-09-12 — de-risk classifier fix (branch `fix/20260912-derisk-classifier`, PR #49, merged FIRST).**
 `shared/reference_execution.py` was ABSENT from the auto-switch consumer
 inventory and still resolved the Amplifier/Damper blocks against the FROZEN
 config-`selected` sets. After `semis` auto-switched SMH→SOXX (2026-07-27),
@@ -647,6 +671,61 @@ than folded into a de-risk-classifier PR. Prefer the pool-based fix and decide
 explicitly whether "aggregate international weight" means the selected names or
 all held intl names — they are different questions and the current code answers
 neither correctly.
+
+### 100. Wire the breakeven bridge to govern `inflation_axis.direction` when realized core is >45d stale — SEQUENCED AFTER the continuous-factor-tilt work (HIGH — architecture decision, blocking, cross-refs #88/G-4 and the 2026-09-12 breakeven-basis cycle)
+From the 2026-09-12 breakeven-basis cycle (`fix/20260912-breakeven-basis-rate-legs`),
+which deliberately changed only WHICH breakeven the bridge reads, never WHETHER
+breakevens govern. `realized_governs` stays `True`; `direction` stays governed by
+realized core. The open question is unchanged from #88: core CPI/PCE run 63+ days
+stale between prints while the bridge is fresh daily, so for most of every month
+the axis is classified off a number nobody can see moving.
+**The new constraint this cycle adds, and the reason it is not merely "deferred a
+cycle":** a more responsive axis feeding a WINNER-TAKE-ALL allocator increases
+whipsaw rather than reducing it — one reference change already turned over ~30% of
+equity in three sessions. Making the axis faster BEFORE the allocator is continuous
+would amplify exactly the behaviour the 2026-09-02 barbell/settling-window work was
+added to damp. **Sequence: continuous factor tilts FIRST, then re-open this.**
+When it is re-opened, note that the C1 basis inversion has already made the bridge
+materially more responsive (`bridge_direction` differs from the old 5y5y-based
+reading in ~52% of a 480-combination sweep), so a cycle of watching the new bridge
+reading alongside the confirmed direction is worth having before wiring anything.
+Cross-refs #88 (the same gate, framed from the C1 describe-only fields) — resolve
+them together, not separately.
+
+### 101. No nowcast source exists — the book holds stale realized inflation and fresh forward expectations, with nothing measuring the CURRENT impulse (MEDIUM — data gap, availability UNVERIFIED, cross-refs #100/#88)
+From the 2026-09-12 breakeven-basis cycle. The inflation axis reads two things:
+realized core (accurate, 60-65d stale) and breakevens (fresh, but an EXPECTATIONS
+measure — what the market thinks inflation will average, not what it is doing right
+now). Nothing in the system measures the current realized impulse. That gap is the
+whole reason the bridge exists and the whole reason #100 is contentious: a genuine
+nowcast would make the bridge-vs-realized argument largely moot.
+Candidate sources, **availability deliberately NOT verified this cycle** (adding any
+new data source was out of scope): **Cleveland Fed inflation nowcasting** (publishes
+current-month and next-month CPI/PCE nowcasts; some series historically on FRED —
+check before assuming), **Truflation** (daily, commercial API), **PriceStats /
+State Street** (daily, institutional, likely licensed). Before any of these is
+proposed as a change: confirm the series actually exists on FRED or a source already
+paid for, confirm its history is long enough to backtest against the ALFRED harness
+(#23), and confirm it is point-in-time reconstructable — a nowcast that silently
+revises is worse than no nowcast, because it would make every historical axis read
+unfalsifiable.
+
+### 102. `rate_decomposition` consumer decision — should `dominant_driver == "real_rate"` modulate duration sizing? (MEDIUM — architecture decision, data-gated on live observation)
+From the 2026-09-12 breakeven-basis cycle (Task C3/C4). The block ships
+DESCRIBE-ONLY and wired to nothing. The obvious consumer is duration: when a
+nominal-yield rise is driven by the REAL leg (growth/policy) rather than the
+breakeven leg, long-duration ballast (TLT/IEF) is taking the hit for a reason the
+inflation axis cannot see — on 2026-09-11 the book held TLT 8.42% + IEF 7.63% into
+exactly that ambiguity with DGS30 at 5.28%.
+**Do not wire this without deciding what it would actually change**: a real-rate
+read is not by itself a sell signal (real rates rising on a growth acceleration and
+on a term-premium shock imply opposite duration calls), so the honest first version
+is probably an EVIDENCE item available to an override rather than a sizing input.
+Gated on: (a) several sessions of the block running live so `dominant_driver`'s
+distribution is observed rather than assumed, and (b) decision gates **G-2**
+(`identity_tolerance_bp` = 15, proposed) and **G-3** (`real_share_pct` bands 65/35,
+proposed) being confirmed — both are currently unreviewed defaults and neither has
+been validated against live data.
 
 ### 88. G-4 decision gate — wire the leading inflation bridge to govern when realized core is stale (HIGH — architecture decision, blocking, cross-refs the 2026-09-02 reference-degeneracy cycle)
 From the 2026-09-02 reference-degeneracy cycle (`fix/20260902-reference-degeneracy`,

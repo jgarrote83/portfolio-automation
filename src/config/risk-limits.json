@@ -179,6 +179,14 @@
   },
   "_inflation_quality_note": "FOLLOWUPS #19: diagnostics-only inflation-quality context (Atlanta Fed sticky/flexible-price CPI, Dallas Fed trimmed-mean PCE, UMich 1y expectations) surfaced alongside the realized-core inflation axis. `band` gates each series' own month-over-month rising/falling/flat read. NOT wired into transition_watch confirmation — decision D-3/#78 on the inflation-side re-risk bar remains open and stays 2-of-3; a 4th source here would silently change that arithmetic.",
 
+  "rate_decomposition": {
+    "identity_tolerance_bp": 15.0,
+    "real_share_real_rate_min": 65.0,
+    "real_share_inflation_max": 35.0,
+    "staleness_days": 7
+  },
+  "_rate_decomposition_note": "C3/C4 (2026-09-12): DESCRIBE-ONLY decomposition of a 20-session nominal-yield move into its real and inflation-expectation legs (DGS10 = DFII10 + T10YIE — all three already collected, so zero new API cost). A breakeven is a DIFFERENCE and cannot say which leg moved; when nominal yields rise and breakevens do not, that is a REAL-RATE shock (growth/policy), not an inflation shock — and on 2026-09-11 the book held TLT 8.42% / IEF 7.63% into exactly that ambiguity with DGS30 at 5.28%. WIRED TO NOTHING this cycle: no consumer reads it, and bond_signals stays byte-identical (DFII10 already feeds its `systemic` sub-score and the 2.5% real-yield hard trigger — this block must never duplicate, shadow or alter either; proven by test). dominant_driver is BANDED rather than a bare comparison so a fraction of a basis point cannot flip the label: real_share_pct >= real_share_real_rate_min -> 'real_rate', <= real_share_inflation_max -> 'inflation', else 'mixed'. identity_tolerance_bp gates the C4 cross-check (nominal - real - breakeven on latest levels) — a free integrity check on three of the axis's most important inputs, in a system with a standing history of silent data defects (MU quoted 10x high for weeks, rotating frozen quotes, an ETN ADV reported at $2.4M against a real ~$1B). It warns ONLY when all three legs are fresh, because differing as-of dates are the expected benign cause; each leg's as_of and days_stale are carried in the payload so a reader can dismiss it at a glance instead of investigating. Observed 2026-09-11: 4.83 - 2.46 = 2.37 vs T10YIE 2.40 = a 3bp residual, comfortably inside tolerance. Both bands and the tolerance are PROPOSED, not confirmed — decision gates G-2 (tolerance 15bp) and G-3 (65/35 bands).",
+
   "market_shock": {
     "news_baseline_min_sessions": 10,
     "news_baseline_window_sessions": 20,
