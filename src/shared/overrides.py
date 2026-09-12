@@ -127,7 +127,12 @@ def _premise_ok(premise: str) -> bool:
     return premise in _VALID_PREMISES or premise.startswith("divergence:")
 
 
-def validate_override(ov: dict, cfg: dict, gap_signed: float | None = None) -> dict:
+def validate_override(
+    ov: dict,
+    cfg: dict,
+    gap_signed: float | None = None,
+    effective_selected: dict[str, str] | None = None,
+) -> dict:
     """Validate one override record. Returns a decision dict:
 
         {"outcome": "accepted" | "downsized" | "rejected",
@@ -151,6 +156,17 @@ def validate_override(ov: dict, cfg: dict, gap_signed: float | None = None) -> d
     rate. When no gap is available (off-roster sleeve, or gaps not supplied),
     derivation is skipped and the declared direction is used as-is — unchanged,
     fully backward-compatible behavior.
+
+    ``effective_selected`` (session 2026-09-12) = role_id -> live incumbent
+    ticker (the SleeveSelectionState map). Named for its content rather than
+    ``overrides`` — the quadrants.py convention — purely to avoid colliding with
+    this module's own meaning of "override" (an OVERRIDE_SCHEMA_V1_1 record). It
+    is passed straight through to `derive_override_direction`. Without it, a
+    sleeve whose role has auto-switched (SOXX, IHE) fails to classify, derivation
+    returns None, and the model's SELF-DECLARED direction stands with no
+    deterministic cross-check — exactly the guard Task E1 exists to provide, and
+    silently absent for precisely the sleeves an auto-switch created.
+    Omitted/empty is the unchanged frozen-config behavior.
     """
     reasons: list[str] = []
     max_mag = float(cfg.get("max_magnitude_pp", OVERRIDE_DEFAULTS["max_magnitude_pp"]))
@@ -196,7 +212,7 @@ def validate_override(ov: dict, cfg: dict, gap_signed: float | None = None) -> d
     # --- Task E1: derive the direction deterministically; correct-and-flag, ----
     # never reject solely for a mislabeled direction (the structural direction
     # gate above already rejected anything that isn't a valid enum value at all).
-    derived = derive_override_direction(sleeve, gap_signed)
+    derived = derive_override_direction(sleeve, gap_signed, effective_selected)
     effective_direction = derived or direction
     disagreement = None
     if derived is not None and derived != direction:
@@ -225,7 +241,10 @@ def validate_override(ov: dict, cfg: dict, gap_signed: float | None = None) -> d
 
 
 def validate_overrides(
-    overrides: list[dict], cfg: dict | None = None, gaps: list[dict] | None = None,
+    overrides: list[dict],
+    cfg: dict | None = None,
+    gaps: list[dict] | None = None,
+    effective_selected: dict[str, str] | None = None,
 ) -> dict:
     """Validate a list of override records. Returns:
 
@@ -240,6 +259,10 @@ def validate_overrides(
     lets each override's direction be derived deterministically rather than
     trusted from the model's claim. Optional and backward-compatible: omitted or
     a sleeve missing from ``gaps`` simply skips derivation for that record.
+
+    ``effective_selected`` (session 2026-09-12) — role_id -> live incumbent
+    ticker — is forwarded to every record so an auto-switched sleeve still
+    classifies; see `validate_override`.
     """
     cfg = cfg or OVERRIDE_DEFAULTS
     gap_by_sleeve: dict[str, float] = {}
@@ -256,7 +279,9 @@ def validate_overrides(
     for ov in overrides or []:
         ov = ov or {}
         sleeve = str(ov.get("sleeve") or "").upper()
-        decisions.append(validate_override(ov, cfg, gap_by_sleeve.get(sleeve)))
+        decisions.append(
+            validate_override(ov, cfg, gap_by_sleeve.get(sleeve), effective_selected)
+        )
     return {
         "accepted": [d["override"] for d in decisions if d["outcome"] == "accepted"],
         "downsized": [d["override"] for d in decisions if d["outcome"] == "downsized"],

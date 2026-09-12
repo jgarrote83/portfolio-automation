@@ -103,6 +103,22 @@ def role_of(ticker: str) -> str | None:
     return None
 
 
+def role_block_of(ticker: str) -> str | None:
+    """The ``block`` of the role whose POOL contains `ticker` (None if off-roster).
+
+    Selection-independent (pool-based), which is the point: it is the second,
+    independent opinion the A5 classification tripwire cross-checks
+    ``is_de_risk_move``'s answer against (session 2026-09-12). Resolving both
+    sides of that check through the same helper would make it tautological — and
+    a tautological self-check is exactly what let a "re-risk shortfall" label sit
+    on a sell of the book's largest amplifier for three sessions with nothing
+    noticing."""
+    rid = role_of(ticker)
+    if rid is None:
+        return None
+    return _ROLES[rid].get("block")
+
+
 def intl_roles() -> tuple[str, ...]:
     """The rotation-governed international roles (quadrants == 'rotation')."""
     return tuple(rid for rid, r in _ROLES.items() if r.get("quadrants") == "rotation")
@@ -160,6 +176,52 @@ def amplifier_set(overrides: dict[str, str] | None = None) -> set[str]:
         return set(AMPLIFIER_US) | set(AMPLIFIER_INTL)
     return (set(_selected_by_block("amplifier_us", overrides))
             | set(_selected_by_block("amplifier_intl", overrides)))
+
+
+def amplifier_block_pool() -> set[str]:
+    """Every POOL member of every Amplifier-block role (US ∪ intl) — selected or
+    not. Selection-INDEPENDENT by construction: pools do not change when a role
+    auto-switches, so this takes no ``overrides``.
+
+    Added session 2026-09-12 for the D3 sell-side classification. ``amplifier_set``
+    answers "which name is the role's incumbent right now"; this answers "is this
+    name risk-on exposure at all", which is the question "is selling it de-risk?"
+    actually turns on. Using the incumbent set there is wrong in BOTH directions:
+    the frozen one misses the new incumbent (SOXX — the bug this session fixes),
+    and the effective one misses the DESELECTED one (SMH), whose sanctioned end
+    state is a full exit to zero (auto-switch decision D-G1). Both are semiconductor
+    ETFs; trimming either reduces risk-on exposure. Keying on the pool classifies
+    every member of the role — incumbent, deselected predecessor, and any name
+    left stranded by a chain of switches — identically and permanently."""
+    out: set[str] = set()
+    for r in _ROLES.values():
+        if r.get("block") in ("amplifier_us", "amplifier_intl"):
+            out |= {str(m).upper() for m in r.get("pool", ())}
+    return out
+
+
+def defensive_set(overrides: dict[str, str] | None = None) -> set[str]:
+    """The effective DEFENSIVE ticker set (Damper block ∪ SGOV) — the exact
+    counterpart to ``amplifier_set``, added session 2026-09-12 so
+    ``shared/reference_execution.py`` stops resolving "is this name defensive?"
+    against a frozen module-level constant.
+
+    Motivating defect (the same class ``amplifier_set`` was added for on
+    2026-07-27, caught in ``trade_validation`` but missed one module over):
+    after ``healthcare_def`` auto-switches XLV→IHE, the frozen ``DAMPER`` tuple
+    still says XLV, so ``is_de_risk_move("buy", "IHE")`` read False — buying the
+    book's *effective* healthcare damper did not classify as de-risk and its
+    shortfall could never be synthesized.
+
+    SGOV is kept as a LITERAL rather than resolved from the ``cash`` block, so
+    the omitted/empty-``overrides`` path is byte-identical to the frozen
+    ``set(DAMPER) | {"SGOV"}`` every existing caller already relies on. The cash
+    role's pool is single-member (``["SGOV"]``), so it cannot auto-switch and
+    there is nothing for an override to substitute; should that ever change,
+    resolve it here rather than in a consumer."""
+    if not overrides:
+        return set(DAMPER) | {"SGOV"}
+    return set(_selected_by_block("damper", overrides)) | {"SGOV"}
 
 
 def _build_quadrant_concentrate(overrides: dict[str, str] | None = None) -> dict[str, tuple[str, ...]]:

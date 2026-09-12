@@ -28,9 +28,9 @@ from shared.overrides import OVERRIDE_DEFAULTS, validate_overrides
 from shared.quadrants import (
     CORE_ROSTER,
     EXEMPT_HOLDS,
-    QUADRANT_CONCENTRATE,
     active_quadrant,
     benchmark_etf_for,
+    concentrate_names,
     quadrant_allocation_bucket,
 )
 from shared.reference_execution import (
@@ -238,7 +238,15 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
     # model's self-declared `direction` — see shared/overrides.py::validate_override.
     try:
         cfg = _load_override_cfg()
-        result = validate_overrides(trades_obj.get("overrides", []), cfg, gaps)
+        # `vctx["effective_selected"]` (session 2026-09-12) lets Task E1's
+        # deterministic direction derivation classify an AUTO-SWITCHED incumbent
+        # (SOXX, IHE) instead of falling through to the model's self-declared
+        # claim. Sourced from the same map the Tier-1 validator already uses —
+        # never re-derived here.
+        result = validate_overrides(
+            trades_obj.get("overrides", []), cfg, gaps,
+            vctx.get("effective_selected"),
+        )
         trades_obj["override_validation"] = {
             "accepted": len(result["accepted"]),
             "downsized": len(result["downsized"]),
@@ -313,10 +321,21 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
                     "sleeves": recon["sleeves"],
                     "summary": recon["summary"],
                     "enforcement_notional_usd": recon["enforcement_notional_usd"],
+                    # A5 (2026-09-12): expected empty on every healthy run.
+                    "classification_conflicts": recon.get("classification_conflicts", []),
                 }
                 # Task D2 (unconditional, no gate): surface non_compliant_flagged
                 # sleeves in the REPORT, not just the JSON.
                 report_md += _flagged_sleeves_addendum(recon["sleeves"])
+                # A5 (2026-09-12): a blocking Data Integrity Warning when the
+                # de-risk classifier disagrees with the role/block metadata.
+                _conflicts = recon.get("classification_conflicts") or []
+                if _conflicts:
+                    logger.error(
+                        "De-risk CLASSIFICATION CONFLICT on %d sleeve(s): %s",
+                        len(_conflicts), [c.get("symbol") for c in _conflicts],
+                    )
+                report_md += _classification_conflict_addendum(_conflicts)
                 if recon["enforced_trades"]:
                     # Keep the executor's sells-before-buys contract across the
                     # merge (stable sort preserves model order within each side).
@@ -519,6 +538,40 @@ def _override_saturation_addendum(sat: dict) -> str:
         "wrong, not that the book's positioning is. Treat this as a prompt to re-examine "
         "`reference_weights` (regime read, quadrant bucket, conviction proxy) before "
         "filing another override this session.\n"
+    )
+
+
+def _classification_conflict_addendum(conflicts: list[dict]) -> str:
+    """A5 (session 2026-09-12) — a BLOCKING Data Integrity Warning when band
+    enforcement's de-risk/re-risk classifier disagrees with the independently
+    resolved role/block metadata (`shared/reference_execution.py::
+    classification_conflict`). Same prominence as the D1 override-saturation
+    alarm, which is the precedent for this kind of deterministic self-check.
+
+    Expected to render NOTHING on every healthy run. It exists because the
+    2026-07-27→2026-09-12 defect printed "re-risk shortfall" for a required SELL
+    of the book's largest amplifier three sessions running, and no layer treated
+    that as anomalous — a mislabel is only cheap when something is looking for
+    it."""
+    if not conflicts:
+        return ""
+    rows = "".join(
+        f"- **{c.get('symbol')} {str(c.get('side', '')).upper()}** — {c.get('detail')}\n"
+        for c in conflicts
+    )
+    return (
+        "\n\n---\n\n### 🚨 Data Integrity Warning — de-risk classification conflict\n\n"
+        f"**{len(conflicts)} sleeve(s) were classified `re_risk` by band enforcement "
+        "while the role/block metadata independently resolves them the opposite "
+        "way.**\n\n"
+        f"{rows}\n"
+        "A re-risk classification means the shortfall is NEVER auto-synthesized "
+        "(spec §6 asymmetry), so a wrong one silently suppresses a required trade "
+        "for as long as it stands — the exact failure that froze a ~20%-of-equity "
+        "amplifier sleeve from 2026-07-27 to 2026-09-12. The classification was "
+        "NOT auto-corrected: treat this as a code defect in the block model "
+        "(`shared/quadrants.py` membership vs `shared/reference_execution.py`), "
+        "not as a judgment call to reason around this session.\n"
     )
 
 
@@ -1624,9 +1677,16 @@ def _write_regime_suspect_history(date_str: str, snapshot: dict, trades_obj: dic
     prices = snapshot.get("prices") or {}
     trades = trades_obj.get("trades") or []
     year_month = date_str[:7]
+    # Session 2026-09-12 (Task A2 audit): resolve each bucket's members through
+    # the LIVE effective incumbents. Against the frozen `QUADRANT_CONCENTRATE`,
+    # a trade in an auto-switched incumbent (SOXX for Q1's `semis` role) matched
+    # no bucket, so `delta_usd`/`action` read "held" on a session the book had
+    # actually increased or reduced that quadrant — silently wrong evidence in
+    # the exact dataset #13's monthly review reads to judge regime calls.
+    eff_sel = _snapshot_effective_selected(snapshot)
 
     for q in suspects:
-        members = set(QUADRANT_CONCENTRATE.get(q, ()))
+        members = set(concentrate_names(q, eff_sel))
         delta_usd = 0.0
         for t in trades:
             sym = str(t.get("symbol") or t.get("ticker") or "").upper()

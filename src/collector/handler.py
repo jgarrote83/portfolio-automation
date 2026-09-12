@@ -28,7 +28,6 @@ from shared.clients.alpaca import AlpacaClient
 from shared.quadrants import (
     AMPLIFIER_INTL,
     CORE_ROSTER,
-    DAMPER,
     EXEMPT_HOLDS,
     LEGACY_EXITS,
     QUADRANT_BENCHMARK_ETF,
@@ -36,6 +35,7 @@ from shared.quadrants import (
     active_quadrant,
     benchmark_etf_for,
     concentrate_names,
+    defensive_set,
     favored_bucket,
     intersection_names,
     is_amplifier,
@@ -1751,21 +1751,52 @@ def _build_track_record() -> dict:
 # SGOV-denominated cash sleeve; the small literal-cash remainder is absent from the
 # vector and thus implicitly earns 0.0, which is exactly right).
 
-def _override_sign(sleeve: str, direction: str) -> float | None:
+def _override_sign(
+    sleeve: str, direction: str, effective_selected: dict[str, str] | None = None,
+) -> float | None:
     """+1 when the override held MORE of the sleeve than reference, −1 when LESS.
 
     The row stores the deviation's RISK direction, not the weight direction, but
     the two determine each other through the block model: holding more of a
     defensive name (or less of an amplifier) than reference IS the de-risk
-    deviation, and vice versa. None for an invalid direction."""
+    deviation, and vice versa. None for an invalid direction.
+
+    ``effective_selected`` (session 2026-09-12, Task A2 audit — the SAME defect
+    class as `is_de_risk_move`, found by grepping every frozen-set read): the
+    Damper block must resolve through the LIVE auto-switched incumbent map, not
+    the frozen config-`selected` tuple. A `healthcare_def` XLV→IHE switch left
+    IHE reading `defensive = False`, which INVERTS this sign and therefore
+    inverts `excess_pp`/`resolved_correct` for every override filed on the
+    effective incumbent — a silently-backwards graded outcome feeding the
+    Learning Loop's counterfactual.
+
+    The map passed in is the one recorded in the override's OWN filed-date
+    snapshot (point-in-time, not today's) — a role that auto-switched AFTER the
+    override was filed must not retroactively re-sign an old grade. Omitted/empty
+    falls back to the frozen config-`selected` incumbents, which is the correct
+    degradation for a filed-date snapshot predating the top-level
+    `effective_selected` key.
+
+    SECOND, independent defect fixed by the same line (same family — a
+    hand-rolled block set disagreeing with the shared model): this read
+    ``set(DAMPER)``, which EXCLUDES SGOV, while `derive_override_direction` and
+    `is_de_risk_move` both classify SGOV as defensive. An override on the cash
+    sleeve therefore graded with an INVERTED sign regardless of auto-switch —
+    ``de_risk`` on a SGOV overweight (holding more defense than reference, the
+    textbook de-risk deviation) scored −1 instead of +1. `defensive_set()` is now
+    the single source of truth for "is this sleeve defensive" across all three
+    call sites, so they can no longer drift."""
     d = (direction or "").lower()
     if d not in ("de_risk", "re_risk"):
         return None
-    defensive = (sleeve or "").upper() in set(DAMPER)
+    defensive = (sleeve or "").upper() in defensive_set(effective_selected)
     return 1.0 if defensive == (d == "de_risk") else -1.0
 
 
-def _grade_override(row: dict, ref_vector: dict | None, px) -> dict:
+def _grade_override(
+    row: dict, ref_vector: dict | None, px,
+    effective_selected: dict[str, str] | None = None,
+) -> dict:
     """Grade ONE matured override vs the reference-path counterfactual (pure).
 
     ``px(symbol, date) -> float | None`` returns the last close on/before `date`.
@@ -1785,7 +1816,7 @@ def _grade_override(row: dict, ref_vector: dict | None, px) -> dict:
     filed = str(row.get("recommended_at") or "")[:10]
     matured = str(row.get("falsifier_date") or "")[:10]
     sleeve = str(row.get("sleeve") or "").upper()
-    sign = _override_sign(sleeve, row.get("direction"))
+    sign = _override_sign(sleeve, row.get("direction"), effective_selected)
     if not filed or not matured or not sleeve or sign is None or not ref_vector:
         return indeterminate
 
@@ -1866,23 +1897,33 @@ def _stamp_override_outcomes(fmp: FMPClient) -> None:
         return _close_on_or_before(fmp_cache[sym], d)
 
     # Filed-date reference vectors, one snapshot read per unique filed date.
-    ref_cache: dict[str, dict | None] = {}
+    # Session 2026-09-12 (Task A2): the SAME read also yields that date's
+    # `effective_selected` map, so `_override_sign` resolves the Damper block
+    # through the incumbents that were live WHEN THE OVERRIDE WAS FILED — at
+    # zero extra I/O, and without letting a later auto-switch retroactively
+    # re-sign an old grade. `{}` for a snapshot predating the top-level key
+    # (2026-07-28) degrades to the frozen config-`selected` read, unchanged.
+    ref_cache: dict[str, tuple[dict | None, dict]] = {}
 
-    def _ref_vector(filed: str) -> dict | None:
+    def _filed_ctx(filed: str) -> tuple[dict | None, dict]:
         if filed not in ref_cache:
             try:
                 snap = read_snapshot(filed)
+                eff = snap.get("effective_selected")
                 ref_cache[filed] = (
-                    (snap.get("reference_weights") or {}).get("target_weights_pct") or None
+                    (snap.get("reference_weights") or {}).get("target_weights_pct") or None,
+                    {str(k): str(v).upper() for k, v in eff.items() if k and v}
+                    if isinstance(eff, dict) else {},
                 )
             except Exception:  # noqa: BLE001
-                ref_cache[filed] = None   # missing filed-date snapshot → indeterminate
+                ref_cache[filed] = (None, {})  # missing filed-date snapshot → indeterminate
         return ref_cache[filed]
 
     stamped = 0
     for r in pending:
         filed = str(r.get("recommended_at") or "")[:10]
-        grade = _grade_override(r, _ref_vector(filed) if filed else None, _px)
+        ref_vec, filed_eff = _filed_ctx(filed) if filed else (None, {})
+        grade = _grade_override(r, ref_vec, _px, filed_eff)
         try:
             upsert_entity("OverrideHistory", {
                 "PartitionKey": r["PartitionKey"], "RowKey": r["RowKey"],
@@ -3741,13 +3782,18 @@ def run() -> None:
             "settling_sessions", REFERENCE_EXECUTION_DEFAULTS["settling_sessions"]))
         _settling_tranche = float(execution_config.get(
             "settling_tranche_pp_max", REFERENCE_EXECUTION_DEFAULTS["settling_tranche_pp_max"]))
+        _settling_revision = str(execution_config.get(
+            "settling_revision", REFERENCE_EXECUTION_DEFAULTS["settling_revision"]))
         _prior_settling = _load_settling_window_state()
         _settling_window = advance_settling_window(
-            _prior_settling, today, _settling_sessions, _settling_tranche)
+            _prior_settling, today, _settling_sessions, _settling_tranche,
+            _settling_revision)
         _save_settling_window_state(_settling_window)
         execution_config["settling_window"] = {
             "active": _settling_window["active"],
             "sessions_remaining": _settling_window["sessions_remaining"],
+            "start_date": _settling_window["start_date"],
+            "revision": _settling_window["revision"],
             "effective_cap": resolve_settling_tranche_cap(
                 execution_config.get("tranche_pp_max", REFERENCE_EXECUTION_DEFAULTS["tranche_pp_max"]),
                 _settling_window,
@@ -5968,6 +6014,12 @@ def _load_settling_window_state() -> dict | None:
                 "start_date": e.get("start_date") or "",
                 "sessions_elapsed": int(e.get("sessions_elapsed") or 0),
                 "last_date": e.get("last_date") or "",
+                # A4 (2026-09-12): the reference-engine revision this window
+                # belongs to. A row written before A4 has no such property —
+                # `None` then compares unequal to a non-empty config revision
+                # and correctly RE-ARMS the window on the first run after a
+                # revision is set, which is exactly the intended migration.
+                "revision": e.get("revision"),
             }
     return None
 
@@ -5979,6 +6031,7 @@ def _save_settling_window_state(state: dict) -> None:
         "start_date": state.get("start_date") or "",
         "sessions_elapsed": int(state.get("sessions_elapsed") or 0),
         "last_date": state.get("last_date") or "",
+        "revision": state.get("revision") or "",
     })
 
 
