@@ -1125,6 +1125,11 @@ def _build_catalyst_screen(
         raw_momentum = catalyst_screen.momentum_from_bars(bars, _CATALYST_MOMENTUM_WINDOW_D)
         raw_volume_surge = catalyst_screen.volume_surge_from_bars(
             bars, _CATALYST_VOLUME_WINDOW_D)
+        # G-10 (2026-09-12) — dry-window instrumentation, DESCRIBE-ONLY. Feeds no
+        # component and no gate; it exists so the fixed-vs-ATR-scaled barrier
+        # question (§8.1) is settled on measured data instead of an assumed ATR.
+        raw_noise_band = catalyst_screen.mean_abs_daily_move_pct(
+            bars, _CATALYST_VOLUME_WINDOW_D)
         raw_rel_strength = catalyst_screen.relative_strength_from_closes(
             close_by_date.get(sym) or {}, spy_closes, _CATALYST_RELATIVE_STRENGTH_WINDOW_D)
         # D-priority-4 (2026-08-14 flex-conviction-path cycle): FMP's own
@@ -1164,6 +1169,13 @@ def _build_catalyst_screen(
             "basis": {
                 "sector": profile.get("sector"),
                 "is_fund": _is_fund,
+                # G-10: routine noise band vs the B2 stop. NOT an ATR (the light
+                # endpoint has no high/low) — see mean_abs_daily_move_pct.
+                "mean_abs_daily_move_pct_20d": raw_noise_band,
+                "b2_stop_pct": 1.5,
+                "stop_vs_noise_band": (
+                    round(1.5 / raw_noise_band, 3) if raw_noise_band else None
+                ),
                 "adv_usd": adv,
                 "price_observations": len(bars),
                 "earnings_date": earnings_dates.get(sym),

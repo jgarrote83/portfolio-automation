@@ -87,6 +87,19 @@ class FlexConfig:
     gap_adr_mult: float = 2.0          # gap above this × ADR raises the confirmation bar (not auto-skip)
     # --- liquidity screen (tied to IEX-VWAP validity) ---
     min_adv_usd: float = 50_000_000.0  # min average daily dollar volume for entry
+    # --- conviction path: DORMANT (G-8, session 2026-09-12) ------------------
+    # Scoped OUT of the news-momentum profile, not deleted. The conviction path
+    # is built around `p_up` vs an empirical `base_rate_up` over a ~2-year
+    # lookback for a 15-30 DAY horizon, gated by a 2-session confirm/release
+    # hysteresis inherited from a multi-week thematic overlay. None of that means
+    # anything for a ~2-day news trade: the confirm delay plus the collector's own
+    # one-session lag consumes essentially the whole holding period (FOLLOWUPS
+    # #107). The fix is SCOPING, not retuning `confirm_sessions` — retuning would
+    # keep an ill-fitting mechanism and merely shorten it. These are two different
+    # strategies sharing a sleeve; only the catalyst/news path belongs on a 2-day
+    # horizon. Left intact and dormant: if a slower flex sub-strategy is ever
+    # wanted, this is the right substrate.
+    conviction_path_enabled: bool = False
     # --- conviction-path profile (Task E, 2026-08-14 flex-conviction-path cycle) ---
     # A wider stop than the catalyst profile's 4.0% — a multi-week thesis needs room
     # the LLM's own invalidation level defines, not a tight intraday ATR distance.
@@ -109,6 +122,11 @@ class FlexConfig:
         return self.stop_epsilon_atr * atr
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    return default if raw is None else raw.strip().lower() == "true"
+
+
 def load_flex_config() -> FlexConfig:
     """Build a FlexConfig from FLEX_* env overrides (falls back to locked defaults)."""
     d = FlexConfig()
@@ -125,6 +143,7 @@ def load_flex_config() -> FlexConfig:
         entry_late_cutoff_min=_env_int("FLEX_ENTRY_LATE_CUTOFF_MIN", d.entry_late_cutoff_min),
         gap_adr_mult=_env_float("FLEX_GAP_ADR_MULT", d.gap_adr_mult),
         min_adv_usd=_env_float("FLEX_MIN_ADV_USD", d.min_adv_usd),
+        conviction_path_enabled=_env_bool("FLEX_CONVICTION_PATH_ENABLED", d.conviction_path_enabled),
         conviction_max_stop_pct=_env_float("FLEX_CONVICTION_MAX_STOP_PCT", d.conviction_max_stop_pct),
         conviction_no_chase_atr=_env_float("FLEX_CONVICTION_NO_CHASE_ATR", d.conviction_no_chase_atr),
         cash_sleeve_floor_pct=_env_float("FLEX_CASH_SLEEVE_FLOOR_PCT", d.cash_sleeve_floor_pct),

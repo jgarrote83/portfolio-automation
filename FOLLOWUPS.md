@@ -3,7 +3,25 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-09-12 (flex B2: exit profile + native OCO bracket — branch `feat/20260912-flex-exit-profile-b2`).**
+**▶ START HERE — last session 2026-09-12 (post-B2 amendment §7/§8 — corrections, safety fix, instrumentation).**
+Three corrections to MY OWN reporting, all caught by the amendment and settled
+against live data: (1) **the G3 tightening is THEORETICAL** — `_build_flex_review`
+is dead code (called only from its own test, `flex_review` is not a snapshot key),
+so the drawdown carve-out / closet-beta catch / `ok_flagged` were already
+unreachable; this REMOVES one stated reason for keeping the switch off, the others
+stand. (2) **B1's 1592→1592 is proven**, not a flat total hiding collateral
+deletion: +20 new, −14 `test_flex_quadrant_resolution`, −6 `test_regime_fit_score`,
++1 sentinel split, −1 review test made unreachable = net 0. (3) **SOXX cannot have
+fired yet** — PR #49 merged 2026-09-11 22:14 ET, AFTER Friday's 09:00 ET collector;
+09-12 is a Saturday. **Monday 2026-09-14 09:00 ET is the first live run**, and the
+09:35 auto-executor will submit the ~3pp settling-capped SOXX sell.
+**A REAL gap found and fixed (§8.2):** bracket/OTO child legs carry
+broker-assigned UUID `client_order_id`s (verified live), so `_sweep_orphan_orders`
+skipped a stale leg on a flat position; `engine_owned` now covers it. Pre-dates
+the bracket. **G-8** conviction path dormant, **G-10** noise-band instrumentation
+(a true ATR is not computable here — see #112). New entries **#109-#112**.
+
+**Previous — 2026-09-12 (flex B2: exit profile + native OCO bracket — branch `feat/20260912-flex-exit-profile-b2`).**
 N2/N3/N4 of the B2 half. Exit profile is now a NATIVE Alpaca OCO bracket (+2%
 take-profit limit / −1.5% stop, both resting at the broker) — dropping the trail
 is what ALLOWS the bracket, which removes the ~15-minute exit-resolution caveat
@@ -750,6 +768,97 @@ than folded into a de-risk-classifier PR. Prefer the pool-based fix and decide
 explicitly whether "aggregate international weight" means the selected names or
 all held intl names — they are different questions and the current code answers
 neither correctly.
+
+### 109. Cross-layer claims must carry their evidence inline (LOW — process, cross-refs #98/#103)
+Amendment §7.1, 2026-09-12. Two errors three days apart share one mechanism:
+**an assertion from an adjacent layer was promoted to fact because it came from a
+layer that usually verifies.**
+
+- A *report* narrative said "ETN ADV $2.4M"; it was codified into a prompt and
+  then into FOLLOWUPS #98 without checking the snapshot. The figure was another
+  ticker's ledger row, mis-scaled 1000x.
+- An *implementation probe* summary said "resolves #34"; it was codified into an
+  amendment without opening #34. #34 is the `global_overnight` tone block — a
+  different endpoint family entirely.
+
+#103 covers report → prompt. Nothing covered implementation → audit or audit →
+implementation. **Convention (no code):** any cross-layer claim that will be
+CODIFIED — into a prompt, a FOLLOWUPS entry, or a PR body — carries its evidence
+inline: probe output, `file:line`, or a named snapshot path. Not *"resolves #34"*
+but *"resolves #34 (probed: /most-actives 200, /biggest-gainers 200)"*. Had it
+been in force, "resolves #34" would have had no evidence to attach, because #34
+was never opened. Already improving unprompted (PR #52 carries
+`function_app.py:107`, the HTTP 402s, and the 7/7 funnel counts inline); this
+makes it a rule.
+
+### 110. Re-grade decision — `_override_sign` graded every SGOV override backwards (HIGH — data integrity, blocks quoting the override win rate)
+From the 2026-09-12 de-risk-classifier A2 audit (see CLAUDE.md). `_override_sign`
+read `set(DAMPER)`, which EXCLUDES SGOV, while `derive_override_direction` and
+`is_de_risk_move` both classify SGOV as defensive. Every cash-sleeve override
+therefore graded with an INVERTED sign — independent of the auto-switch defect
+that shared the line. The same read also inverted every override on an
+auto-switched incumbent (IHE).
+
+**OverrideHistory is the Learning Loop's training data.** Until this is settled,
+**stop quoting the 0.43 override win rate** — it is computed over a set with an
+unknown number of sign-inverted rows.
+
+Decide: (a) re-grade the affected rows in place (they are identifiable —
+`sleeve == "SGOV"`, plus any sleeve whose role had auto-switched as of the row's
+filed date, which the filed-date snapshot's `effective_selected` now resolves
+point-in-time); (b) mark them `outcome_status: "regrade_pending"` and exclude
+from aggregates; or (c) accept the contamination and document the win rate as
+unreliable before a cut-off date. **(a) is preferred** — the data is
+reconstructable and the fix is already in the code.
+
+### 111. Dry window produces a NOMINATION LOG, not a shadow track record (LOW — expectation-setting, cross-refs #108)
+Amendment §7.4 corrects an overstatement of mine. With `FLEX_ENABLED=false` the
+engine does not run, so there are **no simulated entries or exits** — the window
+validates the FUNNEL (are the names liquid, real, stable day to day, not all
+separation-set collisions), not the STRATEGY. It produces no P&L and no hit rate.
+
+**Optional (G-9), recommended, not a blocker:** a small offline shadow-fill
+recorder — for each nomination record the entry price that would have applied,
+then mark it out against subsequent EOD data at +2% / −1.5% / 2-day. No broker
+interaction, no capital at risk. Given the sleeve's measured hit rate is 0.0
+(n=2) and the chosen configuration is the full 25% with no trial period, this is
+the only risk control that does not contradict that sizing decision, and it feeds
+the §2.2 measured-breakeven requirement directly. **Largely superseded by S2**
+(#108) if S2 ships first — S2 measures the same thing on real fills.
+
+### 112. G-10 — fixed-percent vs ATR-scaled barriers, EVIDENCE-GATED on the dry window (HIGH — design decision, data-gated)
+Amendment §8.1, 2026-09-12. **B1 selects for maximum volatility by construction**
+(`most_active ∪ biggest_gainers` ∩ fresh news ∩ volume surge = definitionally the
+noisiest names in the market that day) while **B2 applies the tightest stop in the
+system's history** (1.5%, down from 4.0%). The funnel finds the noisiest names and
+the exit applies a barrier sized for the quietest.
+
+**The identity that settles the principle:** for ANY fixed `+a/−b` barrier pair
+the driftless first-passage probability is exactly `b/(a+b)` — identical to the
+breakeven win rate. **So a fixed-barrier profile has ZERO structural edge at any
+ratio.** It is a pure, unlevered bet on the signal producing drift before the
+barriers resolve. Changing 2.0/1.5 to other numbers does not create an edge. If
+both barriers sit INSIDE the name's routine noise band, the trade resolves on
+noise before drift has room to express, and realizes the driftless outcome MINUS
+COSTS on every trade, however good the signal. The 2-day time stop makes it worse,
+not better — a third outcome at market raises the true breakeven above 42.9%.
+
+**Do NOT change the numbers on reasoning.** Instrumentation shipped 2026-09-12
+(G-10): `catalyst_screen.ledger[].basis.mean_abs_daily_move_pct_20d` /
+`b2_stop_pct` / `stop_vs_noise_band`, describe-only. **Note the measurement
+correction:** a true `atr14` is NOT computable in the collector (the light
+endpoint has no high/low) and the entry pipeline that computes it does not run
+while the engine is off — so this is an honest close-only substitute, and is
+deliberately not called an ATR.
+
+**Decide after the dry window, on the measured distribution.** If the stop is a
+small fraction of the routine daily move, the fix is to scale the barriers to
+volatility rather than fix them in percent — same 4:3 ratio, same 42.9%
+breakeven, but the barriers sit OUTSIDE routine noise on every name instead of
+inside it on the volatile ones. It also serves the original intent better: "a few
+minutes with a cost increase is enough" is a statement about SPEED, and
+ATR-scaling is what makes "quick" mean the same thing on a 1.5%-ATR name and a
+5%-ATR name.
 
 ### 108. B2 remainder — S1 kill switch + S2 at-close grading are NOT shipped (HIGH — risk control, blocking before the sleeve trades live)
 The 2026-09-12 B2 PR shipped N2 (bracket exit profile), N3 (all-day window) and

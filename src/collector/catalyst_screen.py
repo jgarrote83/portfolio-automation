@@ -324,6 +324,52 @@ def news_recency_score(hours_since: float | None, lookback_hours: int) -> float 
     return round(1.0 - (hours_since / lookback_hours), 4)
 
 
+def mean_abs_daily_move_pct(daily_bars: list[dict], window: int = 20) -> float | None:
+    """G-10 (session 2026-09-12) — the candidate's routine NOISE BAND: the mean
+    absolute close-to-close daily move over `window` sessions, as % of price.
+
+    **This is deliberately NOT called ATR, because it is not one.** A true ATR14
+    needs high/low bars; FMP's integrated `historical-price-eod/light` endpoint
+    returns close + volume only (verified — row keys are
+    `date`/`price`/`symbol`/`volume`), so no true range is computable here. And
+    the entry pipeline that DOES compute `atr14` only runs when the flex engine
+    runs — which, during the B1/B2 dry window, it does not. So the amendment's
+    "record atr14 for every nominated name" is not directly satisfiable; this is
+    the honest close-only substitute, and it answers the same question.
+
+    **The question it answers (G-10):** the B2 profile applies a fixed +2% /
+    -1.5% barrier pair to a universe (`most_active ∪ biggest_gainers`) selected
+    for maximum volatility by construction. For ANY fixed +a/-b pair the
+    driftless first-passage probability is exactly b/(a+b) — identical to the
+    breakeven win rate — so a fixed-barrier profile has ZERO structural edge and
+    is a pure bet on drift arriving before the barriers resolve. If both barriers
+    sit INSIDE the name's routine noise band, the trade resolves on noise and
+    realizes the driftless outcome minus costs, however good the signal is.
+
+    Compare this figure to the 1.5% stop: if a typical nominated name moves ~4%
+    on an ordinary day, a 1.5% stop is well inside one session's noise. Ascending
+    bars (oldest first), same contract as `momentum_from_bars`. `None` on thin
+    history — never a fabricated 0.0."""
+    closes: list[float] = []
+    for b in daily_bars or ():
+        c = b.get("c")
+        if c is None:
+            continue
+        try:
+            closes.append(float(c))
+        except (TypeError, ValueError):
+            continue
+    if len(closes) < window + 1:
+        return None
+    moves = []
+    for prev, cur in zip(closes[-window - 1:-1], closes[-window:]):
+        if prev and prev > 0:
+            moves.append(abs(cur / prev - 1.0) * 100.0)
+    if not moves:
+        return None
+    return round(sum(moves) / len(moves), 4)
+
+
 def volume_surge_from_bars(daily_bars: list[dict], window: int = 20) -> float | None:
     """Latest session's volume as a MULTIPLE of its own trailing `window`-day
     average (N1, session 2026-09-12) — the "something is happening right now"
@@ -642,6 +688,7 @@ __all__ = [
     "rankability",
     "movers_discovery_symbols",
     "volume_surge_from_bars",
+    "mean_abs_daily_move_pct",
     "volume_surge_score",
     "hours_since_latest_news",
     "applicable_components",

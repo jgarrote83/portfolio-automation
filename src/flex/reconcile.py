@@ -71,6 +71,7 @@ def reconcile_ledger(
 
     exits_to_record: list[dict] = []
     repairs: list[dict] = []
+    closed_order_ids: set[str] = set()
 
     for symbol in list(new_ledger.keys()):
         entry = new_ledger[symbol]
@@ -82,6 +83,15 @@ def reconcile_ledger(
         if held <= _QTY_EPS:
             exits_to_record.append({"symbol": symbol, "entry": entry, "reason": "closed_at_broker"})
             repairs.append({"action": "record_filled_stop", "symbol": symbol})
+            # Session 2026-09-12 (§8.2): remember this row's OWN broker order ids
+            # before dropping it. A bracket/OTO CHILD LEG carries a
+            # broker-assigned UUID `client_order_id`, not the engine's `FLEXC-`
+            # one (verified live 2026-09-12), so `_sweep_orphan_orders`' strict
+            # client-order-id scoping would skip a stale child leg entirely. These
+            # ids are provably ours — they came out of our own ledger row — so
+            # they extend the sweep without weakening the "never touch another
+            # engine's orders" doctrine.
+            closed_order_ids.update(str(i) for i in (entry.get("order_ids") or []))
             del new_ledger[symbol]
             continue
 
@@ -129,6 +139,10 @@ def reconcile_ledger(
             "client_order_id": o.get("client_order_id"),
             "submitted_at": o.get("submitted_at") or o.get("created_at"),
             "id": o.get("id"),
+            # True when this order id came from a ledger row closed THIS tick —
+            # i.e. provably an order this engine placed, even though its
+            # client_order_id is a broker-assigned child-leg UUID (§8.2).
+            "engine_owned": str(o.get("id")) in closed_order_ids,
         }
         for o in orders
         if str(o.get("symbol", "")).upper() not in managed
