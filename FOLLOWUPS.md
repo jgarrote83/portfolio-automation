@@ -3,7 +3,21 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-09-12 (post-B2 amendment §7/§8 — corrections, safety fix, instrumentation).**
+**▶ START HERE — last session 2026-09-13 (S1 kill switch shipped; FLEX SLEEVE RE-ENABLED).**
+Jorge chose to build the brake before enabling rather than after. **S1 (two-trip
+kill switch) is merged** — slow arm (hit rate < 0.45 after 20 graded closed
+trades) and fast arm (2.0% peak-to-trough sleeve drawdown, NO trade-count
+minimum). A trip suppresses NEW entries only; existing positions are managed to
+their exits normally, never force-liquidated. A trip is STICKY — clearing it is a
+human action. **`FLEX_ENABLED` is back to `true`, in Bicep AND live** (both, per
+the reverse-trap lesson). **The sleeve can take positions from the next in-hours
+tick.** `S2` (at-close grading / realized expectancy) is STILL NOT BUILT —
+FOLLOWUPS #108 — so the 42.9% breakeven remains a quoted floor, not a measured
+bar. Watch `flex_kill_switch` in the snapshot and `flex_state.kill_switch` in the
+engine state. New decision gate **G-11** (drawdown measured peak-to-trough, which
+can trip a still-net-profitable sleeve).
+
+**Previous — 2026-09-12 (post-B2 amendment §7/§8 — corrections, safety fix, instrumentation).**
 Three corrections to MY OWN reporting, all caught by the amendment and settled
 against live data: (1) **the G3 tightening is THEORETICAL** — `_build_flex_review`
 is dead code (called only from its own test, `flex_review` is not a snapshot key),
