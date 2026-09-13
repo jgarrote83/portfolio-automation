@@ -860,7 +860,18 @@ minutes with a cost increase is enough" is a statement about SPEED, and
 ATR-scaling is what makes "quick" mean the same thing on a 1.5%-ATR name and a
 5%-ATR name.
 
-### 108. B2 remainder — S1 kill switch + S2 at-close grading are NOT shipped (HIGH — risk control, blocking before the sleeve trades live)
+### 108. B2 remainder — **S1 SHIPPED 2026-09-13**; S2 at-close grading still open (HIGH — risk control)
+**UPDATE 2026-09-13: S1 (the two-trip kill switch) IS BUILT AND MERGED** — see
+CLAUDE.md's "Flex kill switch, S1" section. Jorge chose to build it before
+enabling the sleeve rather than after. `FLEX_ENABLED` was set `true` (Bicep +
+live) once it landed. **S2 remains open** and is what turns the 42.9% breakeven
+from a quoted floor into a measured bar; the kill switch's slow arm already reads
+realized P&L from the closed-trade ledger, so it functions without S2, but the
+expectancy question does not.
+
+Original entry follows.
+
+### 108a. (original) S1 + S2 were NOT shipped (superseded in part by the update above)
 The 2026-09-12 B2 PR shipped N2 (bracket exit profile), N3 (all-day window) and
 N4 (`per_name_cap` 12→6). **S1 and S2 from the amendment are NOT in it.**
 

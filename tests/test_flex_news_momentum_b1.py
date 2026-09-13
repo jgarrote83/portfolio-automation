@@ -437,3 +437,92 @@ def test_g10_fixed_barriers_have_no_structural_edge_by_construction():
         breakeven = b / (a + b)
         driftless_win_prob = b / (a + b)
         assert abs(breakeven - driftless_win_prob) < 1e-12
+
+
+# --- S1: the kill switch (amendment §2.3) -----------------------------------
+
+def _ct(pnl, day="2026-09-14", tid=None):
+    return {"trade_id": tid or f"t{day}{pnl}", "pnl_usd": pnl, "closed_date": day}
+
+
+def test_s1_fast_trip_needs_no_trade_count_minimum():
+    """The whole point of the second arm: the slow arm needs ~20 closed trades
+    (~10 trading days at ~2 closes/day post-N4) and a catastrophic path does not
+    wait that long. Three trades, -$2,100 on ~$99.5k = 2.11% -> trips."""
+    from flex.killswitch import evaluate_kill_switch
+    cfg = FlexConfig()
+    trades = [_ct(-700, "2026-09-14", "a"), _ct(-700, "2026-09-15", "b"),
+              _ct(-700, "2026-09-16", "c")]
+    st = evaluate_kill_switch(trades, 99_500.0, cfg, {})
+    assert st["tripped"] is True
+    assert st["trip_reason"] == "max_drawdown"
+    assert st["closed_trades"] == 3 < cfg.kill_switch_min_closed_trades
+
+
+def test_s1_slow_trip_requires_a_sample_and_fires_below_the_floor():
+    from flex.killswitch import evaluate_kill_switch
+    cfg = FlexConfig()
+    # 20 trades, 8 wins = 40% < 45% floor, but tiny P&L so the fast arm is quiet.
+    trades = ([_ct(5, f"2026-09-{i:02d}", f"w{i}") for i in range(1, 9)]
+              + [_ct(-4, f"2026-10-{i:02d}", f"l{i}") for i in range(1, 13)])
+    st = evaluate_kill_switch(trades, 99_500.0, cfg, {})
+    assert st["tripped"] is True and st["trip_reason"] == "hit_rate_floor"
+    assert st["hit_rate"] == 0.4
+    # one fewer graded trade -> below the sample bar -> armed, not tripped
+    st2 = evaluate_kill_switch(trades[:-1], 99_500.0, cfg, {})
+    assert st2["tripped"] is False and "armed" in st2["note"]
+
+
+def test_s1_unknown_pnl_is_excluded_never_counted_as_a_loss():
+    """`flex/trades.py` writes `pnl_usd: None` rather than fabricating a number
+    when a fill price is unknown. Scoring that as a loss would let a DATA GAP
+    trip a risk control -- same absent-vs-zero doctrine as the composite."""
+    from flex.killswitch import evaluate_kill_switch, hit_rate
+    trades = [_ct(10, "2026-09-14", "a"), {"trade_id": "b", "pnl_usd": None,
+                                           "pnl_unavailable_reason": "no fill price",
+                                           "closed_date": "2026-09-15"}]
+    hr, n = hit_rate(trades)
+    assert (hr, n) == (1.0, 1)          # not 0.5
+    st = evaluate_kill_switch(trades, 99_500.0, FlexConfig(), {})
+    assert st["gradeable_trades"] == 1 and st["closed_trades"] == 2
+    # nothing gradeable at all -> None, never a fabricated 0.0 that trips instantly
+    assert hit_rate([{"trade_id": "x", "pnl_usd": None}]) == (None, 0)
+
+
+def test_s1_a_trip_is_STICKY_and_never_clears_itself():
+    """Re-enabling is a HUMAN action. Without stickiness the switch would flap
+    around the threshold and a sleeve could re-enable itself into the same
+    failure."""
+    from flex.killswitch import evaluate_kill_switch
+    prior = {"tripped": True, "trip_reason": "max_drawdown", "tripped_at": "2026-09-14"}
+    # numbers now perfect -- still tripped
+    st = evaluate_kill_switch([_ct(500, "2026-09-20", "z")], 99_500.0, FlexConfig(), prior)
+    assert st["tripped"] is True
+    assert st["tripped_at"] == "2026-09-14"      # original date preserved
+    assert "human action" in st["note"]
+    # only an explicit human clear releases it
+    cleared = {**prior, "cleared_at": "2026-09-21"}
+    assert evaluate_kill_switch([_ct(500, "2026-09-20", "z")], 99_500.0,
+                                FlexConfig(), cleared)["tripped"] is False
+
+
+def test_s1_drawdown_is_peak_to_trough_not_cumulative_from_zero():
+    """G-11: `max_drawdown_pct` is NAMED drawdown, so it is measured
+    peak-to-trough. A sleeve that earns $5k then gives back $2.1k has a 2.11%
+    drawdown and trips, even though it is still net +$2.9k. That is a real
+    trade-off, recorded rather than silently chosen."""
+    from flex.killswitch import cumulative_drawdown_usd, evaluate_kill_switch
+    trades = [_ct(5000, "2026-09-14", "a"), _ct(-2100, "2026-09-15", "b")]
+    assert cumulative_drawdown_usd(trades) == 2100.0
+    st = evaluate_kill_switch(trades, 99_500.0, FlexConfig(), {})
+    assert st["tripped"] is True and st["trip_reason"] == "max_drawdown"
+    assert st["drawdown_basis"] == "peak_to_trough_cumulative_realized_pnl"
+
+
+def test_s1_disabled_config_never_trips():
+    from flex.killswitch import evaluate_kill_switch
+    import dataclasses
+    cfg = dataclasses.replace(FlexConfig(), kill_switch_enabled=False)
+    st = evaluate_kill_switch([_ct(-50_000, "2026-09-14", "a")], 99_500.0, cfg, {})
+    assert st["tripped"] is False
+    assert "no automatic brake" in st["note"]

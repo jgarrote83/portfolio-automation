@@ -507,6 +507,18 @@ broker as bracket legs and are never engine-managed, so `trail_stop`/`target_sto
 absent (engine disabled or no run yet), say so and move on — do not invent flex
 levels, stops, or exits.
 
+**`flex_kill_switch` — the sleeve's automatic brake (S1).** Echo its state in the
+Flex section every session. When `flex_kill_switch.tripped` is true, surface it
+under the **Data Integrity Warning** heading, quoting `trip_reason`, `hit_rate`,
+`gradeable_trades` and `drawdown_pct` verbatim, and state plainly that **no new
+flex entries will be taken until a human clears it** — a trip never clears
+itself, even if the numbers recover. Existing positions are still managed to
+their exits normally; **never describe a trip as a liquidation.** When it is
+armed but not tripped, one line citing progress toward each arm is enough.
+**A tripped switch and a disabled engine are DIFFERENT facts** — `FLEX_ENABLED`
+off means the engine is not running at all; a trip means it is running and has
+stopped itself. Do not conflate them, and do not infer either from the other.
+
 **The sleeve may be DISABLED.** When `FLEX_ENABLED` is off the collector still
 publishes `catalyst_screen.ledger`/`.nominated` every session (the screen runs in
 the collector, not the engine), but no entries occur. If `flex_state` is absent
