@@ -22,11 +22,16 @@ the pure decision modules.
 """
 from __future__ import annotations
 
+import logging
+
 from flex.exit_state import trading_days_between
 from shared.storage import read_json_blob, write_json_blob
 
+logger = logging.getLogger(__name__)
+
 _CONTAINER = "flex-ledger"
 _TRADES_BLOB = "closed-trades.json"
+_KILL_SWITCH_BLOB = "kill-switch.json"
 _EQUITY_BLOB = "equity-series.json"
 
 _QTY_EPS = 1e-6
@@ -177,6 +182,24 @@ def build_closed_trade(
 
 
 # --- daily sleeve mark series (Task C) --------------------------------------
+
+def read_kill_switch_state() -> dict:
+    """S1 — the persisted kill-switch state. ``{}`` on first run or a read
+    failure; `evaluate_kill_switch` treats that as "no prior trip", which is the
+    correct first-run behaviour (it cannot manufacture a trip from missing
+    state)."""
+    try:
+        return read_json_blob(_CONTAINER, _KILL_SWITCH_BLOB) or {}
+    except Exception:  # noqa: BLE001
+        logger.exception("kill-switch state read failed (non-fatal)")
+        return {}
+
+
+def write_kill_switch_state(state: dict) -> None:
+    """Persist the kill-switch state. A trip written here is STICKY — nothing in
+    the engine clears it; only a human editing/removing `cleared_at` does."""
+    write_json_blob(_CONTAINER, _KILL_SWITCH_BLOB, state)
+
 
 def read_equity_series() -> list[dict]:
     data = read_json_blob(_CONTAINER, _EQUITY_BLOB)

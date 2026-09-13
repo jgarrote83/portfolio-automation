@@ -21,6 +21,7 @@ from flex import trades as flex_trades
 from flex.config import load_flex_config
 from flex.entry import build_conviction_entry, build_flex_entry
 from flex.exit_state import build_flex_exit_state
+from flex.killswitch import evaluate_kill_switch
 from flex.ledger import new_entry, read_ledger, write_ledger
 from flex.reconcile import reconcile_ledger
 from flex.separation import flex_separation_set
@@ -166,10 +167,36 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
     # ── STEP 5 — entry (morning window only) ─────────────────────────────────
     # Joint sleeve arbitration (DayTrade_Lab spec §1): the flex sleeve cap holds
     # across BOTH engines, so the lab's open notional consumes catalyst headroom.
+    # S1 KILL SWITCH (2026-09-13). Evaluated AFTER management (STEP 4) and BEFORE
+    # any entry, which is the whole design: a trip suppresses NEW positions while
+    # existing ones are still managed to their exits normally -- never a forced
+    # liquidation (a forced exit at a bad moment is its own risk, and the bracket
+    # legs are already resting at the broker). Non-fatal, and it fails OPEN on the
+    # evaluation (an unreadable ledger is not evidence of a blow-up) while the
+    # PERSISTED sticky trip still binds through `read_kill_switch_state`.
+    kill_state: dict = {}
+    try:
+        kill_state = evaluate_kill_switch(
+            flex_trades.read_closed_trades(), equity, cfg,
+            flex_trades.read_kill_switch_state(),
+        )
+        if kill_state.get("tripped") and kill_state.get("tripped_at") == "PENDING":
+            kill_state["tripped_at"] = today
+        flex_trades.write_kill_switch_state(kill_state)
+    except Exception:  # noqa: BLE001
+        logger.exception("kill-switch evaluation failed (non-fatal)")
+    decisions["kill_switch"] = kill_state
+    if kill_state.get("tripped"):
+        logger.error("FLEX KILL SWITCH TRIPPED (%s) -- no new entries. %s",
+                     kill_state.get("trip_reason"), kill_state.get("note"))
+        decisions["orders_suppressed"].append(
+            {"reason": f"kill_switch:{kill_state.get('trip_reason')}",
+             "note": kill_state.get("note")})
+
     sleeve_used = _flex_notional(positions, ledger) \
         + _symbols_notional(positions, daytrade_syms)
     sleeve_cap_usd = cfg.sleeve_cap_pct / 100.0 * equity if equity else 0.0
-    for nom in nominations:
+    for nom in (nominations if not kill_state.get("tripped") else []):
         sym = nom["symbol"]
         if sym in ledger:
             continue
@@ -196,7 +223,7 @@ def run_flex_intraday(date_str: str | None = None, dry_run: bool = False) -> dic
     # a conviction entry must never drain literal cash/the cash sleeve below
     # the core floors (the M5 callback — see build_conviction_entry's docstring).
     literal_cash_usd, sgov_usd = _cash_figures(client, positions)
-    for sym, conv in conviction_candidates.items():
+    for sym, conv in ({} if kill_state.get("tripped") else conviction_candidates).items():
         if sym in ledger:
             continue
         if len(ledger) >= _FLEX_COUNT_CAP:
@@ -917,6 +944,7 @@ def _persist(today, decisions, ledger, executions, market_closed: bool = False) 
         flex_state = {
             "as_of": today,
             "reconcile": decisions.get("reconcile", {}),
+            "kill_switch": decisions.get("kill_switch", {}),
             "exits": decisions.get("exits", []),
             "entries": decisions.get("entries", []),
             "held": sorted(ledger.keys()),

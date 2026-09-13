@@ -47,6 +47,7 @@ from shared.quadrants import (
     selected_for_role,
     selection_config,
 )
+from flex import trades as flex_trades
 from flex.config import load_flex_config
 from flex.indicators import avg_dollar_volume
 from flex.separation import FLEX_REENTERABLE, flex_separation_set
@@ -3616,6 +3617,19 @@ def run() -> None:
     # recent prior state (up to a week back). Non-fatal. The conviction-sleeve
     # flex_review was retired when Flex became a separate intraday engine.
     flex_state: dict = {"available": False}
+    # S1: read the engine's persisted kill-switch state (flex-ledger blob).
+    # Non-fatal and deliberately NOT re-evaluated here -- the engine owns the
+    # decision; the collector only echoes it, so the two can never disagree.
+    flex_kill_switch: dict = {"available": False}
+    try:
+        _ks = flex_trades.read_kill_switch_state()
+        if _ks:
+            flex_kill_switch = {"available": True, **_ks}
+        if _ks.get("tripped"):
+            logger.warning("Flex kill switch TRIPPED (%s): %s",
+                           _ks.get("trip_reason"), _ks.get("note"))
+    except Exception:  # noqa: BLE001
+        logger.exception("Flex kill-switch state read failed (non-fatal)")
     try:
         d0 = date.fromisoformat(today)
         for back in range(0, 8):
@@ -3944,6 +3958,11 @@ def run() -> None:
         "flex_conviction": flex_conviction,
         "divergences": divergences,
         "flex_state": flex_state,
+        # S1 (2026-09-13): the sleeve kill switch, read straight from the
+        # engine's own persisted state so the report states plainly whether
+        # the sleeve is live and why. Independent of FLEX_ENABLED -- a
+        # tripped switch and a disabled engine are different facts.
+        "flex_kill_switch": flex_kill_switch,
         "performance": performance,
         "quadrant_performance": quadrant_performance,
         "track_record": track_record,

@@ -87,6 +87,18 @@ class FlexConfig:
     gap_adr_mult: float = 2.0          # gap above this × ADR raises the confirmation bar (not auto-skip)
     # --- liquidity screen (tied to IEX-VWAP validity) ---
     min_adv_usd: float = 50_000_000.0  # min average daily dollar volume for entry
+    # --- kill switch (S1, session 2026-09-13, amendment §2.3) ----------------
+    # The ONLY automatic brake on a 25% sleeve with a measured hit rate of 0.0
+    # (n=2). Two independent trips, either one disables NEW entries; existing
+    # positions are always managed to their exits, never force-liquidated.
+    # Re-enabling is a HUMAN action — a trip never clears itself.
+    kill_switch_enabled: bool = True
+    kill_switch_min_closed_trades: int = 20    # slow arm needs a sample
+    kill_switch_hit_rate_floor: float = 0.45   # slow arm: a signal that doesn't work
+    kill_switch_max_drawdown_pct: float = 2.0  # fast arm: a signal that BLOWS UP.
+    #                                            No trade-count minimum, by design —
+    #                                            ~$2,000 at current equity, i.e. 5-6
+    #                                            full stop-outs or one bad gap.
     # --- conviction path: DORMANT (G-8, session 2026-09-12) ------------------
     # Scoped OUT of the news-momentum profile, not deleted. The conviction path
     # is built around `p_up` vs an empirical `base_rate_up` over a ~2-year
@@ -143,6 +155,13 @@ def load_flex_config() -> FlexConfig:
         entry_late_cutoff_min=_env_int("FLEX_ENTRY_LATE_CUTOFF_MIN", d.entry_late_cutoff_min),
         gap_adr_mult=_env_float("FLEX_GAP_ADR_MULT", d.gap_adr_mult),
         min_adv_usd=_env_float("FLEX_MIN_ADV_USD", d.min_adv_usd),
+        kill_switch_enabled=_env_bool("FLEX_KILL_SWITCH_ENABLED", d.kill_switch_enabled),
+        kill_switch_min_closed_trades=_env_int(
+            "FLEX_KILL_SWITCH_MIN_CLOSED_TRADES", d.kill_switch_min_closed_trades),
+        kill_switch_hit_rate_floor=_env_float(
+            "FLEX_KILL_SWITCH_HIT_RATE_FLOOR", d.kill_switch_hit_rate_floor),
+        kill_switch_max_drawdown_pct=_env_float(
+            "FLEX_KILL_SWITCH_MAX_DRAWDOWN_PCT", d.kill_switch_max_drawdown_pct),
         conviction_path_enabled=_env_bool("FLEX_CONVICTION_PATH_ENABLED", d.conviction_path_enabled),
         conviction_max_stop_pct=_env_float("FLEX_CONVICTION_MAX_STOP_PCT", d.conviction_max_stop_pct),
         conviction_no_chase_atr=_env_float("FLEX_CONVICTION_NO_CHASE_ATR", d.conviction_no_chase_atr),
