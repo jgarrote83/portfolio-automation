@@ -478,15 +478,31 @@ conflate them:
   where the FMP plan allows, else a US-listed country ETF (`"region_proxy"`). This is
   REGIONAL and describe-only; it feeds no component. Cite `source_basis` whenever you
   quote a region, because a real index read and an ETF proxy are not equally strong
-  evidence.
+  evidence. **Two summaries, and you must not treat either as the other:**
+  `region_breadth_up` is BREADTH (fraction of regions positive) and
+  `region_mean_pct` is MAGNITUDE, banded into `global_risk_tone`
+  (`risk_on`/`neutral`/`risk_off`). Every region at −0.1% and every region at −3.0%
+  share a breadth of 0.0 and are completely different mornings — quote the magnitude
+  whenever you characterise the overnight tape. A broad `risk_off` is genuine context
+  for a long-only multi-day sleeve, but it is **describe-only and gates nothing**: do
+  not present it as a reason the engine did or will abstain (no such rule exists —
+  that is FOLLOWUPS #34's still-open half).
 - **`sector_tone`** — an ADR basket per sector (`"adr_proxy"`), and the ONLY thing
-  feeding `global_sector_tone`. **Scored on the CROSS-SECTOR EXCESS** (`excess_pct`,
-  each sector's move minus `sector_baseline_pct`), never the absolute move: on a
-  broad risk-on morning every basket is up and no sector is being singled out, so
-  every sector correctly reads 0.5. A `tone` of 0.5 means "moved with the overseas
-  tape", NOT "no data" — absence is the component being absent. Roughly half of any
+  feeding `global_sector_tone`. **Scored on the LEAVE-ONE-OUT cross-sector excess**
+  (`excess_pct` = the sector's move minus its OWN `baseline_pct`, the mean of the
+  OTHER sectors), never the absolute move: on a broad risk-on morning every basket is
+  up and no sector is being singled out, so every sector correctly reads 0.5. A `tone`
+  of 0.5 means "moved with the overseas tape", NOT "no data". Roughly half of any
   session's sectors will read below 0.5 by construction; that is the cross-section
-  summing to zero, not a bearish signal.
+  summing to zero, not a bearish signal. **`sector_mean_pct` is narration only — it is
+  NOT the baseline anything is scored against**; cite a sector's own `baseline_pct` if
+  you need to show the comparison.
+
+**One real limitation to state rather than paper over:** the baseline is the mean of
+whichever sectors resolved, so if coverage is thin and the missing sectors are the
+quiet ones, the surviving baseline is elevated and every excess is understated.
+`coverage.sector_gaps` names exactly which sectors are missing — read it before
+leaning on a tilt, and say so when coverage is partial.
 
 Three sectors — **Real Estate, Utilities, Consumer Defensive** — have no honest
 overseas proxy and are `structurally_absent_sectors`: `not_applicable`, never
@@ -496,8 +512,8 @@ must never be described as such.
 `available: false` is a normal outcome, not a fault: the block self-measures
 freshness (a row counts only if its own timestamp lands on the CURRENT ET session
 date), so a session where the ADR quotes have not refreshed pre-market reads
-`unavailable_reason: "no_fresh_sector_data"`, or `"cross_section_too_thin:N<3"` when
-too few sectors resolve to make a cross-section meaningful. In either case
+`unavailable_reason: "no_fresh_sector_data"`, or `"cross_section_too_thin:N<5"` when
+too few sectors resolve for the benchmark to be stable. In either case
 `global_sector_tone` is simply absent for every candidate and nothing downstream
 changes. Cite `coverage` (`sectors_scored`, `sector_gaps`, the rejection reasons)
 rather than speculating about why the block is unavailable.

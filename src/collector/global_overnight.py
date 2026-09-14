@@ -28,11 +28,27 @@ to ~zero by construction, so roughly half of any session's sectors score below
 0.5. A 0.5 here means "moved with the overseas tape", not "no data" — absence is
 `None`, as everywhere else in this system.
 
-**Why a cross-section needs a minimum width.** With one sector the excess is 0.0
-by construction; with two, each is the exact negative of the other. Neither is a
-read. `MIN_SECTORS_FOR_CROSS_SECTION` (3) is the floor below which `sector_tone`
-is withheld entirely rather than published as false precision — recorded as
-decision gate **G-12**, proposed not confirmed.
+**The baseline is LEAVE-ONE-OUT, and that is not a refinement — a mean-inclusive
+baseline makes the score's scale depend on coverage.** A sector included in the
+mean it is measured against is shrunk by exactly `(n-1)/n`: 33% at n=3, 20% at
+n=5, 12.5% at n=8. So the SAME real divergence scores ~31% differently on a thin
+morning than a full one, driven purely by how many ADRs happened to have a fresh
+quote. Concretely, one sector at +3.0% with the rest flat reads +2.00 at n=3 and
++2.63 at n=8 mean-inclusive; leave-one-out reads +3.00 in both. Each sector is
+therefore measured against `mean(pct_j for j != i)` — its own baseline, recorded
+per sector as `baseline_pct`. The session-level `sector_mean_pct` is retained for
+narration only and is NOT what anything is scored against.
+
+**What leave-one-out does NOT fix: composition dependence.** The baseline is still
+the mean of whichever sectors resolved. On a morning when semis are ripping and
+only Technology, Energy and Materials have fresh quotes, the baseline is itself
+elevated and Technology's excess is understated. That is a property of the
+benchmark's membership, not of self-inclusion, and no arithmetic removes it —
+`coverage.sector_gaps` makes it visible instead. The consequence for
+`MIN_SECTORS_FOR_CROSS_SECTION` is the important part: it governs **benchmark
+stability**, not merely "enough data to read", which is why it sits at 5 rather
+than at the 2 the arithmetic alone would allow. Recorded as decision gate
+**G-12**.
 
 **Freshness is self-measured, and is the whole safety property.** A row counts
 only if its own timestamp lands on the CURRENT ET session date. An ADR quote
@@ -58,16 +74,35 @@ from zoneinfo import ZoneInfo
 
 ET = ZoneInfo("America/New_York")
 
-# Below this many sectors the cross-section is not a read (see module docstring).
-# Decision gate G-12 — proposed, not confirmed.
-MIN_SECTORS_FOR_CROSS_SECTION = 3
+# Minimum sectors for a cross-section. This is a BENCHMARK-STABILITY floor, not a
+# data-adequacy one (see the composition-dependence note in the module docstring):
+# the leave-one-out baseline is only as meaningful as the set it averages, and a
+# 3-sector benchmark is one absent sector away from being a different benchmark.
+# Decision gate G-12 — set to 5 of the 8 configured sectors.
+MIN_SECTORS_FOR_CROSS_SECTION = 5
 
-# Symmetric clamp mapping a signed excess-% to [0,1], mirroring
-# `catalyst_screen.momentum_score`/`relative_strength_score` exactly so this
-# component cannot dominate the composite by scale alone. 1.5pp of cross-sector
-# excess in a single overnight session is already a large dispersion.
-# Decision gate G-13 — proposed, not confirmed.
+# Symmetric clamp mapping a signed leave-one-out excess-% to [0,1], mirroring
+# `catalyst_screen.momentum_score`/`relative_strength_score`.
+#
+# **This cap is the de facto WEIGHT of the whole global signal, not a guard rail.**
+# `tone` contributes `tone/len(COMPONENTS)` to the composite, so a saturated
+# reading moves a candidate by up to +/-0.0625 — plausibly over half the spread of
+# a nominated pool. Too tight and every reading saturates and the component
+# dominates; too wide and every reading sits inert near 0.5. It cannot be settled
+# on one session's data: it needs the measured cross-sector dispersion across ~10
+# sessions, targeting saturation below ~10% of sector-days — the same discipline
+# every other capped scorer in this system is held to.
+#
+# `saturated` is stamped per sector and counted per session precisely so that
+# settlement is mechanical rather than a judgement call.
+# Decision gate G-13 — proposed, not confirmed; DO NOT tune on a single morning.
 EXCESS_CAP_PCT = 1.5
+
+# Band edge for the describe-only `global_risk_tone` label, in mean regional %.
+# Banded rather than a bare sign test, for the same reason `rate_decomposition`'s
+# `dominant_driver` is banded: a bare comparison flips the label on a fraction of
+# a basis point. Decision gate G-14 — proposed, not confirmed.
+RISK_TONE_BAND_PCT = 0.75
 
 # How each row was sourced. Recorded per row because the three are NOT equally
 # strong evidence and a later reader must be able to tell them apart:
@@ -224,6 +259,7 @@ def build_global_overnight(
     structurally_absent_sectors: tuple[str, ...] | list[str] = (),
     min_sectors: int = MIN_SECTORS_FOR_CROSS_SECTION,
     excess_cap_pct: float = EXCESS_CAP_PCT,
+    risk_tone_band_pct: float = RISK_TONE_BAND_PCT,
 ) -> dict:
     """The `global_overnight` snapshot block.
 
@@ -250,11 +286,25 @@ def build_global_overnight(
         r = region_read.get(sym)
         if r:
             regions[name] = {**r, "region": name}
+    # BREADTH and MAGNITUDE are complementary and neither substitutes for the
+    # other: every region at -0.1% and every region at -3.0% share a breadth of
+    # 0.0, and a broad risk-off morning is real information for a long-only
+    # multi-day sleeve. One region at -5% with the rest flat is the mirror case
+    # (high breadth, meaningful magnitude). Both are emitted; both describe-only.
     region_pcts = [v["pct"] for v in regions.values()]
     region_breadth = (
         round(sum(1 for p in region_pcts if p > 0) / len(region_pcts), 4)
         if region_pcts else None
     )
+    region_mean = (
+        round(sum(region_pcts) / len(region_pcts), 4) if region_pcts else None
+    )
+    risk_tone = None
+    if region_mean is not None:
+        band = abs(float(risk_tone_band_pct))
+        risk_tone = ("risk_off" if region_mean <= -band
+                     else "risk_on" if region_mean >= band
+                     else "neutral")
 
     # --- sectors: the cross-sectional tilt -----------------------------------
     raw_sector: dict[str, dict] = {}
@@ -278,15 +328,31 @@ def build_global_overnight(
         }
 
     sectors: dict[str, dict] = {}
-    baseline_pct: float | None = None
-    if len(raw_sector) >= max(1, int(min_sectors)):
-        baseline_pct = round(sum(v["pct"] for v in raw_sector.values()) / len(raw_sector), 4)
+    sector_mean_pct: float | None = None
+    # `max(2, ...)` is a structural floor, not a tunable: leave-one-out needs at
+    # least one OTHER sector to average, so n-1 must be >= 1. G-12 sits well
+    # above it for benchmark-stability reasons, but the guard stands on its own
+    # so a caller passing a lower `min_sectors` cannot divide by zero.
+    if len(raw_sector) >= max(2, int(min_sectors)):
+        n = len(raw_sector)
+        total = sum(v["pct"] for v in raw_sector.values())
+        sector_mean_pct = round(total / n, 4)          # narration only
+        cap = abs(float(excess_cap_pct))
         for sector, v in raw_sector.items():
-            excess = round(v["pct"] - baseline_pct, 4)
+            # LEAVE-ONE-OUT: the sector is never part of the benchmark it is
+            # measured against. A mean-inclusive baseline shrinks every reading
+            # by (n-1)/n, so the same divergence would score ~31% differently at
+            # n=3 than at n=8 — coverage, not signal. See the module docstring.
+            loo_baseline = round((total - v["pct"]) / (n - 1), 4)
+            excess = round(v["pct"] - loo_baseline, 4)
             sectors[sector] = {
                 **v,
+                "baseline_pct": loo_baseline,
                 "excess_pct": excess,
-                "tone": excess_score(excess, excess_cap_pct),
+                "tone": excess_score(excess, cap),
+                # Stamped so G-13 can be settled by COUNTING saturated
+                # sector-days across ~10 sessions rather than by judgement.
+                "saturated": abs(excess) >= cap,
             }
 
     thin_reason = None
@@ -302,14 +368,19 @@ def build_global_overnight(
         "session_date_et": now_et.strftime("%Y-%m-%d"),
         "region_tone": regions,
         "region_breadth_up": region_breadth,
+        "region_mean_pct": region_mean,
+        "global_risk_tone": risk_tone,
         "sector_tone": sectors,
-        "sector_baseline_pct": baseline_pct,
+        # Narration only — NOT the baseline anything is scored against. Each
+        # sector carries its own `baseline_pct` (leave-one-out).
+        "sector_mean_pct": sector_mean_pct,
         "structurally_absent_sectors": absent_sectors,
         "unavailable_reason": thin_reason,
         "basis": {
-            "scored_on": "cross_sector_excess",
+            "scored_on": "leave_one_out_cross_sector_excess",
             "excess_cap_pct": excess_cap_pct,
             "min_sectors_for_cross_section": int(min_sectors),
+            "risk_tone_band_pct": risk_tone_band_pct,
             "freshness_rule": "current_et_session_date",
         },
         "coverage": {
@@ -321,6 +392,7 @@ def build_global_overnight(
             "sector_symbols_rejected": sector_rejected,
             "sectors_with_data": len(raw_sector),
             "sectors_scored": len(sectors),
+            "sectors_saturated": sum(1 for v in sectors.values() if v["saturated"]),
             "sector_gaps": sector_gaps,
         },
     }
@@ -360,5 +432,6 @@ __all__ = [
     "parse_as_of_et",
     "MIN_SECTORS_FOR_CROSS_SECTION",
     "EXCESS_CAP_PCT",
+    "RISK_TONE_BAND_PCT",
     "SOURCE_BASES",
 ]

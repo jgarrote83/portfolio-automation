@@ -891,6 +891,12 @@ block self-measure"* rather than wait a day. Read Monday's snapshot and check:
 | `.coverage.sector_symbols_rejected[].reason` | — | `stale_not_current_session` |
 | `catalyst_screen.ledger[].components.global_sector_tone` | populated | `null` everywhere |
 
+Note the floor is now 5 (G-12), so `available` also reads `false` at
+`"cross_section_too_thin:N<5"` when 4 or fewer of the 8 sectors resolve — a
+DIFFERENT outcome from total staleness and worth distinguishing when reading the
+result. `region_tone` / `region_mean_pct` / `global_risk_tone` are independent of the
+sector path and should populate regardless (Europe is mid-session at 09:00 ET).
+
 **Either outcome is a valid result and neither is a fault.** If the ADRs are stale the
 component is absent for every candidate, nothing downstream changes, and the honest
 options are (a) accept a region-only block and drop `sector_tone`, or (b) find a
@@ -900,19 +906,35 @@ Check `region_tone` separately: Europe is mid-session at 09:00 ET, so the Europe
 rows should be fresh even if the ADRs are not, which would isolate the problem to the
 ADR feed rather than to the freshness test.
 
-**G-12 — `MIN_SECTORS_FOR_CROSS_SECTION = 3`, proposed not confirmed.** Below 3 the
-cross-section is withheld entirely. With 1 sector the excess is 0.0 by construction;
-with 2 each is the exact negative of the other — a real but very thin read. 3 is a
-judgement call, chosen conservatively. If Monday shows 2 sectors resolving routinely,
-the choice is between lowering this and accepting a frequently-unavailable block.
+**G-12 — `MIN_SECTORS_FOR_CROSS_SECTION = 5` (was 3; raised in PR review).** This is a
+**benchmark-stability** floor, not a data-adequacy one. Leave-one-out removes
+self-inclusion but NOT composition dependence: the baseline is still the mean of
+whichever sectors resolved, so if only Technology, Energy and Materials have fresh
+quotes on a morning semis are ripping, the baseline is itself elevated and
+Technology's excess is understated. No arithmetic fixes that — `coverage.sector_gaps`
+makes it visible instead, and the floor is what keeps the benchmark from being one
+absent sector away from being a different benchmark. 5 of the 8 configured sectors.
+**Watch on Monday:** if 5 routinely fails to resolve, the choice is between a
+frequently-unavailable block and a less stable benchmark — do not lower it silently.
 
-**G-13 — `EXCESS_CAP_PCT = 1.5`, proposed not confirmed.** The symmetric clamp mapping
-cross-sector excess to [0,1], mirroring `momentum_score`/`relative_strength_score` so
-this component cannot dominate the composite by scale alone. 1.5pp of single-session
-cross-sector dispersion was picked as "already large" without measurement. Settle it
-on the observed distribution of `sector_tone[].excess_pct` after ~10 sessions — if
-readings routinely saturate at 0/1 the cap is too tight; if they cluster at 0.5 it is
-too loose.
+**G-13 — `EXCESS_CAP_PCT = 1.5`, proposed, and NOT settleable on one morning.**
+`tone` contributes `tone/8` to the composite, so a saturated reading moves a candidate
+by up to ±0.0625 — plausibly over half the spread of a nominated pool. **This cap is
+therefore the de facto WEIGHT of the entire global signal, not a clamp:** too tight
+and every reading saturates and the component dominates the ranking; too wide and
+every reading sits inert near 0.5. Settle on measured cross-sector dispersion across
+**~10 sessions**, targeting **saturation below ~10% of sector-days** — the same
+discipline every other capped scorer here is held to. `sector_tone[].saturated` and
+`coverage.sectors_saturated` are stamped so this is a COUNT, not a judgement:
+`saturated_sector_days / total_sector_days` across the window. Note this was
+previously mis-scoped as a Monday question; it could not have been answered then even
+in principle, because the pre-review mean-inclusive baseline rescaled with coverage.
+
+**G-14 — `RISK_TONE_BAND_PCT = 0.75`, proposed not confirmed.** The band edge for the
+describe-only `global_risk_tone` label, in mean regional %. Banded rather than a bare
+sign test for the same reason `rate_decomposition.dominant_driver` is. 0.75 was picked
+as "a broad, clearly-risk-off morning" without measurement; settle it against
+`region_mean_pct`'s observed distribution alongside G-13.
 
 **Not a decision gate, but worth stating once:** this component is equal-weighted with
 the other seven, like every other component, per the FOLLOWUPS #23 doctrine (no

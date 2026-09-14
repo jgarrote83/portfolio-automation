@@ -54,14 +54,18 @@ def _rrow(symbol, region, pct, basis="direct_index", ts=FRESH_TS):
 
 
 _SECTORS = {"Technology": ["TSM", "ASML"], "Energy": ["SHEL"],
-            "Healthcare": ["AZN"], "Basic Materials": ["RIO"]}
+            "Healthcare": ["AZN"], "Basic Materials": ["RIO"],
+            "Financial Services": ["HSBC"], "Consumer Cyclical": ["TM"]}
+
+# Six sectors — above the G-12 benchmark-stability floor of 5.
+_DEFAULT_ROWS = [
+    _srow("TSM", 2.4), _srow("ASML", 2.0), _srow("SHEL", 0.1),
+    _srow("AZN", -0.4), _srow("RIO", 1.0), _srow("HSBC", 0.2), _srow("TM", 0.5),
+]
 
 
 def _block(sector_rows=None, region_rows=None, now=NOW, **kw):
-    rows = sector_rows if sector_rows is not None else [
-        _srow("TSM", 2.4), _srow("ASML", 2.0), _srow("SHEL", 0.1),
-        _srow("AZN", -0.4), _srow("RIO", 1.0),
-    ]
+    rows = sector_rows if sector_rows is not None else list(_DEFAULT_ROWS)
     return build_global_overnight(
         region_rows or [], rows, None, _SECTORS, now, **kw)
 
@@ -156,7 +160,8 @@ def test_a_covered_sector_with_no_fresh_member_is_missing_data_not_absent():
     """The opposite case, and the distinction that matters: Energy is configured
     and could resolve tomorrow, so it is a GAP, not `not_applicable`."""
     rows = [_srow("TSM", 2.4), _srow("ASML", 2.0), _srow("AZN", -0.4),
-            _srow("RIO", 1.0), _srow("SHEL", 0.1, ts=STALE_TS)]
+            _srow("RIO", 1.0), _srow("HSBC", 0.2), _srow("TM", 0.5),
+            _srow("SHEL", 0.1, ts=STALE_TS)]
     block = _block(sector_rows=rows)
     assert block["coverage"]["sector_gaps"] == {"Energy": "no_fresh_members"}
     tone, reason = sector_tone_for(block, "Energy")
@@ -175,15 +180,82 @@ def test_absence_never_becomes_a_neutral_score_anywhere():
 def test_score_is_the_cross_sector_excess_not_the_absolute_move():
     """A uniform risk-on morning carries NO sector information and must not
     manufacture any: every sector up the same 2% scores exactly 0.5."""
-    rows = [_srow("TSM", 2.0), _srow("ASML", 2.0), _srow("SHEL", 2.0),
-            _srow("AZN", 2.0), _srow("RIO", 2.0)]
+    rows = [_srow(s, 2.0) for s in
+            ("TSM", "ASML", "SHEL", "AZN", "RIO", "HSBC", "TM")]
     block = _block(sector_rows=rows)
     assert block["available"] is True
-    assert block["sector_baseline_pct"] == 2.0
+    assert block["sector_mean_pct"] == 2.0
     assert {v["tone"] for v in block["sector_tone"].values()} == {0.5}
     assert all(v["excess_pct"] == 0.0 for v in block["sector_tone"].values())
+    assert all(v["saturated"] is False for v in block["sector_tone"].values())
     # The absolute move is still carried — described, never scored.
     assert all(v["pct"] == 2.0 for v in block["sector_tone"].values())
+
+
+# --- leave-one-out: the baseline must not depend on coverage ----------------
+
+def test_the_same_divergence_scores_identically_at_thin_and_full_coverage():
+    """The defect a mean-inclusive baseline had: a sector inside the mean it is
+    measured against is shrunk by exactly (n-1)/n, so the SAME +3.0pp divergence
+    read +2.00 at n=3 and +2.63 at n=8 — a ~31% swing driven purely by how many
+    ADRs happened to have a fresh quote. Leave-one-out reads +3.00 at both."""
+    thin_map = {"Technology": ["TSM"], "Energy": ["SHEL"], "Healthcare": ["AZN"]}
+    full_map = dict(thin_map, **{
+        "Basic Materials": ["RIO"], "Financial Services": ["HSBC"],
+        "Consumer Cyclical": ["TM"], "Industrials": ["SIEGY"],
+        "Communication Services": ["VOD"]})
+
+    def _tech(sector_map, flat_syms):
+        rows = [_srow("TSM", 3.0)] + [_srow(s, 0.0) for s in flat_syms]
+        b = build_global_overnight([], rows, None, sector_map, NOW, min_sectors=2)
+        return b["sector_tone"]["Technology"]
+
+    thin = _tech(thin_map, ("SHEL", "AZN"))
+    full = _tech(full_map, ("SHEL", "AZN", "RIO", "HSBC", "TM", "SIEGY", "VOD"))
+
+    assert thin["excess_pct"] == full["excess_pct"] == 3.0
+    assert thin["baseline_pct"] == full["baseline_pct"] == 0.0
+    assert thin["tone"] == full["tone"]
+
+
+def test_each_sector_is_measured_against_the_mean_of_the_OTHERS():
+    rows = [_srow("TSM", 6.0), _srow("ASML", 6.0), _srow("SHEL", 0.0),
+            _srow("AZN", 0.0), _srow("RIO", 0.0), _srow("HSBC", 0.0),
+            _srow("TM", 0.0)]
+    block = _block(sector_rows=rows)
+    tone = block["sector_tone"]
+    # Technology +6.0; the other five all 0.0 -> its own baseline is 0.0.
+    assert tone["Technology"]["baseline_pct"] == 0.0
+    assert tone["Technology"]["excess_pct"] == 6.0
+    # Energy 0.0; the others are (6.0, 0, 0, 0, 0) -> baseline 1.2.
+    assert tone["Energy"]["baseline_pct"] == 1.2
+    assert tone["Energy"]["excess_pct"] == -1.2
+    # The narration-only grand mean is a DIFFERENT number from any baseline.
+    assert block["sector_mean_pct"] == 1.0
+
+
+def test_saturation_is_stamped_and_counted_so_g13_settles_by_measurement():
+    # Tech +6.0, the other five flat: Tech's own excess is +6.0 (saturated),
+    # while each flat sector sees a baseline of 6.0/5 = 1.2 -> excess -1.2,
+    # inside the 1.5 cap. One saturated sector-day, not six.
+    rows = [_srow("TSM", 6.0), _srow("ASML", 6.0), _srow("SHEL", 0.0),
+            _srow("AZN", 0.0), _srow("RIO", 0.0), _srow("HSBC", 0.0),
+            _srow("TM", 0.0)]
+    block = _block(sector_rows=rows)
+    tech = block["sector_tone"]["Technology"]
+    assert tech["saturated"] is True and tech["tone"] == 1.0
+    assert block["sector_tone"]["Energy"]["excess_pct"] == -1.2
+    assert block["sector_tone"]["Energy"]["saturated"] is False
+    assert block["coverage"]["sectors_saturated"] == 1
+    assert block["basis"]["scored_on"] == "leave_one_out_cross_sector_excess"
+
+
+def test_leave_one_out_needs_at_least_one_other_sector():
+    """A structural floor independent of G-12: n-1 must be >= 1."""
+    one = build_global_overnight(
+        [], [_srow("TSM", 3.0)], None, {"Technology": ["TSM"]}, NOW, min_sectors=1)
+    assert one["available"] is False
+    assert one["sector_tone"] == {}
 
 
 def test_a_real_tilt_separates_the_bought_sector_from_the_sold_one():
@@ -197,7 +269,8 @@ def test_a_real_tilt_separates_the_bought_sector_from_the_sold_one():
 
 def test_a_sector_is_the_equal_weighted_mean_of_its_fresh_members_only():
     rows = [_srow("TSM", 3.0), _srow("ASML", 1.0, ts=STALE_TS),
-            _srow("SHEL", 0.0), _srow("AZN", 0.0), _srow("RIO", 0.0)]
+            _srow("SHEL", 0.0), _srow("AZN", 0.0), _srow("RIO", 0.0),
+            _srow("HSBC", 0.0), _srow("TM", 0.0)]
     block = _block(sector_rows=rows)
     tech = block["sector_tone"]["Technology"]
     assert tech["pct"] == 3.0                    # ASML dropped, not averaged in
@@ -206,14 +279,26 @@ def test_a_sector_is_the_equal_weighted_mean_of_its_fresh_members_only():
 
 
 def test_cross_section_below_the_minimum_is_withheld_not_published():
-    rows = [_srow("TSM", 2.0), _srow("ASML", 2.0), _srow("SHEL", 0.5)]
-    block = _block(sector_rows=rows)          # only 2 sectors resolve
+    """G-12 is a BENCHMARK-STABILITY floor, not a data-adequacy one: a 4-sector
+    benchmark is one absent sector away from being a different benchmark, so the
+    cross-section is withheld rather than published as false precision."""
+    rows = [_srow("TSM", 2.0), _srow("ASML", 2.0), _srow("SHEL", 0.5),
+            _srow("AZN", -1.0), _srow("RIO", 0.3)]
+    block = _block(sector_rows=rows)          # only 4 sectors resolve
+    assert MIN_SECTORS_FOR_CROSS_SECTION == 5
     assert block["available"] is False
     assert block["sector_tone"] == {}
     assert block["unavailable_reason"] == (
-        f"cross_section_too_thin:2<{MIN_SECTORS_FOR_CROSS_SECTION}")
-    assert block["coverage"]["sectors_with_data"] == 2
+        f"cross_section_too_thin:4<{MIN_SECTORS_FOR_CROSS_SECTION}")
+    assert block["coverage"]["sectors_with_data"] == 4
     assert sector_tone_for(block, "Technology") == (None, "block_unavailable")
+
+
+def test_the_shipped_config_can_actually_clear_the_g12_floor():
+    """A floor above the configured sector count would make the block
+    permanently unavailable — a real way to ship something inert."""
+    cfg = _load_global_overnight_config()
+    assert len(cfg["sector_proxies"]) >= MIN_SECTORS_FOR_CROSS_SECTION
 
 
 def test_excess_score_is_the_same_symmetric_clamp_momentum_uses():
@@ -301,6 +386,48 @@ def test_regions_are_described_with_their_own_source_basis():
     assert block["region_tone"]["japan"]["source_basis"] == "direct_index"
     assert block["region_tone"]["germany"]["source_basis"] == "region_proxy"
     assert block["region_breadth_up"] == 0.5
+
+
+def test_breadth_alone_cannot_express_a_broad_risk_off_morning():
+    """The gap breadth leaves: every region -0.1% and every region -3.0% share a
+    breadth of 0.0 and are completely different mornings. The magnitude
+    aggregate is what separates them, and a long-only multi-day sleeve needs
+    it."""
+    mild = [_rrow(f"I{i}", f"r{i}", -0.1) for i in range(4)]
+    severe = [_rrow(f"I{i}", f"r{i}", -3.0) for i in range(4)]
+    b_mild, b_severe = _block(region_rows=mild), _block(region_rows=severe)
+
+    assert b_mild["region_breadth_up"] == b_severe["region_breadth_up"] == 0.0
+    assert b_mild["region_mean_pct"] == -0.1
+    assert b_severe["region_mean_pct"] == -3.0
+    assert b_mild["global_risk_tone"] == "neutral"
+    assert b_severe["global_risk_tone"] == "risk_off"
+
+
+def test_risk_tone_is_banded_not_a_bare_sign_test():
+    """Banded for the same reason `rate_decomposition.dominant_driver` is: a
+    bare comparison flips the label on a fraction of a basis point."""
+    def _tone(pct):
+        return _block(region_rows=[_rrow("X", "r", pct)])["global_risk_tone"]
+
+    assert _tone(0.01) == "neutral"          # positive, but not risk_on
+    assert _tone(-0.01) == "neutral"         # negative, but not risk_off
+    assert _tone(0.74) == "neutral"
+    assert _tone(0.75) == "risk_on"          # inclusive at the band edge
+    assert _tone(-0.75) == "risk_off"
+    assert _block()["global_risk_tone"] is None       # no regions -> no claim
+    assert _block()["region_mean_pct"] is None
+
+
+def test_magnitude_and_breadth_are_complementary_not_redundant():
+    """The mirror case: one region deeply negative, the rest flat — high
+    breadth reading, but a real magnitude."""
+    rows = [_rrow("A", "a", -5.0), _rrow("B", "b", 0.1),
+            _rrow("C", "c", 0.1), _rrow("D", "d", 0.1)]
+    block = _block(region_rows=rows)
+    assert block["region_breadth_up"] == 0.75        # 3 of 4 up
+    assert block["region_mean_pct"] == -1.175        # yet the mean is negative
+    assert block["global_risk_tone"] == "risk_off"
 
 
 def test_region_fetch_falls_back_to_the_proxy_on_a_restricted_index():
