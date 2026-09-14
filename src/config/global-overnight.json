@@ -1,0 +1,32 @@
+{
+  "_comment": "global_overnight (session 2026-09-13) — the overseas session read the flex sleeve uses as a CROSS-SECTOR TILT. Asia has closed and Europe is mid-session by the time the collector fires at 09:00 ET; if a sector is being bought hard overseas that is information the US open has not fully absorbed, available before any US price action exists. Config, not hard-coded: the sector map needs maintenance and must not require a code change.",
+
+  "_source_note": "P0 probe 2026-09-13 (all results in PR body). REGIONS use FMP /quote on the actual overseas index where the plan allows it (`direct_index` — the real session, no proxy layer): ^N225/^HSI/^FTSE/^STOXX50E returned 200; ^KS11 and ^GDAXI returned HTTP 402 (Restricted Endpoint) and fall back to US-listed country ETFs. /batch-quote-short is also 402, so region reads are one call per symbol. SECTORS have NO index equivalent — an index is regional, not sectoral — so the sector read is necessarily an ADR basket (`adr_proxy`). Alpaca IEX was probed and ELIMINATED on measured evidence: Friday 2026-09-11's 04:00-09:30 ET window returned ONE 1-minute bar per symbol, and the latest IEX quotes are stale/crossed (TSM bid 371.13 / ask 493.24, RIO ask 0) — unusable as prices.",
+
+  "_adr_note": "ADRs are preferred over region ETFs for the SECTOR read because a dual-listed ADR is arbitrage-linked to its home session, whereas a US-listed country ETF is US traders' OPINION of that session. Region ETFs are used only where the index itself is plan-restricted.",
+
+  "regions": [
+    {"region": "japan",      "index": "^N225",     "proxy": "EWJ", "tz": "Asia/Tokyo",     "open": "09:00", "close": "15:00"},
+    {"region": "hong_kong",  "index": "^HSI",      "proxy": "FXI", "tz": "Asia/Hong_Kong", "open": "09:30", "close": "16:00"},
+    {"region": "korea",      "index": null,        "proxy": "EWY", "tz": "Asia/Seoul",     "open": "09:00", "close": "15:30"},
+    {"region": "taiwan",     "index": null,        "proxy": "EWT", "tz": "Asia/Taipei",    "open": "09:00", "close": "13:30"},
+    {"region": "germany",    "index": null,        "proxy": "EWG", "tz": "Europe/Berlin",  "open": "09:00", "close": "17:30"},
+    {"region": "uk",         "index": "^FTSE",     "proxy": "EWU", "tz": "Europe/London",  "open": "08:00", "close": "16:30"},
+    {"region": "europe",     "index": "^STOXX50E", "proxy": "VGK", "tz": "Europe/Berlin",  "open": "09:00", "close": "17:30"}
+  ],
+
+  "_sector_proxies_note": "FMP `sector` string -> dual-listed ADRs whose HOME session has already traded. Keep keys byte-identical to FMP's own sector strings; a typo silently produces a structurally-absent sector rather than an error.",
+  "sector_proxies": {
+    "Technology":             ["TSM", "ASML", "SAP"],
+    "Energy":                 ["SHEL", "BP", "TTE"],
+    "Healthcare":             ["AZN", "NVO", "GSK"],
+    "Basic Materials":        ["RIO", "BHP"],
+    "Financial Services":     ["HSBC", "UBS", "MUFG"],
+    "Consumer Cyclical":      ["TM", "HMC"],
+    "Industrials":            ["SIEGY", "ABBNY"],
+    "Communication Services": ["VOD", "DTEGY"]
+  },
+
+  "_structurally_absent_note": "These sectors have NO honest overseas proxy — they are structurally domestic. They must read ABSENT, never 0.0. Same distinction `applicable_components` already draws between not_applicable and missing_data, and it matters for the same reason: a sector must never be scored against a bar it cannot structurally clear. Listed explicitly (rather than left to fall out of an absent map key) so the omission is a recorded decision, not an oversight.",
+  "structurally_absent_sectors": ["Real Estate", "Utilities", "Consumer Defensive"]
+}

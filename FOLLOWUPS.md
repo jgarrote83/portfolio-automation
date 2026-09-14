@@ -874,6 +874,74 @@ minutes with a cost increase is enough" is a statement about SPEED, and
 ATR-scaling is what makes "quick" mean the same thing on a 1.5%-ATR name and a
 5%-ATR name.
 
+### 113. `global_overnight` — Monday's live probe + two unconfirmed decision gates (MEDIUM — data-gated, cross-refs #34)
+Shipped 2026-09-13 (branch `feat/20260913-global-overnight`) with its central data
+question **deliberately unresolved at build time and answered at runtime instead.**
+
+**The live probe — Monday 2026-09-14, 09:00 ET.** The block was built on a Sunday, so
+whether FMP's ADR quotes actually refresh during US pre-market could not be measured:
+every timestamp correctly showed Friday's close. Jorge's call was *"build now, let the
+block self-measure"* rather than wait a day. Read Monday's snapshot and check:
+
+| field | reads if ADRs refresh pre-market | reads if they do NOT |
+|---|---|---|
+| `global_overnight.available` | `true` | `false` |
+| `.unavailable_reason` | `null` | `"no_fresh_sector_data"` |
+| `.coverage.sector_symbols_read` | most of 21 | `0` |
+| `.coverage.sector_symbols_rejected[].reason` | — | `stale_not_current_session` |
+| `catalyst_screen.ledger[].components.global_sector_tone` | populated | `null` everywhere |
+
+Note the floor is now 5 (G-12), so `available` also reads `false` at
+`"cross_section_too_thin:N<5"` when 4 or fewer of the 8 sectors resolve — a
+DIFFERENT outcome from total staleness and worth distinguishing when reading the
+result. `region_tone` / `region_mean_pct` / `global_risk_tone` are independent of the
+sector path and should populate regardless (Europe is mid-session at 09:00 ET).
+
+**Either outcome is a valid result and neither is a fault.** If the ADRs are stale the
+component is absent for every candidate, nothing downstream changes, and the honest
+options are (a) accept a region-only block and drop `sector_tone`, or (b) find a
+pre-market-fresh sector source — **not** to relax the freshness rule, which is the
+only thing preventing Friday's close from being narrated as this morning's tilt.
+Check `region_tone` separately: Europe is mid-session at 09:00 ET, so the European
+rows should be fresh even if the ADRs are not, which would isolate the problem to the
+ADR feed rather than to the freshness test.
+
+**G-12 — `MIN_SECTORS_FOR_CROSS_SECTION = 5` (was 3; raised in PR review).** This is a
+**benchmark-stability** floor, not a data-adequacy one. Leave-one-out removes
+self-inclusion but NOT composition dependence: the baseline is still the mean of
+whichever sectors resolved, so if only Technology, Energy and Materials have fresh
+quotes on a morning semis are ripping, the baseline is itself elevated and
+Technology's excess is understated. No arithmetic fixes that — `coverage.sector_gaps`
+makes it visible instead, and the floor is what keeps the benchmark from being one
+absent sector away from being a different benchmark. 5 of the 8 configured sectors.
+**Watch on Monday:** if 5 routinely fails to resolve, the choice is between a
+frequently-unavailable block and a less stable benchmark — do not lower it silently.
+
+**G-13 — `EXCESS_CAP_PCT = 1.5`, proposed, and NOT settleable on one morning.**
+`tone` contributes `tone/8` to the composite, so a saturated reading moves a candidate
+by up to ±0.0625 — plausibly over half the spread of a nominated pool. **This cap is
+therefore the de facto WEIGHT of the entire global signal, not a clamp:** too tight
+and every reading saturates and the component dominates the ranking; too wide and
+every reading sits inert near 0.5. Settle on measured cross-sector dispersion across
+**~10 sessions**, targeting **saturation below ~10% of sector-days** — the same
+discipline every other capped scorer here is held to. `sector_tone[].saturated` and
+`coverage.sectors_saturated` are stamped so this is a COUNT, not a judgement:
+`saturated_sector_days / total_sector_days` across the window. Note this was
+previously mis-scoped as a Monday question; it could not have been answered then even
+in principle, because the pre-review mean-inclusive baseline rescaled with coverage.
+
+**G-14 — `RISK_TONE_BAND_PCT = 0.75`, proposed not confirmed.** The band edge for the
+describe-only `global_risk_tone` label, in mean regional %. Banded rather than a bare
+sign test for the same reason `rate_decomposition.dominant_driver` is. 0.75 was picked
+as "a broad, clearly-risk-off morning" without measurement; settle it against
+`region_mean_pct`'s observed distribution alongside G-13.
+
+**Not a decision gate, but worth stating once:** this component is equal-weighted with
+the other seven, like every other component, per the FOLLOWUPS #23 doctrine (no
+backtest harness ⇒ a tuned coefficient is an unfalsifiable prior). It is plausibly
+weaker than `news_recency` for a ~2-day hold. Do not hand-tune it; it joins the same
+#58 weight-tuning question as everything else.
+
 ### 108. B2 remainder — **S1 SHIPPED 2026-09-13**; S2 at-close grading still open (HIGH — risk control)
 **UPDATE 2026-09-13: S1 (the two-trip kill switch) IS BUILT AND MERGED** — see
 CLAUDE.md's "Flex kill switch, S1" section. Jorge chose to build it before
@@ -2585,6 +2653,45 @@ trades, $19.7K enforced notional), auto-exec submitted, all 11 filled at Alpaca.
   filled after a SEP. LOW.
 
 ### 34. `global_overnight` tone block — pre-open tactical signal (MEDIUM — flex-facing)
+**PARTIALLY SHIPPED 2026-09-13, branch `feat/20260913-global-overnight`. Read this
+update before the original entry below — the delivered scope is deliberately NOT the
+scope this entry specified.**
+
+Jorge's direction on 2026-09-13 re-pointed the block: *"add the other markets that
+open before US as an indicator — we may have a global indicator that a sector is
+being bought before the US market opens."* That is a **cross-sector TILT**, which
+this entry never described; the entry's own v1 design is a **risk-TONE** instrument
+(`overnight_risk_tone` + `carry_stress`). Both are worth having and they are not
+substitutes, so the tilt shipped and the tone did not.
+
+**Shipped:** `src/collector/global_overnight.py` (pure) + `src/config/global-overnight.json`
++ the `global_overnight` snapshot block + `catalyst_screen`'s 8th component
+`global_sector_tone`. Regions read the real index where the plan allows
+(`^N225`/`^HSI`/`^FTSE`/`^STOXX50E` → 200) and a country ETF where it does not
+(`^KS11`/`^GDAXI` → 402), stamping `source_basis` per row; sectors read an ADR
+basket, scored on the **cross-sector excess** rather than the absolute move.
+
+**NOT shipped, and still open under this entry:** `overnight_risk_tone`,
+`carry_stress`, the USDJPY leg, the Alpaca pre-market SPY/QQQ leg, and the flex
+ABSTENTION rule those feed. The carry-unwind tail-detection case (sub-point (b)) is
+untouched — a cross-sector tilt says nothing about an Aug-2024 morning.
+
+**P0.3 — the Alpaca IEX pre-market leg is now ELIMINATED on measured evidence, not
+still "unverified".** Probed 2026-09-13 against Friday 2026-09-11's 04:00–09:30 ET
+window: **one 1-minute bar per symbol** across the whole 5.5-hour window, and the
+latest IEX quotes were crossed/unusable (TSM bid 371.13 / ask 493.24 — a 33% spread;
+RIO ask 0). IEX pre-market coverage is not adequate for this purpose on this feed.
+Anyone revisiting the pre-market leg needs a different provider, not a retry.
+
+**P0.2 caveat — ADR pre-market freshness was UNMEASURABLE at build time** (built on a
+Sunday; every timestamp correctly showed Friday's close). Rather than assume, the
+block **self-measures**: a row counts only if its timestamp lands on the current ET
+session date, so if the ADRs do not refresh pre-market the whole basket drops out,
+`sector_tone` is empty, the component is absent everywhere, and `coverage` says why.
+**Monday 2026-09-14's 09:00 ET run is the live probe** — see #113.
+
+---
+**Original entry (2026-07-04), retained in full:**
 **Motivation (account holder, 2026-07-04):** the collector's 09:00 ET run is the ideal
 capture point for the overnight global session — Asia closed (final), Europe five
 hours into its day, US pre-market pricing the sum — and none of it currently reaches

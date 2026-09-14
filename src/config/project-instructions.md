@@ -430,11 +430,12 @@ catalyst-sleeve-funnel Task D; extended 2026-08-14, Task D-priority-1/3/4).** Ev
 run, the collector screens a DISCOVERY universe (genuinely new names — never held,
 never previously nominated — sourced from the market-wide earnings calendar
 `earnings_calendar_market` and market-wide congressional flow) and ranks it by a
-deterministic `catalyst_score`: the EQUAL-WEIGHTED mean of up to seven components
+deterministic `catalyst_score`: the EQUAL-WEIGHTED mean of up to eight components
 (`earnings_proximity`, `news_recency`, `news_tone`, `momentum`, `volume_surge`,
 `political_flow`, `relative_strength` — 60-day total-return excess vs SPY, added
 2026-08-14 after EUAD's +16-22pp 60d excess sat unused in `regional_rotation` for
-four straight sessions while feeding nothing into this ranking), each independently
+four straight sessions while feeding nothing into this ranking — and
+`global_sector_tone`, added 2026-09-13, see below), each independently
 computed — **you never compute this score, only read it.** A component with no
 underlying data is ABSENT and drops out of the mean rather than scoring 0 — this is
 why a no-earnings-date name is never handicapped for it (see item 1).
@@ -459,6 +460,63 @@ trade on NEWS ended up rankable on momentum and regime fit alone. A candidate is
 `rankability_reason` names the FIRST unmet condition (`missing_required:news_recency`
 / `missing_price_confirmation` / `insufficient_components:N<3`) — quote it verbatim
 when explaining why a name was not nominated; never guess at the cause.
+
+**`global_sector_tone` scores but never admits** (`catalyst_screen.
+non_rankability_components`, session 2026-09-13). It is a property of a SECTOR, not
+of the candidate — every name in that sector receives the identical value — so it is
+excluded from clause 3's count while still counting in the composite's denominator.
+It may therefore change a candidate's RANK, never its ADMISSION. Do not describe a
+name as rankable "because the overseas read came in", and do not treat two candidates
+in the same sector as differentiated by this component: they are not.
+
+**`global_overnight` — the overseas session read (session 2026-09-13, resolves
+FOLLOWUPS #34).** By the time the collector runs at 09:00 ET, Asia has closed and
+Europe is mid-session, so a sector being bought hard overseas is information the US
+open has not yet absorbed. Two baskets, and they answer DIFFERENT questions — never
+conflate them:
+- **`region_tone`** — the actual overseas indexes (`source_basis: "direct_index"`)
+  where the FMP plan allows, else a US-listed country ETF (`"region_proxy"`). This is
+  REGIONAL and describe-only; it feeds no component. Cite `source_basis` whenever you
+  quote a region, because a real index read and an ETF proxy are not equally strong
+  evidence. **Two summaries, and you must not treat either as the other:**
+  `region_breadth_up` is BREADTH (fraction of regions positive) and
+  `region_mean_pct` is MAGNITUDE, banded into `global_risk_tone`
+  (`risk_on`/`neutral`/`risk_off`). Every region at −0.1% and every region at −3.0%
+  share a breadth of 0.0 and are completely different mornings — quote the magnitude
+  whenever you characterise the overnight tape. A broad `risk_off` is genuine context
+  for a long-only multi-day sleeve, but it is **describe-only and gates nothing**: do
+  not present it as a reason the engine did or will abstain (no such rule exists —
+  that is FOLLOWUPS #34's still-open half).
+- **`sector_tone`** — an ADR basket per sector (`"adr_proxy"`), and the ONLY thing
+  feeding `global_sector_tone`. **Scored on the LEAVE-ONE-OUT cross-sector excess**
+  (`excess_pct` = the sector's move minus its OWN `baseline_pct`, the mean of the
+  OTHER sectors), never the absolute move: on a broad risk-on morning every basket is
+  up and no sector is being singled out, so every sector correctly reads 0.5. A `tone`
+  of 0.5 means "moved with the overseas tape", NOT "no data". Roughly half of any
+  session's sectors will read below 0.5 by construction; that is the cross-section
+  summing to zero, not a bearish signal. **`sector_mean_pct` is narration only — it is
+  NOT the baseline anything is scored against**; cite a sector's own `baseline_pct` if
+  you need to show the comparison.
+
+**One real limitation to state rather than paper over:** the baseline is the mean of
+whichever sectors resolved, so if coverage is thin and the missing sectors are the
+quiet ones, the surviving baseline is elevated and every excess is understated.
+`coverage.sector_gaps` names exactly which sectors are missing — read it before
+leaning on a tilt, and say so when coverage is partial.
+
+Three sectors — **Real Estate, Utilities, Consumer Defensive** — have no honest
+overseas proxy and are `structurally_absent_sectors`: `not_applicable`, never
+`missing_data` and never 0.0. A candidate in one of them is not disadvantaged and
+must never be described as such.
+
+`available: false` is a normal outcome, not a fault: the block self-measures
+freshness (a row counts only if its own timestamp lands on the CURRENT ET session
+date), so a session where the ADR quotes have not refreshed pre-market reads
+`unavailable_reason: "no_fresh_sector_data"`, or `"cross_section_too_thin:N<5"` when
+too few sectors resolve for the benchmark to be stable. In either case
+`global_sector_tone` is simply absent for every candidate and nothing downstream
+changes. Cite `coverage` (`sectors_scored`, `sector_gaps`, the rejection reasons)
+rather than speculating about why the block is unavailable.
 
 **`earnings_proximity` gates NOTHING.** It contributes to the score when a forward
 date exists and is otherwise simply absent. A catalyst is opportunistic — nothing in
