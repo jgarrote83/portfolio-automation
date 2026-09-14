@@ -874,6 +874,52 @@ minutes with a cost increase is enough" is a statement about SPEED, and
 ATR-scaling is what makes "quick" mean the same thing on a 1.5%-ATR name and a
 5%-ATR name.
 
+### 113. `global_overnight` — Monday's live probe + two unconfirmed decision gates (MEDIUM — data-gated, cross-refs #34)
+Shipped 2026-09-13 (branch `feat/20260913-global-overnight`) with its central data
+question **deliberately unresolved at build time and answered at runtime instead.**
+
+**The live probe — Monday 2026-09-14, 09:00 ET.** The block was built on a Sunday, so
+whether FMP's ADR quotes actually refresh during US pre-market could not be measured:
+every timestamp correctly showed Friday's close. Jorge's call was *"build now, let the
+block self-measure"* rather than wait a day. Read Monday's snapshot and check:
+
+| field | reads if ADRs refresh pre-market | reads if they do NOT |
+|---|---|---|
+| `global_overnight.available` | `true` | `false` |
+| `.unavailable_reason` | `null` | `"no_fresh_sector_data"` |
+| `.coverage.sector_symbols_read` | most of 21 | `0` |
+| `.coverage.sector_symbols_rejected[].reason` | — | `stale_not_current_session` |
+| `catalyst_screen.ledger[].components.global_sector_tone` | populated | `null` everywhere |
+
+**Either outcome is a valid result and neither is a fault.** If the ADRs are stale the
+component is absent for every candidate, nothing downstream changes, and the honest
+options are (a) accept a region-only block and drop `sector_tone`, or (b) find a
+pre-market-fresh sector source — **not** to relax the freshness rule, which is the
+only thing preventing Friday's close from being narrated as this morning's tilt.
+Check `region_tone` separately: Europe is mid-session at 09:00 ET, so the European
+rows should be fresh even if the ADRs are not, which would isolate the problem to the
+ADR feed rather than to the freshness test.
+
+**G-12 — `MIN_SECTORS_FOR_CROSS_SECTION = 3`, proposed not confirmed.** Below 3 the
+cross-section is withheld entirely. With 1 sector the excess is 0.0 by construction;
+with 2 each is the exact negative of the other — a real but very thin read. 3 is a
+judgement call, chosen conservatively. If Monday shows 2 sectors resolving routinely,
+the choice is between lowering this and accepting a frequently-unavailable block.
+
+**G-13 — `EXCESS_CAP_PCT = 1.5`, proposed not confirmed.** The symmetric clamp mapping
+cross-sector excess to [0,1], mirroring `momentum_score`/`relative_strength_score` so
+this component cannot dominate the composite by scale alone. 1.5pp of single-session
+cross-sector dispersion was picked as "already large" without measurement. Settle it
+on the observed distribution of `sector_tone[].excess_pct` after ~10 sessions — if
+readings routinely saturate at 0/1 the cap is too tight; if they cluster at 0.5 it is
+too loose.
+
+**Not a decision gate, but worth stating once:** this component is equal-weighted with
+the other seven, like every other component, per the FOLLOWUPS #23 doctrine (no
+backtest harness ⇒ a tuned coefficient is an unfalsifiable prior). It is plausibly
+weaker than `news_recency` for a ~2-day hold. Do not hand-tune it; it joins the same
+#58 weight-tuning question as everything else.
+
 ### 108. B2 remainder — **S1 SHIPPED 2026-09-13**; S2 at-close grading still open (HIGH — risk control)
 **UPDATE 2026-09-13: S1 (the two-trip kill switch) IS BUILT AND MERGED** — see
 CLAUDE.md's "Flex kill switch, S1" section. Jorge chose to build it before
@@ -2585,6 +2631,45 @@ trades, $19.7K enforced notional), auto-exec submitted, all 11 filled at Alpaca.
   filled after a SEP. LOW.
 
 ### 34. `global_overnight` tone block — pre-open tactical signal (MEDIUM — flex-facing)
+**PARTIALLY SHIPPED 2026-09-13, branch `feat/20260913-global-overnight`. Read this
+update before the original entry below — the delivered scope is deliberately NOT the
+scope this entry specified.**
+
+Jorge's direction on 2026-09-13 re-pointed the block: *"add the other markets that
+open before US as an indicator — we may have a global indicator that a sector is
+being bought before the US market opens."* That is a **cross-sector TILT**, which
+this entry never described; the entry's own v1 design is a **risk-TONE** instrument
+(`overnight_risk_tone` + `carry_stress`). Both are worth having and they are not
+substitutes, so the tilt shipped and the tone did not.
+
+**Shipped:** `src/collector/global_overnight.py` (pure) + `src/config/global-overnight.json`
++ the `global_overnight` snapshot block + `catalyst_screen`'s 8th component
+`global_sector_tone`. Regions read the real index where the plan allows
+(`^N225`/`^HSI`/`^FTSE`/`^STOXX50E` → 200) and a country ETF where it does not
+(`^KS11`/`^GDAXI` → 402), stamping `source_basis` per row; sectors read an ADR
+basket, scored on the **cross-sector excess** rather than the absolute move.
+
+**NOT shipped, and still open under this entry:** `overnight_risk_tone`,
+`carry_stress`, the USDJPY leg, the Alpaca pre-market SPY/QQQ leg, and the flex
+ABSTENTION rule those feed. The carry-unwind tail-detection case (sub-point (b)) is
+untouched — a cross-sector tilt says nothing about an Aug-2024 morning.
+
+**P0.3 — the Alpaca IEX pre-market leg is now ELIMINATED on measured evidence, not
+still "unverified".** Probed 2026-09-13 against Friday 2026-09-11's 04:00–09:30 ET
+window: **one 1-minute bar per symbol** across the whole 5.5-hour window, and the
+latest IEX quotes were crossed/unusable (TSM bid 371.13 / ask 493.24 — a 33% spread;
+RIO ask 0). IEX pre-market coverage is not adequate for this purpose on this feed.
+Anyone revisiting the pre-market leg needs a different provider, not a retry.
+
+**P0.2 caveat — ADR pre-market freshness was UNMEASURABLE at build time** (built on a
+Sunday; every timestamp correctly showed Friday's close). Rather than assume, the
+block **self-measures**: a row counts only if its timestamp lands on the current ET
+session date, so if the ADRs do not refresh pre-market the whole basket drops out,
+`sector_tone` is empty, the component is absent everywhere, and `coverage` says why.
+**Monday 2026-09-14's 09:00 ET run is the live probe** — see #113.
+
+---
+**Original entry (2026-07-04), retained in full:**
 **Motivation (account holder, 2026-07-04):** the collector's 09:00 ET run is the ideal
 capture point for the overnight global session — Asia closed (final), Europe five
 hours into its day, US pre-market pricing the sum — and none of it currently reaches

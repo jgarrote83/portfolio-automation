@@ -10,6 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from collector import catalyst_screen  # noqa: E402
 from collector.handler import _build_catalyst_screen  # noqa: E402
 
 TODAY = "2026-08-10"
@@ -60,7 +61,7 @@ def test_fund_candidate_gets_earnings_and_political_marked_not_applicable():
     )
     row = next(r for r in result["ledger"] if r["symbol"] == "ETF1")
     assert set(row["components_not_applicable"]) == {"earnings_proximity", "political_flow"}
-    assert row["components_applicable"] == 5
+    assert row["components_applicable"] == len(catalyst_screen.COMPONENTS) - 2
     assert row["basis"]["is_fund"] is True
 
 
@@ -75,7 +76,7 @@ def test_single_stock_candidate_has_no_not_applicable_components():
     )
     row = next(r for r in result["ledger"] if r["symbol"] == "NVDA")
     assert row["components_not_applicable"] == []
-    assert row["components_applicable"] == 7
+    assert row["components_applicable"] == len(catalyst_screen.COMPONENTS)
     assert row["basis"]["is_fund"] is False
 
 

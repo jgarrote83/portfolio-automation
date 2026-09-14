@@ -253,7 +253,7 @@ def test_political_flow_caps_at_full_score():
 # --- composite_score: the absent-vs-zero handicap test ----------------------
 
 def test_composite_drops_absent_components_from_mean():
-    # Only 4 of 7 available; the 3 absent must NOT drag the mean toward 0.
+    # Only 4 available; every absent one must NOT drag the mean toward 0.
     comps = {
         "earnings_proximity": None,
         "news_recency": 1.0,
@@ -262,11 +262,13 @@ def test_composite_drops_absent_components_from_mean():
         "volume_surge": 1.0,
         "political_flow": None,
         "relative_strength": None,
+        "global_sector_tone": None,
     }
     cs = composite_score(comps)
     assert cs["score"] == 1.0  # mean of the 4 available 1.0's, not diluted by absence
     assert cs["components_available"] == 4
-    assert set(cs["components_missing"]) == {"earnings_proximity", "political_flow", "relative_strength"}
+    assert set(cs["components_missing"]) == {
+        "earnings_proximity", "political_flow", "relative_strength", "global_sector_tone"}
     assert cs["rankable"] is True
 
 
@@ -296,7 +298,7 @@ def test_composite_all_absent_scores_none():
 
 # --- applicable_components / double-clause rankability guard (Task D-priority-3/4) --
 
-def test_applicable_components_single_name_gets_all_seven():
+def test_applicable_components_single_name_gets_every_component():
     assert applicable_components(is_fund=False) == COMPONENTS
 
 
@@ -304,7 +306,9 @@ def test_applicable_components_fund_excludes_earnings_and_political():
     out = applicable_components(is_fund=True)
     assert "earnings_proximity" not in out
     assert "political_flow" not in out
-    assert len(out) == 5
+    # Expressed against COMPONENTS rather than a frozen literal: this test pins
+    # WHICH two a fund loses, not how many components exist in total.
+    assert len(out) == len(COMPONENTS) - 2
 
 
 def test_omitting_applicable_preserves_original_unconditional_behavior():
@@ -317,20 +321,20 @@ def test_omitting_applicable_preserves_original_unconditional_behavior():
     without_arg = composite_score(comps)
     assert with_none == without_arg
     assert with_none["components_not_applicable"] == []
-    assert with_none["components_applicable"] == 7
+    assert with_none["components_applicable"] == len(COMPONENTS)
 
 
 def test_fund_candidate_classifies_earnings_and_political_as_not_applicable():
     comps = {
         "earnings_proximity": None, "news_recency": 1.0, "news_tone": 1.0,
         "momentum": 1.0, "volume_surge": 1.0, "political_flow": None,
-        "relative_strength": 1.0,
+        "relative_strength": 1.0, "global_sector_tone": 1.0,
     }
     cs = composite_score(comps, applicable_components(is_fund=True))
     assert set(cs["components_not_applicable"]) == {"earnings_proximity", "political_flow"}
     assert cs["components_missing"] == []   # nothing MISSING -- absence here is structural
-    assert cs["components_applicable"] == 5
-    assert cs["components_available"] == 5
+    assert cs["components_applicable"] == len(COMPONENTS) - 2
+    assert cs["components_available"] == len(COMPONENTS) - 2
     assert cs["rankable"] is True
 
 

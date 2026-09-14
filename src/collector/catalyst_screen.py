@@ -49,6 +49,12 @@ from datetime import date, datetime
 # fed nothing into the funnel; this wires it in. Motivating incident: EUAD
 # carried +16-22pp 60d excess vs SPY for four straight sessions, displayed
 # daily, discarded by the ranking pipeline.
+#
+# `global_sector_tone` (2026-09-13, global-overnight cycle) is the eighth: the
+# candidate's own sector's move in the OVERSEAS session that already happened
+# this morning, measured as a cross-sector EXCESS (see
+# `collector/global_overnight.py`). Scored by that module and handed in here as
+# a plain float — this module stays I/O-free and dependency-free.
 COMPONENTS: tuple[str, ...] = (
     "earnings_proximity",
     "news_recency",
@@ -57,6 +63,7 @@ COMPONENTS: tuple[str, ...] = (
     "volume_surge",
     "political_flow",
     "relative_strength",
+    "global_sector_tone",
 )
 
 # --- rankability (R2, session 2026-09-12) -----------------------------------
@@ -83,6 +90,22 @@ REQUIRED_COMPONENT = "news_recency"
 PRICE_CONFIRMATION_COMPONENTS = ("momentum", "volume_surge")
 MIN_COMPONENTS_RANKABLE = 3
 
+# Components that CONTRIBUTE to the composite but must NEVER help a candidate
+# clear the rankability bar (2026-09-13, global-overnight cycle).
+#
+# `global_sector_tone` is a property of a SECTOR, not of the candidate — every
+# Technology name in a session receives the identical value. Counting it toward
+# `MIN_COMPONENTS_RANKABLE` would let one sector-wide reading substitute for a
+# missing candidate-specific one, so on a morning when the block resolves, the
+# effective bar would silently drop from 3 candidate-specific components to 2
+# for every name in a covered sector — and rise back on a morning it does not.
+# A rankability bar that moves with an unrelated data feed is not a bar.
+#
+# Subtracted inside `rankability()`'s `avail` set ONLY. `composite_score`'s
+# denominator still includes it when present, which is the intended asymmetry:
+# it may change a candidate's RANK, never its ADMISSION.
+_NON_RANKABILITY_COMPONENTS: tuple[str, ...] = ("global_sector_tone",)
+
 # Single-name-only components: a fund/ETF has no earnings date to report and
 # is not the kind of individual-insider-conviction target Quiver's
 # congressional-purchase signal measures. NOT_APPLICABLE for a fund, never
@@ -91,7 +114,9 @@ MIN_COMPONENTS_RANKABLE = 3
 _SINGLE_NAME_ONLY_COMPONENTS = ("earnings_proximity", "political_flow")
 
 
-def applicable_components(is_fund: bool) -> tuple[str, ...]:
+def applicable_components(
+    is_fund: bool, global_tone_not_applicable: bool = False,
+) -> tuple[str, ...]:
     """Task D-priority-3/4 (2026-08-14 flex-conviction-path cycle) — which of
     the 7 `COMPONENTS` are even CONCEPTUALLY possible for this instrument
     type, independent of whether data happens to be available this session.
@@ -106,10 +131,23 @@ def applicable_components(is_fund: bool) -> tuple[str, ...]:
     `isEtf`/`isFund` profile booleans (D-priority-4) — more robust than
     inferring instrument type from a sector string, which is unreliable/absent
     for many funds.
+
+    `global_tone_not_applicable` (2026-09-13) carries the SAME distinction one
+    level further out: a candidate in a structurally-domestic sector (Real
+    Estate, Utilities, Consumer Defensive — `global-overnight.json`'s
+    `structurally_absent_sectors`) has no overseas proxy that could ever exist,
+    so `global_sector_tone` is `not_applicable` for it, never `missing_data`.
+    A sector that simply has no fresh quote THIS session is the opposite case
+    and stays `missing_data` — it can resolve tomorrow.
     """
+    drop: set[str] = set()
     if is_fund:
-        return tuple(c for c in COMPONENTS if c not in _SINGLE_NAME_ONLY_COMPONENTS)
-    return COMPONENTS
+        drop.update(_SINGLE_NAME_ONLY_COMPONENTS)
+    if global_tone_not_applicable:
+        drop.add("global_sector_tone")
+    if not drop:
+        return COMPONENTS
+    return tuple(c for c in COMPONENTS if c not in drop)
 
 
 # --- hard screen (mechanical, applied before any scoring) -------------------
@@ -512,8 +550,15 @@ def rankability(
     structurally clear" failure `applicable_components` exists to prevent. So
     each clause below is skipped when its component is not applicable — the
     overall-count clause still binds.
+
+    `_NON_RANKABILITY_COMPONENTS` is subtracted from `avail` HERE and nowhere
+    else: a sector-wide reading may change a candidate's rank but must never
+    help it clear admission. See that constant's own comment for why.
     """
-    avail = {k for k in applicable if components.get(k) is not None}
+    avail = {
+        k for k in applicable
+        if components.get(k) is not None and k not in _NON_RANKABILITY_COMPONENTS
+    }
 
     if REQUIRED_COMPONENT in applicable and REQUIRED_COMPONENT not in avail:
         return False, f"missing_required:{REQUIRED_COMPONENT}"

@@ -133,6 +133,36 @@ class FMPClient:
         result = self._get("/biggest-gainers", {})
         return result if isinstance(result, list) else []
 
+    # ---- global_overnight (session 2026-09-13, FOLLOWUPS #34) --------------
+    # Probed live on this Starter key 2026-09-13 — what is and is not available:
+    #   /quote?symbol=^N225 / ^HSI / ^FTSE / ^STOXX50E  -> 200
+    #   /quote?symbol=^KS11 / ^GDAXI                    -> 402 Restricted Endpoint
+    #   /batch-quote-short (any symbols)                -> 402 Restricted Endpoint
+    #   /aftermarket-quote?symbol=TSM|SHEL|AZN|RIO|HSBC -> 200 (all five)
+    # So index reads are ONE CALL PER SYMBOL (no batch on this tier), two of the
+    # seven configured regions fall back to a US-listed country ETF, and the
+    # sector read runs through ADRs because no index is sectoral.
+    #
+    # `/quote` rows carry {symbol, price, previousClose, changePercentage,
+    # timestamp}; `/aftermarket-quote` rows carry only {symbol, bidPrice,
+    # askPrice, bidSize, askSize, volume, timestamp} — NO price and NO previous
+    # close, so a change % is not computable from an aftermarket row alone. That
+    # is why the collector's region/sector reads go through `get_quote` below;
+    # the pre-existing `get_aftermarket_quote` (DayTrade Lab section) stays what
+    # it already was and is NOT used as a price here.
+
+    def get_quote(self, ticker: str) -> dict | None:
+        """Full quote row for one symbol (index symbols use a `^` prefix).
+
+        ``None`` on any failure INCLUDING a 402 — a plan-restricted symbol is
+        indistinguishable from an outage here by design, and both resolve the
+        same way upstream: fall back to the configured proxy, or drop the row.
+        """
+        result = self._get("/quote", {"symbol": ticker})
+        if isinstance(result, list) and result:
+            return result[0]
+        return result if isinstance(result, dict) else None
+
     # ---- DayTrade Lab (all verified on Starter 2026-07-07 — spec §2) --------
     def get_shares_float(self, ticker: str) -> dict | None:
         """``{floatShares, outstandingShares, freeFloat, date, ...}`` or None."""
