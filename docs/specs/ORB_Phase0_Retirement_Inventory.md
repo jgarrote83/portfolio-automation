@@ -137,6 +137,8 @@ None of U1–U11 remains open. The only new items needing a Jorge call are the 8
 
 ## 9. Revised Part B plan — ordered commits, each leaving the suite green and ruff clean
 
+> **Execution note (Part B, branch `feat/orb-phase0b-retire-flex`).** Executed as planned with these deliberate shifts: **B1 also absorbed the removal of the collector's catalyst screen and kill-switch echo** (the only users of `flex.config`/`flex.indicators`/`flex.trades` inside Core), so that "nothing in Core imports `flex.*`" holds after B1 *without* copying any code — B3 was correspondingly narrower. B2 added a one-function helper, `_news_history_row`, to make the U2 tag testable. B7 also removed the FMP movers and DayTrade client methods (decision U4). **B8 was skipped** (runbook step 6 `PENDING`). A tenth commit (B10b) reworded stale Flex comments/docstrings and two validator rejection messages and deleted the orphaned `_damp_p_up_toward_base_rate`. Per-commit measured test counts, every deviation, and open questions: `.review/phase0b-summary.md`.
+
 **Precondition.** Part B **coding** may start before FLAT; **merging and deploying wait for two FLAT readings with the kill-switch trip confirmed** (runbook steps 3-4), history archived (step 7) and the `LearningProposals` query (step 6) showing no proposal targets the Flex files/keys.
 
 Part B is **purely subtractive** (no ports). The only non-deletions are the verbatim file move in B1 and U2's `basis` tag in B2.
