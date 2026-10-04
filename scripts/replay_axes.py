@@ -27,7 +27,7 @@ collector's cron (`0 0 9 * * 1-5`) exactly -- production has no
 market-holiday awareness either, so this is not a simplification, it is
 parity with what the live system does.
 
-Offline only; never imported by collector/analyzer/flex runtime code.
+Offline only; never imported by collector/analyzer runtime code.
 """
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 """Task D6 (2026-08-14 audit) — `_write_thematic_history` (analyzer, WRITE
 ONLY). Mirrors the existing `_write_trade_history` monkeypatch-`upsert_entity`
-testing precedent (tests/test_flex_review.py).
+testing precedent.
 
 Run: PYTHONPATH=src pytest tests/test_write_thematic_history.py
 """

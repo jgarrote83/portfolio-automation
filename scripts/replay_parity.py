@@ -32,7 +32,7 @@ turn windows), how many confirmed-direction changes are NOT associated with
 any registered turn for that axis -- the denominator the admission rule
 (`admission.py`) needs.
 
-Offline only; never imported by collector/analyzer/flex runtime code.
+Offline only; never imported by collector/analyzer runtime code.
 """
 from __future__ import annotations
 

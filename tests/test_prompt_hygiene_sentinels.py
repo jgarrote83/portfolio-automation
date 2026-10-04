@@ -1,12 +1,12 @@
 """Prompt-content sentinels for the 2026-08-01 session's hygiene batch (Task D
 cash-ceiling deployment doctrine + Task E1/E2/E3 load-bearing prompt sentences).
 
-Mirrors the `_FLEX_SCHEMA_SENTINELS` / `_OVERRIDE_SCHEMA_SENTINELS` pattern in
-`analyzer/handler.py` (`tests/test_flex_prompt_schema.py`): a simple, direct
+Mirrors the `_OVERRIDE_SCHEMA_SENTINELS` pattern in
+`analyzer/handler.py` (`tests/test_override_prompt_schema.py`): a simple, direct
 substring check against the LIVE prompt file, so a future edit that silently
 drops one of these doctrine sentences fails a test instead of shipping quietly.
 These are prose additions for the LLM, not something deterministic code parses
-at runtime, so — unlike the flex/override schema gates — there is no
+at runtime, so — unlike the override schema gate — there is no
 `assert_*_prompt_schema` raising function backing them; the test IS the gate.
 
 Run: PYTHONPATH=src pytest tests/test_prompt_hygiene_sentinels.py

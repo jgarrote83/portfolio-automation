@@ -31,7 +31,7 @@ one quarter and reshape to `{date, asof, value}`.
 
 This module has zero I/O of its own -- it operates on already-fetched vintage
 rows (whatever shape `alfred_cache.py` hands it, or a hand-built fixture in a
-test). Offline only; never imported by collector/analyzer/flex runtime code.
+test). Offline only; never imported by collector/analyzer runtime code.
 """
 from __future__ import annotations
 
