@@ -39,6 +39,7 @@ Claude Code builds ORB inside the portfolio-automation repo one phase at a time 
 5. Load keys from the gitignored `.env` locally and Key Vault in Azure; never commit, log or print them.
 6. Backtests get data only through `backtest.data.get_bars`; tune only on 2024–2025 and never run the 2026 holdout without your approval.
 7. Use the paper endpoint only; `ORB_ENABLED` ships `false` in Bicep and only you flip it.
+8. Make Azure changes only inside the resource group `rg-portfolio-automation-prod` (subscription EasyGridsProduction). Every `az` command and Bicep deployment names that resource group explicitly; anything outside it, including subscription-, tenant- or Entra-level changes, needs Jorge's explicit approval first.
 
 | Gate | When | You decide |
 | --- | --- | --- |
@@ -56,7 +57,7 @@ Both Flex engines stop entering, run until flat, and only then lose their code. 
 - [ ] Trip it and keep `DAYTRADE_ENABLED=false` (the lab already ships off)
 - [ ] Wait until no `FLEXC-` or `FLEXD-` positions or orders remain at Alpaca and both ledgers are empty, then set `FLEX_ENABLED=false`
 - [ ] Archive the history blobs (`flex-ledger` closed trades and equity series, `daytrade-log`, `daytrade-grades`) rather than deleting them
-- [ ] Copy reusable pieces into `src/orb/` before deleting: the closed-trade ledger builders, reconcile-first pattern, kill switch and order helpers
+- [ ] Record the pre-deletion commit SHA; Phase 4 ports adapted copies of the closed-trade ledger builders, reconcile-first pattern, kill switch and order helpers from it
 - [ ] Remove in one PR:
     - `src/flex/`, `src/daytrade/`, and their timers and routes in `function_app.py`
     - The analyzer's `flex_nominations[]` schema check and CI assertion, the Flex section of `project-instructions.md` and its sentinel tests
