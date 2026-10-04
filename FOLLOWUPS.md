@@ -674,9 +674,16 @@ or disabling it while it holds positions would leave them unprotected.
   `docs/specs/ORB_Phase0_Retirement_Inventory.md` (every Flex/DayTrade reference classified
   DELETE/DECOUPLE/PORT/KEEP/UNSURE + proposed Part B commit order),
   `docs/runbooks/ORB_Phase0_Flex_Shutdown.md` (manual sticky kill-switch trip, wait for
-  flat, archive, rollback), `scripts/orb_phase0_flat_check.py` (read-only FLAT verdict).
+  flat, Learning-proposal check, archive, rollback), `scripts/orb_phase0_flat_check.py`
+  (read-only FLAT verdict).
+- **Review fix-up (2026-10-04):** standing Azure-scope rule (everything inside
+  `rg-portfolio-automation-prod`); the flat check now also gates on the kill-switch trip and
+  catches unattributed non-Core positions and resting stops (the wiped-ledger false-FLAT);
+  the runbook gains an ownership check, explicit `--subscription` on every `az`, and a
+  `LearningProposals` query; U1-U11 decided (inventory section 8a); Part B is purely subtractive.
 - **Jorge, between A and B:** run the runbook, trip the switch, wait until the flat check
-  says FLAT, answer the inventory's UNSURE questions.
+  says FLAT twice with the trip confirmed. Part B coding may start earlier; merging and
+  deploying wait for that.
 - **Part B (not started):** the removal PR, `FLEX_ENABLED`/`DAYTRADE_*` out of Bicep (never
   `az` alone), `FLEX_SLEEVE_CAP_PCT` -> `ORB_SLEEVE_CAP_PCT`, SUPERSEDED banners, and marking
   the Flex-related entries superseded. Existing Flex entries are deliberately NOT edited yet.
