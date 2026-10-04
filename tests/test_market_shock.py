@@ -199,3 +199,15 @@ def test_u2_stock_news_symbols_are_held_only_in_the_collector_source():
     src = inspect.getsource(ch.run)
     assert "_news_symbols = list(dict.fromkeys(tickers))" in src
     assert "_mover" not in src and "flex_candidate_tickers + " not in src.split("_news_symbols")[1][:200]
+
+
+def test_u2_stock_news_limit_is_back_at_the_held_only_default():
+    """Part B fix-up (decision 3): the article limit returns to 30 with the held-only symbol
+    list, so the fresh news baseline starts on its final basis."""
+    import inspect
+
+    import collector.handler as ch
+    from shared.clients.fmp import FMPClient
+    assert ch._STOCK_NEWS_LIMIT == 30
+    assert inspect.signature(FMPClient.get_stock_news).parameters["limit"].default == 30
+    assert "limit=_STOCK_NEWS_LIMIT" in inspect.getsource(ch.run)

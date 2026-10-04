@@ -673,6 +673,28 @@ wiped them.
 
 ## Open
 
+### 115. Thematic vocabulary cleanup — residual Flex words in Core's thematic overlay (LOW — deferred code cleanup, found by the ORB Phase 0B review)
+Deliberately deferred by decision (Phase 0B review, 2026-10-04); **no code change was made.** Phase 0B
+renamed only the *reason label* on new thematic `excluded[]` rows (R4: `routed_to_flex` →
+`non_roster_report_only`). What still carries Flex vocabulary or dead logic in Core:
+- **`_thematic_classify_symbol`'s internal status `"flex_route"`** (`collector/handler.py`) and the
+  `"flex_source": "thematic"` field on new `excluded[]` entries; both pinned by
+  `tests/test_thematic_conviction_pure.py` and `tests/test_thematic_reference_weights_integration.py`
+  (the latter uses the status as a string). Rename to something like `report_only` / drop the field,
+  and update the two tests and the prompt's mention.
+- **The unreachable `price_quarantined` branch.** With the flex candidate pipeline gone (U3) the
+  collector always passes an empty quarantine set, so the `price_quarantined` exclusion in
+  `_thematic_classify_symbol`, the `quarantined_symbols` parameter threaded through
+  `_build_thematic_conviction` and `_build_reference_weights` (step 5b re-validation), and the
+  `price_quarantined` entry in the prompt's `thematic_conviction.excluded` reason list can never fire.
+  Remove together, or keep as a defensive hook if a Core-side price-sanity guard is ever wanted.
+- Related leftovers recorded elsewhere, not new: the `off_roster_flex` P&L bucket key (decision U5,
+  revisit with the Phase 4 equity-bridge line); null `flex_source`/`primary_trigger`/… placeholder
+  keys on band-enforcement-synthesized `trades[]` rows (`shared/reference_execution.py`); the unused
+  `snapshot` parameter of `analyzer._write_trade_history`; the inert Flex keys in `risk-limits.json`
+  (B8, waits on the runbook step-6 `LearningProposals` check).
+Each of these is a Core-output or test-pinned change, which is why it is not folded into the retirement.
+
 ### 114. Learning Loop allowlist named a nonexistent path — `config/flex-candidates.json` (MEDIUM — latent defect, found by the ORB Phase 0A inventory, FIXED on `feat/orb-phase0b-retire-flex` commit B5)
 `src/learning/bundle.py` (`LIVE_CONFIG_FILES`) and `src/learning/schema.py`
 (`TARGET_FILE_ALLOWLIST`) both listed `config/flex-candidates.json`. The other three
