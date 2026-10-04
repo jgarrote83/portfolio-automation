@@ -139,10 +139,10 @@ def test_allowlist_rejects_code_file():
     assert any("not in the allowlist" in e for e in res["errors"])
 
 
-def test_allowlist_accepts_all_four_files():
+def test_allowlist_accepts_all_three_files():
     for path in (
         "src/config/project-instructions.md", "src/config/risk-limits.json",
-        "src/config/sleeve-roles.json", "config/flex-candidates.json",
+        "src/config/sleeve-roles.json",
     ):
         base = {path: _BASE_CONTENT}
         doc = _doc(proposals=[_proposal(target_file=path)])
@@ -320,3 +320,28 @@ def test_multiple_errors_all_collected():
     res = _validate(doc)
     assert res["valid"] is False
     assert len(res["errors"]) >= 2
+
+
+# --- Part B (B5, R6): the allowlist names only files that exist --------------------
+
+def test_live_config_files_and_allowlist_name_only_existing_repo_files():
+    """`config/flex-candidates.json` was allowlisted under a path with no `src/` prefix
+    (a repo-root `config/` never existed), so `fetch_live_config`'s raise_for_status()
+    would 404 on it. Every path the bundle fetches and the allowlist accepts must be a
+    real file at repo root, and the two lists must be the same set."""
+    import pathlib
+
+    from learning.bundle import LIVE_CONFIG_FILES
+    from learning.schema import TARGET_FILE_ALLOWLIST
+    root = pathlib.Path(__file__).parent.parent
+    assert set(LIVE_CONFIG_FILES) == set(TARGET_FILE_ALLOWLIST)
+    for path in LIVE_CONFIG_FILES:
+        assert (root / path).is_file(), path
+
+
+def test_flex_candidates_is_no_longer_an_allowlisted_target():
+    for path in ("src/config/flex-candidates.json", "config/flex-candidates.json"):
+        doc = _doc(proposals=[_proposal(target_file=path)])
+        res = validate_cycle_output(json.dumps(doc), {path: _BASE_CONTENT})
+        assert res["valid"] is False
+        assert any("not in the allowlist" in e for e in res["errors"])

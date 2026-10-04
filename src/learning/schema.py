@@ -22,7 +22,6 @@ TARGET_FILE_ALLOWLIST = (
     "src/config/project-instructions.md",
     "src/config/risk-limits.json",
     "src/config/sleeve-roles.json",
-    "config/flex-candidates.json",
 )
 MAX_NON_CLASS0_PROPOSALS = 3
 MAX_CLASS3_PROPOSALS = 1
