@@ -3,8 +3,8 @@
 The active quadrant is derived deterministically from the precomputed growth and
 inflation axis directions (see collector `_build_growth_axis` / `_build_inflation_axis`).
 Each quadrant maps to a representative *held core ETF* — the "active-quadrant sleeve
-ETF" a flex single name is judged against (opportunity-cost gate G3 + the dual-benchmark
-flex review). Keeping this in one place stops the collector and analyzer from drifting.
+ETF" used as the quadrant's benchmark (published to the performance chart's `quadrant-config`).
+Keeping this in one place stops the collector and analyzer from drifting.
 """
 
 import json
@@ -140,7 +140,8 @@ def intl_config() -> dict:
 
 
 # Retired single names — liquidated in tranches, never re-bought into CORE (Task D).
-# INTC/MCK/PPA/EUAD are re-enterable as FLEX theses (see flex-candidates.json).
+# INTC/MCK/PPA/EUAD are plain legacy exits too (ORB Phase 0, decision U1): core re-entry is
+# prohibited and there is no flex re-entry path.
 LEGACY_EXITS = ("AMZN", "GOOGL", "INTC", "MCK", "DBA", "TIP", "XSD", "PPA", "EUAD")
 
 # Exempt-hold doctrine RETIRED (roster_revision_2026-07). Kept as an empty tuple so the
@@ -249,7 +250,7 @@ QUADRANT_CONCENTRATE = _build_quadrant_concentrate()
 
 # CORE_ROSTER = every POOL member of every role (both types) ∪ LEGACY_EXITS while held
 # (the validator must see a legacy name to validate its exit sells). A held name not in
-# this set is off-roster (a flex leftover like MU). A sold-out legacy name simply never
+# this set is off-roster (an off-roster leftover like MU). A sold-out legacy name simply never
 # trades again (buys are rejected — Task D).
 def _build_core_roster() -> tuple[str, ...]:
     names: set[str] = set(LEGACY_EXITS)
@@ -388,7 +389,7 @@ def quadrant_allocation_bucket(ticker: str, overrides: dict[str, str] | None = N
 
     Precedence: a LEGACY_EXITS name -> ``"legacy_exits"`` (a dedicated row so a
     wind-down position is never folded into a quadrant it no longer represents);
-    off the CORE_ROSTER entirely -> ``"off_roster"`` (a flex leftover like MU);
+    off the CORE_ROSTER entirely -> ``"off_roster"`` (an off-roster leftover like MU);
     else the static `primary_quadrant()` bucket (Q1-Q4 / ``"intl"`` /
     ``"cash_sleeve"``), or ``"unmapped"`` when that returns ``"unclassified"`` (a
     non-selected pool member of a scorecard role, e.g. SOXX while SMH is

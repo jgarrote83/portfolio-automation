@@ -576,9 +576,9 @@ def reconcile(
         return {"sleeves": sleeves, "enforced_trades": enforced, "summary": summary,
                 "enforcement_notional_usd": 0.0, "classification_conflicts": conflicts}
 
-    # Off-roster held names (flex leftovers, e.g. MU) get a gap row so the Tier-1
+    # Off-roster held names (leftovers outside the roster, e.g. MU) get a gap row so the Tier-1
     # validator can clamp their sells, but band enforcement must NEVER synthesize a
-    # trade for one — flex exits are governed by the flex engine and human approval,
+    # trade for one — exits of off-roster names are governed by human approval,
     # not the deterministic reference (2026-07-13 audit finding 3). `all_rows`
     # (session 2026-07-15, Task B2) keeps them for PRICING ONLY — an off-roster
     # sell still raises real cash that enforcement's buy sizing must see (07-14: MU's

@@ -1004,11 +1004,11 @@ def _build_reference_gaps(snapshot: dict) -> tuple[list[dict], dict]:
     paper account is unavailable (enforcement then has nothing to reconcile against).
 
     A held name that is off-roster (neither a reference target nor a CORE_ROSTER
-    member — a flex leftover like MU, 2026-07-13 audit finding 3) also gets a row, at
+    member — an off-roster leftover like MU, 2026-07-13 audit finding 3) also gets a row, at
     `reference_pct: 0.0` and flagged `"off_roster": True`, so the Tier-1 validator's
     V3/V4 sell-side checks see it (sell ≤ held) and `_post_validation_cash` can price
     it. `reconcile` (band enforcement) must never synthesize a trade for one of these
-    — flex exits are the flex engine's + human approval's job — so it filters
+    — exits of off-roster names are human approval's job — so it filters
     `off_roster` rows out of its own working set.
 
     Each row's `price` (Task A, 2026-07-17) is basis-coherent with `current_pct`: for
@@ -1093,7 +1093,7 @@ def _build_reference_gaps(snapshot: dict) -> tuple[list[dict], dict]:
     # gap=0 → reconcile synthesizes no enforcement trade (provably inert). The
     # gate_zeroed flag lets the prompt distinguish "gated to 0 by C0" from "genuinely
     # not in the book". off_roster=False so reconcile's filter passes it through
-    # (harmless at gap=0) without mis-tagging a core name as a flex leftover.
+    # (harmless at gap=0) without mis-tagging a core name as an off-roster leftover.
     gate_status = (snapshot.get("regime_gate") or {}).get("status")
     if gate_status == "closed":
         intl_broad_sym: str | None = None
