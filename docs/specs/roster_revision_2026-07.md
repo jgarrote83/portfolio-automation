@@ -70,6 +70,8 @@ MCK, DBA, TIP, XSD, PPA, EUAD. INTC / MCK / PPA / EUAD are added to
 `flex-candidates.json` so they can be re-entered as *flex* theses (with kill criteria),
 never as core.
 
+> **Update (2026-10, ORB Phase 0):** the Flex sleeve and `flex-candidates.json` are retired, so there is no flex re-entry path. INTC / MCK / PPA / EUAD are plain legacy exits — core re-entry is prohibited and nothing replaces it. (`shared/separation.py` keeps the pool/legacy separation set unchanged as the base for the ORB engine's Core exclusion.)
+
 ---
 
 ## 3. Role / pool governance rule

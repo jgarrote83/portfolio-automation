@@ -165,6 +165,8 @@ it in the GitHub refinement.
 
 ## 7. Flex sleeve — satellite, not engine
 
+> ⚠️ **SUPERSEDED (2026-10, ORB Phase 0).** The Flex sleeve described in this section is retired. Its 25% satellite budget is retained and now belongs to the unlevered ORB engine (`docs/specs/ORB_Engine_v1.0.md`). The text below, and the "Single-name cap 3–4% (Flex)" line in §8, are kept as history; the "satellite, not engine" conclusion and the shock-3 shrink-toward-cash intent still apply to whatever occupies the sleeve.
+
 Conclusion from the barbell math: Flex doesn't fix the drag, it relocates it onto a high alpha
 bar, and in a drawdown a high-beta growth Flex sleeve *amplifies the loss*. Therefore:
 

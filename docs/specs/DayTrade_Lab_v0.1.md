@@ -1,5 +1,7 @@
 # Flex Day-Trade Lab — v0.1 (paper)
 
+> ⚠️ **SUPERSEDED / RETIRED (2026-10, ORB Phase 0).** The DayTrade Lab (`src/daytrade/`, shipped disabled) described below is retired and was never enabled. Replaced by the ORB engine (`docs/specs/ORB_Engine_v1.0.md`); the 25% sleeve budget is retained, unlevered. The code was removed on branch `feat/orb-phase0b-retire-flex`; the last tree containing it is commit `01cfb40793f9374870124ea4252fe23a6cb12e5c` (see `docs/specs/ORB_Phase0_Retirement_Inventory.md` §6). Kept for history only — do not implement from this document.
+
 *Committed version of the account holder's "Flex Day-Trade Strategy — v0.1" document,
 amended per the 2026-07-07 build session (DECISION-0 measurement-basis resolution, the
 stale "#33" backlog reference corrected to #34, and IEX-coverage caveats recorded).

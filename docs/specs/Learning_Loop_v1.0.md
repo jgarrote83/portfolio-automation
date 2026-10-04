@@ -165,6 +165,8 @@ approval mechanics; the badge is what the operator sees.
 `config/flex-candidates.json`}. A diff targeting ANY other path — code,
 workflows, validator, infra — is schema-invalid by construction.
 
+> **Update (2026-10, ORB Phase 0B):** `flex-candidates.json` is removed from this allowlist and from the live-config fetch list (the Flex sleeve is retired; the entry also carried a path with no `src/` prefix that would 404 — FOLLOWUPS #114). The allowlist is now three files. ORB config does not join it. The flex-themed worked example above is illustrative only.
+
 **Hard caps:** ≤3 proposals per cycle (class-0 excluded). ≤1 class-3 per cycle.
 
 **Re-proposal rule:** a previously rejected idea may only reappear if its
