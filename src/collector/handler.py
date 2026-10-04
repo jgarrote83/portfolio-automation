@@ -1,6 +1,5 @@
 import json
 import logging
-import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -47,7 +46,6 @@ from shared.quadrants import (
     selected_for_role,
     selection_config,
 )
-from shared.separation import FLEX_REENTERABLE, flex_separation_set
 from shared.reference_execution import (
     REFERENCE_EXECUTION_DEFAULTS,
     advance_settling_window,
@@ -61,9 +59,7 @@ logger = logging.getLogger(__name__)
 _SRC = Path(__file__).parent.parent   # src/
 _MACRO_SERIES_FILE = _SRC / "config" / "macro-series.json"
 _PORTFOLIO_FALLBACK = _SRC / "config" / "portfolio.json"
-_FLEX_CANDIDATES_FILE = _SRC / "config" / "flex-candidates.json"
 _FOMC_STANCE_FILE = _SRC / "config" / "fomc-stance.json"
-_FLEX_REVIEW_FILE = _SRC / "config" / "flex-review.json"
 _RISK_LIMITS_FILE = _SRC / "config" / "risk-limits.json"
 
 # Single stocks in the fixed core roster (idiosyncratic risk) — the single-name soft
@@ -75,9 +71,6 @@ _RISK_LIMITS_FILE = _SRC / "config" / "risk-limits.json"
 _CORE_SINGLE_STOCKS: tuple[str, ...] = ()
 # Literal-cash buffer kept inside the cash sleeve (rest of the sleeve is SGOV).
 _CASH_BUFFER_PCT = 1.5
-# Trailing window (trading days) for the flex borderline-quadrant tiebreak (D1,
-# 2026-07-21). A named constant, deliberately NOT an env knob in v1.
-_FLEX_TIEBREAK_WINDOW_D = 5
 # Extra tickers fetched for the leading-growth (Task A) and market-implied-quadrant
 # (Task B) builders. XLY is the cyclicals/discretionary signal vs XLP (already in
 # CORE_ROSTER via the staples role); CPER is the copper ETF used for the copper/gold
@@ -104,9 +97,8 @@ _DIVERGENCE_DEFAULTS = {
 _RISK_LIMITS_DEFAULTS = {
     "active_quadrant_ceiling_pct_of_core": 90.0,
     "sleeve_floor_pct_of_core": 0.1,
-    "single_name_cap_pct": {"flex": 4.0, "any_name_soft": 15.0},
+    "single_name_cap_pct": {"any_name_soft": 15.0},
     "cash_sleeve_band_pct": {"floor": 5.0, "ceiling": 15.0, "shock3_ceiling": 25.0},
-    "flex_sleeve_cap_pct": {"soft": 15.0, "hard": 25.0},
     "exempt_holds": list(EXEMPT_HOLDS),
     "conviction_ladder_pct_of_core": [
         {"risk_score_max": 2, "conviction": "very_high", "active_quadrant_target": 90.0},
@@ -119,32 +111,6 @@ _RISK_LIMITS_DEFAULTS = {
         "conviction_score_min": 7.0,
         "ballast_names": ["GLD", "TLT"],
         "ballast_target_pct_of_core": 55.0,
-    },
-    "conviction": {
-        "enabled": True,
-        "horizon_days_range": [15, 30],
-        "base_rate_lookback_days": 504,
-        "base_rate_min_windows": 60,
-        "ladder": [
-            {"edge_min": 0.18, "conviction": "very_high", "size_mult": 1.00},
-            {"edge_min": 0.12, "conviction": "high", "size_mult": 0.70},
-            {"edge_min": 0.07, "conviction": "moderate", "size_mult": 0.45},
-            {"edge_min": 0.04, "conviction": "low", "size_mult": 0.25},
-            {"edge_min": 0.0, "conviction": "none", "size_mult": 0.0},
-        ],
-        "catalyst_size_mult": 1.5,
-        "catalyst_promotes_band": True,
-        "min_evidence_items": 2,
-        "confirm_sessions": 2,
-        "release_sessions": 2,
-        "max_session_delta_pct_of_equity": 1.5,
-        "brier_min_sample": 10,
-        "brier_damping": [
-            {"brier_max": 0.20, "factor": 1.0},
-            {"brier_max": 0.25, "factor": 0.75},
-            {"brier_max": 0.30, "factor": 0.50},
-            {"brier_max": 1.0, "factor": 0.0},
-        ],
     },
     "thematic_conviction": {
         "enabled": True,
@@ -271,22 +237,6 @@ _RISK_LIMITS_DEFAULTS = {
     },
 }
 
-# Conviction-sleeve flex-review defaults (overridable via config/flex-review.json).
-_FLEX_REVIEW_DEFAULTS = {
-    "REVIEW_DAYS": 60,
-    "LAG_TOL_PP": -2.0,
-    "BREAK_PP": -5.0,
-    "EXTENSION_DAYS": 30,
-    "DEADBAND_PP": 1.0,
-}
-# Cap on non-held flex candidates fetched per run — protects the FMP 250 req/day
-# budget (each candidate costs ~2 calls: profile + EOD price). See FOLLOWUPS #8.
-_FLEX_CANDIDATES_MAX = 20
-# Dynamic watch_candidates: per-emission cap (prompt-enforced) and walk-back window.
-_WATCH_CANDIDATES_EMISSION_CAP = 6
-_DYNAMIC_WALKBACK_DAYS = 7
-# Regex for sanitizing dynamic candidate symbols (uppercase-first, 1–10 chars).
-_WATCH_CANDIDATE_RE = re.compile(r'^[A-Z][A-Z0-9.\-]{0,9}$')
 _ETF_WATCHLIST = ["IDVO", "IDMO", "AIA"]
 
 _STOCK_NEWS_LIMIT = 100
@@ -360,108 +310,6 @@ _SHOCK_KEYWORDS: dict[str, list[str]] = {
 }
 
 
-def _load_flex_candidates(
-    exclude: set[str],
-    today: str,
-) -> tuple[list[str], dict[str, str]]:
-    """Non-held flex candidate tickers: static seed + analyzer-emitted dynamics.
-
-    Returns ``(tickers, provenance_map)`` where ``provenance_map`` maps each
-    ticker to ``"static"`` or ``"dynamic"``.
-
-    Static seed: ``config/flex-candidates.json`` (existing behavior); capped at
-    ``_FLEX_CANDIDATES_MAX`` total. Dynamic names: sourced from the MOST RECENT
-    ``daily-trades/{date}.json`` found walking back up to ``_DYNAMIC_WALKBACK_DAYS``
-    calendar days (reuses the ``_build_execution_review`` walk-back pattern).
-
-    Sanitization of dynamic names (each drop logged at INFO):
-    - Uppercased; must match ``^[A-Z][A-Z0-9.\\-]{0,9}$``
-    - Not currently held (in ``exclude``)
-    - Not in ``flex.separation.flex_separation_set(exclude)`` (core roster separation)
-    - Not a ``LEGACY_EXITS`` name that is NOT ``FLEX_REENTERABLE``
-    - Not already present (dedup)
-
-    Static names always take priority; dynamic names fill the remainder up to
-    ``_FLEX_CANDIDATES_MAX`` (cap=20). Persistence is LAST-EMISSION-ONLY — the
-    dynamic list is exactly the newest trades file's emission; re-emit a name to
-    keep it in the funnel (A-G1 default: simplest, no stale ledger). See FOLLOWUPS #8 v2.
-    """
-    from shared.separation import FLEX_REENTERABLE, flex_separation_set
-
-    # --- Static seed ---------------------------------------------------------
-    static_names: list[str] = []
-    try:
-        with open(_FLEX_CANDIDATES_FILE) as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        logger.warning("flex-candidates.json missing or invalid — no static candidates this run")
-        data = {}
-    for raw in data.get("candidates", []):
-        t = (raw or "").upper().strip()
-        if t and t not in exclude and t not in static_names:
-            static_names.append(t)
-
-    # --- Dynamic names from most recent trades file (walk back up to 7 days) --
-    d0 = date.fromisoformat(today)
-    dynamic_doc: dict | None = None
-    for back in range(1, _DYNAMIC_WALKBACK_DAYS + 1):
-        d_str = (d0 - timedelta(days=back)).isoformat()
-        doc = read_trades(d_str)
-        if isinstance(doc, dict):
-            dynamic_doc = doc
-            break
-
-    separation = flex_separation_set(exclude)
-    dynamic_names: list[str] = []
-    if dynamic_doc is not None:
-        raw_wc = dynamic_doc.get("watch_candidates")
-        if isinstance(raw_wc, list):
-            for item in raw_wc[:_WATCH_CANDIDATES_EMISSION_CAP * 2]:  # budget guard
-                if not isinstance(item, dict):
-                    continue
-                raw_sym = item.get("symbol") or ""
-                if not isinstance(raw_sym, str):
-                    logger.info(
-                        "flex_candidates dynamic: dropped non-string symbol %r", raw_sym
-                    )
-                    continue
-                sym = raw_sym.upper().strip()
-                if not sym:
-                    continue
-                if not _WATCH_CANDIDATE_RE.match(sym):
-                    logger.info(
-                        "flex_candidates dynamic: dropped '%s' — invalid symbol format", sym
-                    )
-                    continue
-                if sym in exclude:
-                    logger.info(
-                        "flex_candidates dynamic: dropped '%s' — currently held", sym
-                    )
-                    continue
-                if sym in separation:
-                    logger.info(
-                        "flex_candidates dynamic: dropped '%s' — core roster separation", sym
-                    )
-                    continue
-                if sym in LEGACY_EXITS and sym not in FLEX_REENTERABLE:
-                    logger.info(
-                        "flex_candidates dynamic: dropped '%s' — non-reenterable legacy exit", sym
-                    )
-                    continue
-                if sym in static_names or sym in dynamic_names:
-                    continue  # deduplicate silently
-                dynamic_names.append(sym)
-
-    # --- Merge: static priority, cap at _FLEX_CANDIDATES_MAX -----------------
-    combined = static_names + dynamic_names
-    combined = combined[:_FLEX_CANDIDATES_MAX]
-    provenance: dict[str, str] = {
-        sym: ("static" if sym in static_names else "dynamic")
-        for sym in combined
-    }
-    return combined, provenance
-
-
 def _load_fomc_stance() -> dict:
     """Manually-maintained FOMC policy stance from config/fomc-stance.json.
 
@@ -481,24 +329,6 @@ def _load_fomc_stance() -> dict:
         stance = "unconfirmed"
     data["stance"] = stance
     return data
-
-
-def _load_flex_review_config() -> dict:
-    """Conviction-sleeve flex-review knobs from config/flex-review.json.
-
-    Missing/malformed file or absent keys → the documented defaults. Numeric only.
-    """
-    cfg = dict(_FLEX_REVIEW_DEFAULTS)
-    try:
-        with open(_FLEX_REVIEW_FILE) as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return cfg
-    for k in _FLEX_REVIEW_DEFAULTS:
-        v = data.get(k)
-        if isinstance(v, (int, float)):
-            cfg[k] = v
-    return cfg
 
 
 def _close_by_date(fmp: FMPClient, symbol: str) -> dict[str, float]:
@@ -1867,107 +1697,6 @@ def _build_thematic_calibration(risk_limits: dict) -> dict:
     return {**brier, "damping_factor": damping}
 
 
-def _stamp_flex_conviction_outcomes(fmp: FMPClient) -> None:
-    """Task F — grade matured `ThematicHistory` rows tagged
-    `path == "flex_conviction"`. A SEPARATE, single-horizon resolution from
-    `_stamp_thematic_outcomes`'s 30/60/90 grid: each row's OWN `horizon_days`
-    (the LLM's chosen 15-30d review window, not a fixed ladder) is the sole
-    resolution point. Reuses the identical perf-series-closes-first / FMP-
-    fallback price resolution and the pure `_grade_thematic_horizon` grader —
-    no parallel pricing path. Unpriced maturity -> `indeterminate_data`, never
-    guessed. Caller wraps in try/except — never breaks the collector.
-    """
-    today = date.today()
-    rows = query_entities("ThematicHistory", "path eq 'flex_conviction'")
-    pending = [r for r in rows if not r.get("outcome_status")]
-    if not pending:
-        return
-
-    perf_points = sorted(
-        ((p.get("date"), p.get("closes") or {}) for p in read_perf_series() if p.get("date")),
-    )
-    fmp_cache: dict[str, dict[str, float]] = {}
-
-    def _px(sym: str, d: str) -> float | None:
-        best = None
-        for pd, closes in perf_points:
-            if pd > d:
-                break
-            c = closes.get(sym)
-            if c is not None:
-                best = float(c)
-        if best is not None:
-            return best
-        if sym not in fmp_cache:
-            fmp_cache[sym] = _close_by_date(fmp, sym)
-        return _close_on_or_before(fmp_cache[sym], d)
-
-    stamped = 0
-    for r in pending:
-        sym = str(r.get("symbol") or "").upper()
-        filed = str(r.get("filed_date") or "")[:10]
-        try:
-            horizon_days = int(r.get("horizon_days") or 0)
-        except (TypeError, ValueError):
-            horizon_days = 0
-        if not sym or not filed or horizon_days <= 0:
-            continue
-        target = date.fromisoformat(filed) + timedelta(days=horizon_days)
-        if target > today:
-            continue
-        base = _px(sym, filed)
-        base_spy = _px("SPY", filed)
-        grade = _grade_thematic_horizon(base, _px(sym, target.isoformat()), base_spy,
-                                        _px("SPY", target.isoformat()))
-        entity = {"PartitionKey": r["PartitionKey"], "RowKey": r["RowKey"],
-                  "resolved_at": today.isoformat()}
-        if grade is not None:
-            entity["outcome_status"] = "resolved"
-            entity["actual_up"] = grade["actual_up"]
-            entity["ret_pct"] = grade["ret_pct"]
-            if "excess_vs_spy_pp" in grade:
-                entity["excess_vs_spy_pp"] = grade["excess_vs_spy_pp"]
-            entity["p_up"] = float(r.get("p_up") or 0.0)
-        else:
-            entity["outcome_status"] = "indeterminate_data"
-        try:
-            upsert_entity("ThematicHistory", entity)
-            stamped += 1
-        except Exception:  # noqa: BLE001
-            logger.exception("Flex-conviction stamping upsert failed for %s", r.get("RowKey"))
-    logger.info("Flex-conviction stamping: %d row(s) stamped (of %d pending)", stamped, len(pending))
-
-
-def _build_flex_conviction_calibration(risk_limits: dict) -> dict:
-    """Task F — a SEPARATE Brier/hit-rate/damping track for the flex-
-    conviction path, filtered on `path == "flex_conviction"` — never blended
-    with `_build_thematic_calibration`'s core-thematic track. The two paths'
-    calibration must be able to diverge (a catalyst-path amplifier firing
-    well while the base conviction ladder miscalibrates, or vice versa, must
-    be visible independently, not averaged away). Reuses the pure
-    `_thematic_brier`/`_thematic_damping_factor` — this function only queries
-    + shapes the (p_up, actual_up) pairs, off the `conviction` config's OWN
-    `brier_damping`/`brier_min_sample` (not thematic_conviction's)."""
-    cv_cfg = risk_limits.get("conviction") or _RISK_LIMITS_DEFAULTS["conviction"]
-    rows = query_entities("ThematicHistory", "path eq 'flex_conviction' and outcome_status eq 'resolved'")
-    pairs: list[tuple[float, float]] = []
-    for r in rows:
-        p_up = r.get("p_up")
-        actual = r.get("actual_up")
-        if p_up is None or actual is None:
-            continue
-        try:
-            pairs.append((float(p_up), float(actual)))
-        except (TypeError, ValueError):
-            continue
-    brier = _thematic_brier(pairs)
-    damping = _thematic_damping_factor(
-        brier["brier_score"], brier["sample_size"],
-        cv_cfg.get("brier_damping") or [], int(cv_cfg.get("brier_min_sample", 10)),
-    )
-    return {**brier, "damping_factor": damping}
-
-
 def _aggregate_override_record(rows: list[dict]) -> dict:
     """Brief Phase 5 §2 — roll stamped OverrideHistory rows into the compact
     `override_record` snapshot block (sibling of track_record: capture-fine /
@@ -2266,29 +1995,9 @@ def run() -> None:
     tickers = [p["ticker"] for p in positions if p.get("ticker")]
     logger.info("Portfolio tickers (%d): %s", len(tickers), tickers)
 
-    # Non-held flex candidates: static seed + analyzer-emitted dynamic watch_candidates
-    # (FOLLOWUPS #8 v2). The dynamic list is the PREVIOUS run's watch_candidates array
-    # (2-day latency: name → data next run → actionable run after). The analyzer's
-    # gatekeeper G2 needs FMP profile + EOD price for each candidate.
-    flex_candidate_tickers, _flex_provenance = _load_flex_candidates(
-        exclude=set(tickers), today=today,
-    )
-    logger.info(
-        "Flex candidates (%d: %d static, %d dynamic): %s",
-        len(flex_candidate_tickers),
-        sum(1 for v in _flex_provenance.values() if v == "static"),
-        sum(1 for v in _flex_provenance.values() if v == "dynamic"),
-        flex_candidate_tickers,
-    )
-
     # --- FMP -----------------------------------------------------------------
     fmp = FMPClient(secrets["FmpApiKey"])
     profiles = fmp.get_profiles(tickers)
-    flex_candidate_profiles = fmp.get_profiles(flex_candidate_tickers) if flex_candidate_tickers else []
-    # Tag each profile with its source (A3 provenance — "static" or "dynamic")
-    for p in flex_candidate_profiles:
-        sym = (p.get("symbol") or "").upper()
-        p["source"] = _flex_provenance.get(sym, "static")
     from_2w = (date.today() - timedelta(days=1)).isoformat()
     to_2w   = (date.today() + timedelta(days=14)).isoformat()
     from_30d = (date.today() - timedelta(days=30)).isoformat()
@@ -2963,57 +2672,6 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Role selection build failed (non-fatal)")
 
-    # Closes for the static/dynamic flex candidates + SPY — the only input the flex
-    # conviction block below still needs from the old catalyst-screen fetch loop
-    # (removed with the catalyst screen; this whole block goes with flex_conviction).
-    _flex_close_cache: dict[str, dict[str, float]] = {}
-    try:
-        for _sym in flex_candidate_tickers:
-            _flex_close_cache[_sym] = _close_by_date(fmp, _sym)
-        _flex_close_cache["SPY"] = _close_by_date(fmp, "SPY")
-    except Exception:  # noqa: BLE001
-        logger.exception("Flex candidate close fetch failed (non-fatal)")
-
-    # --- Flex eligibility (Task C1) + flex conviction path (Task B/E, 2026-08-14 --
-    # flex-conviction-path cycle). Independent of reference_weights (this is a
-    # FLEX-sleeve input, not a core one) — placed AFTER catalyst_screen_block
-    # (not alongside thematic_conviction) for two reasons: it needs
-    # `_flex_close_cache` (only complete once catalyst screening's discovery-
-    # fetch + static/dynamic fetch loops have both run), and `flex_candidate_
-    # tickers`/`flex_candidate_profiles` gain the freshly-SCREENED nominees in
-    # the loop just above — a fresh quarantine set is recomputed here rather
-    # than reusing thematic_conviction's earlier `_tc_quarantined` snapshot,
-    # which predates that append and would miss a quarantined nominee. One-
-    # session lag mirrors thematic_conviction (see the function docstring for
-    # why: base_rate_up needs THIS run's own price cache, not a same-day one).
-    flex_eligibility: dict = {"available": False}
-    flex_conviction: dict = {"available": False}
-    try:
-        _fc_quarantined = {
-            str(p.get("symbol") or "").upper()
-            for p in flex_candidate_profiles if p.get("price_quarantined")
-        }
-        flex_eligibility = _build_flex_eligibility(
-            set(flex_candidate_tickers), set(tickers), _fc_quarantined,
-        )
-        _fc_prev_noms = _load_prior_flex_conviction_nominations(today)
-        _fc_prev_states = _load_flex_conviction_state()
-        _fc_calibration = _build_flex_conviction_calibration(_load_risk_limits())
-        flex_conviction, _fc_new_states = _build_flex_conviction(
-            _load_risk_limits(), _fc_prev_noms, _fc_prev_states,
-            _flex_close_cache, flex_eligibility, today, _fc_calibration,
-        )
-        for _fc_sym, _fc_state in _fc_new_states.items():
-            _save_flex_conviction_state(_fc_sym, _fc_state)
-        logger.info(
-            "Flex conviction: enabled=%s active=%d pending=%d excluded=%d calibration=%s",
-            flex_conviction.get("enabled"), len(flex_conviction.get("active", [])),
-            len(flex_conviction.get("pending", [])), len(flex_conviction.get("excluded", [])),
-            _fc_calibration,
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("Flex conviction build failed (non-fatal)")
-
     # --- Phase C: record APPLIED role switches + intl leader rotations to ----------
     # OverrideHistory (Task G) — graded later vs the incumbent counterfactual. Non-fatal.
     try:
@@ -3031,39 +2689,6 @@ def run() -> None:
             )
     except Exception:  # noqa: BLE001
         logger.exception("Sleeve switch recording failed (non-fatal)")
-
-    # --- Flex engine state (intraday catalyst engine; echoed by the analyzer) -
-    # The engine writes flex-state/{date}.json during the trading session. At
-    # collector time (09:00 ET) today's run hasn't happened yet, so echo the most
-    # recent prior state (up to a week back). Non-fatal. The conviction-sleeve
-    # flex_review was retired when Flex became a separate intraday engine.
-    flex_state: dict = {"available": False}
-    try:
-        d0 = date.fromisoformat(today)
-        for back in range(0, 8):
-            blob = read_json_blob("flex-state", f"{(d0 - timedelta(days=back)).isoformat()}.json")
-            if isinstance(blob, dict):
-                flex_state = {"available": True, **blob}
-                break
-        # Deterministic guard (MU incident): flag broker-held flex positions the
-        # engine has forgotten (paper account is canonical). Runs even when the
-        # engine state is unavailable — an orphan is exactly the case to catch.
-        flex_state["reconciliation"] = _build_flex_reconciliation(flex_state, paper_account)
-        if flex_state["reconciliation"]["status"] == "mismatch":
-            logger.error(
-                "Flex reconciliation MISMATCH: engine_held=%s broker_held=%s — "
-                "paper account is canonical; analyzer must run kill-criteria against "
-                "the broker position and block new entries in the affected symbol",
-                flex_state["reconciliation"]["engine_held"],
-                flex_state["reconciliation"]["broker_held"],
-            )
-        logger.info(
-            "Flex state: available=%s as_of=%s held=%s reconciliation=%s",
-            flex_state.get("available"), flex_state.get("as_of"), flex_state.get("held"),
-            flex_state["reconciliation"]["status"],
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("Flex state load failed (non-fatal)")
 
     # --- Phase C §4: performance scoreboard (account equity vs SPY) ---------
     # Non-fatal: a scoreboard failure must never block the daily snapshot.
@@ -3328,7 +2953,6 @@ def run() -> None:
         },
         "paper_account": paper_account,
         "fundamentals": profiles,
-        "flex_candidates": flex_candidate_profiles,
         "earnings_calendar": earnings,
         "stock_news": stock_news,
         "congressional_trades": congressional,
@@ -3360,10 +2984,7 @@ def run() -> None:
         "role_selection": role_selection,
         "transition_watch": transition_watch,
         "thematic_conviction": thematic_conviction,
-        "flex_eligibility": flex_eligibility,
-        "flex_conviction": flex_conviction,
         "divergences": divergences,
-        "flex_state": flex_state,
         # S1 (2026-09-13): the sleeve kill switch, read straight from the
         # engine's own persisted state so the report states plainly whether
         # the sleeve is live and why. Independent of FLEX_ENABLED -- a
@@ -3438,13 +3059,6 @@ def run() -> None:
         _stamp_thematic_outcomes(fmp)
     except Exception:  # noqa: BLE001
         logger.exception("Thematic stamping failed (non-fatal)")
-
-    # --- Task F (2026-08-14 flex-conviction-path cycle): grade matured flex- ---
-    # conviction nominations (separate calibration track, see the function docstring).
-    try:
-        _stamp_flex_conviction_outcomes(fmp)
-    except Exception:  # noqa: BLE001
-        logger.exception("Flex-conviction stamping failed (non-fatal)")
 
     logger.info("=== Collector completed for %s ===", today)
 
@@ -3550,16 +3164,6 @@ def _rotation_composite_category(weighted: float) -> tuple[float, str]:
     else:
         category = "rotation_underway"
     return composite, category
-
-
-def _flex_pos_qty(pos: dict) -> float:
-    """Share count from a paper_account position row (Alpaca-native `qty`, or the
-    canonical `quantity`; see the 2026-07-07 held_qty incident)."""
-    raw = pos.get("qty") if pos.get("qty") is not None else pos.get("quantity")
-    try:
-        return float(raw or 0)
-    except (TypeError, ValueError):
-        return 0.0
 
 
 # 2026-08-21 measurement-integrity cycle, Task C — verified against Alpaca's
@@ -3695,34 +3299,6 @@ def _build_equity_reconciliation(
         "net_mv": round(net_mv, 2), "delta": delta, "tolerance": tolerance,
         "position_count": position_count,
     }
-
-
-def _build_flex_reconciliation(flex_state: dict, paper_account: dict) -> dict:
-    """Deterministic guard (MU incident): compare the flex engine's ledger-derived
-    ``held`` against the broker's OFF-CORE-ROSTER positions.
-
-    The paper account is CANONICAL. A broker-held flex name the engine has forgotten
-    (an orphan — the 2026-07-09 MU case: engine ``held=[]``, ``exits=[]``, yet the
-    paper account still holds MU) is a ``mismatch`` the analyzer must act on (count
-    the broker position, run kill-criteria against it, block new entries in that
-    symbol). The reverse (engine holds a name the broker doesn't) is equally a
-    mismatch. ``ok`` only when the two off-roster sets agree.
-
-    Root-cause note: the ledger is durably written only at end-of-tick, and
-    ``reconcile_ledger`` only REMOVES ledger rows to match the broker — it never
-    re-adopts a broker position missing from the ledger, and ``read_ledger`` returns
-    ``{}`` on any miss. So a lost/never-persisted ledger row makes an open flex
-    position invisible with no exit logged. This guard surfaces exactly that.
-    """
-    engine_held = sorted({str(s).upper() for s in (flex_state.get("held") or []) if s})
-    broker: set[str] = set()
-    for p in (paper_account.get("positions") or []):
-        sym = str(p.get("ticker") or p.get("symbol") or "").upper()
-        if sym and sym not in CORE_ROSTER and _flex_pos_qty(p) > 1e-6:
-            broker.add(sym)
-    broker_held = sorted(broker)
-    status = "ok" if engine_held == broker_held else "mismatch"
-    return {"status": status, "engine_held": engine_held, "broker_held": broker_held}
 
 
 def _build_execution_review(secrets: dict, today: str) -> dict:
@@ -5414,22 +4990,6 @@ def _gdpnow_vintage_rows(rows: list, obs_date: str) -> list[dict]:
     ]
 
 
-def _r5_from_closes(close_map: dict[str, float]) -> float | None:
-    """Point-to-point % return over the last ``_FLEX_TIEBREAK_WINDOW_D`` trading
-    days from a ``{date: close}`` map (latest close vs the close 5 trading days
-    earlier). ``None`` when there is not enough history."""
-    if not close_map:
-        return None
-    dates = sorted(close_map)
-    if len(dates) < _FLEX_TIEBREAK_WINDOW_D + 1:
-        return None
-    latest = close_map[dates[-1]]
-    prior = close_map[dates[-1 - _FLEX_TIEBREAK_WINDOW_D]]
-    if not prior:
-        return None
-    return round((latest / prior - 1.0) * 100.0, 4)
-
-
 _AXIS_STATE_TABLE = "AxisDirectionState"
 
 
@@ -6450,7 +6010,7 @@ def _load_risk_limits() -> dict:
     """Canonical risk limits from config/risk-limits.json (spec §3/§8).
 
     Single source of truth for the reference-weight math: concentration ceiling
-    (90% of core), 0.1% sleeve floor, single-name caps, cash band, flex caps, the
+    (90% of core), 0.1% sleeve floor, single-name caps, cash band, the
     exempt holds, the conviction ladder, and the borderline-blend params. Missing or
     malformed → the in-module defaults (which mirror the file). Tolerant of the
     ``_comment`` / ``_*_note`` annotation keys.
@@ -6980,51 +6540,6 @@ def _build_thematic_conviction(
 # entries track price/stop/horizon in ways a core reference weight doesn't.
 # ---------------------------------------------------------------------------
 
-def _base_rate_up(
-    closes: dict[str, float], horizon_days: int, lookback_days: int, min_windows: int,
-) -> dict:
-    """B2 — THE single most important design point in this cycle: `edge` in
-    the conviction ladder is `p_up - base_rate_up`, never `p_up` alone. Over a
-    15-30 day window a broad equity ETF rises unconditionally roughly 55-58%
-    of the time — an absolute `p_up >= 0.52` threshold is BELOW the base rate
-    and would fire on nearly every candidate, indistinguishable from having
-    no signal. This computes that base rate EMPIRICALLY per candidate: the
-    fraction of all OVERLAPPING `horizon_days`-trading-day windows with
-    positive total return, over the trailing `lookback_days` sessions (~2y
-    default). Windows overlap deliberately (day 1-21, day 2-22, ...) to use
-    the available history fully rather than only ~24 non-overlapping windows
-    over 2 years — overlapping windows are not independent, but this is a
-    frequency estimate, not a hypothesis test.
-
-    Fail-closed (D1's "evidence-bound" property, mirrored from thematic
-    conviction): unavailable or fewer than `min_windows` overlapping windows
-    -> `base_rate_up: None` — NEVER a substituted 0.50. A candidate lacking
-    enough history to compute this is simply not conviction-eligible this
-    session; see `_thematic_classify_symbol`-equivalent gating in the caller.
-    """
-    if not closes or horizon_days <= 0 or lookback_days <= 0:
-        return {"base_rate_up": None, "windows": 0}
-    dates = sorted(closes)
-    trailing = dates[-lookback_days:] if len(dates) > lookback_days else dates
-    n = len(trailing)
-    windows = n - horizon_days
-    if windows < min_windows:
-        return {"base_rate_up": None, "windows": max(0, windows)}
-    up = 0
-    for i in range(windows):
-        start_px = closes.get(trailing[i])
-        end_px = closes.get(trailing[i + horizon_days])
-        if start_px and end_px is not None and end_px > start_px:
-            up += 1
-    return {"base_rate_up": round(up / windows, 4), "windows": windows}
-
-
-def _conviction_edge(p_up: float, base_rate_up: float) -> float:
-    """`edge = p_up - base_rate_up`, clamped at 0 (B2) — a candidate whose
-    probability doesn't even beat its own empirical base rate has no edge at
-    all, never a negative one feeding the ladder."""
-    return max(0.0, p_up - base_rate_up)
-
 
 def _damp_p_up_toward_base_rate(p_up: float, base_rate_up: float, damping_factor: float) -> float:
     """D2 (2026-09-02) — MECHANICAL confidence damping on the conviction path.
@@ -7048,442 +6563,6 @@ def _damp_p_up_toward_base_rate(p_up: float, base_rate_up: float, damping_factor
     left a miscalibrated p_up still setting the ladder RUNG, just at a
     smaller multiple of it)."""
     return base_rate_up + (p_up - base_rate_up) * damping_factor
-
-
-def _conviction_ladder_lookup(ladder: list[dict], edge: float) -> tuple[float, str]:
-    """Maps an `edge` (p_up - base_rate_up, already clamped >= 0) to
-    `(size_mult, conviction)` via the config ladder (sorted descending by
-    `edge_min`) — mirrors `_thematic_ladder_lookup`'s shape exactly. Picks the
-    first rung whose `edge_min` <= edge (the highest band the edge clears)."""
-    for rung in ladder:
-        if edge >= float(rung.get("edge_min", 0.0)):
-            return float(rung.get("size_mult", 0.0)), rung.get("conviction", "")
-    last = ladder[-1] if ladder else {"size_mult": 0.0, "conviction": "none"}
-    return float(last.get("size_mult", 0.0)), last.get("conviction", "none")
-
-
-def _conviction_catalyst_amplifier(
-    size_mult: float, conviction: str, catalyst_date: str | None, horizon_days: int,
-    today: str, ladder: list[dict], catalyst_size_mult: float, promotes_band: bool,
-) -> dict:
-    """B3 — catalyst as AMPLIFIER, not gate. When a conviction nomination also
-    carries a real dated `catalyst_date` falling WITHIN `horizon_days` of
-    `today`: multiply `size_mult` by `catalyst_size_mult`, and — if
-    `promotes_band` — promote one band up the ladder (using the PROMOTED
-    band's own `size_mult` as the multiplication base, so the two effects
-    compose rather than one silently overriding the other). A null/unknown/
-    out-of-window catalyst date is simply NO amplification — it must never
-    block the nomination or be reported as a defect (B1, unchanged doctrine:
-    a dated catalyst is not required on this path at all).
-
-    Returns `{"size_mult": float, "conviction": str, "amplified": bool}` —
-    the caller applies caps AFTER this, never before (B3: "applied before the
-    per-name and sleeve caps, never after — the amplifier must not be able
-    to breach a cap" is enforced by the CALLER's cap step running last, not
-    here; this function only computes the pre-cap amplified size).
-    """
-    if not catalyst_date:
-        return {"size_mult": size_mult, "conviction": conviction, "amplified": False}
-    try:
-        d = date.fromisoformat(str(catalyst_date)[:10])
-        t = date.fromisoformat(today)
-    except ValueError:
-        return {"size_mult": size_mult, "conviction": conviction, "amplified": False}
-    delta = (d - t).days
-    if delta < 0 or delta > horizon_days:
-        return {"size_mult": size_mult, "conviction": conviction, "amplified": False}
-
-    new_conviction = conviction
-    base_mult = size_mult
-    if promotes_band:
-        bands = [r.get("conviction") for r in ladder]
-        if conviction in bands:
-            idx = bands.index(conviction)
-            if idx > 0:   # ladder is sorted highest-conviction-first
-                new_conviction = bands[idx - 1]
-                base_mult = float(ladder[idx - 1].get("size_mult", size_mult))
-    return {
-        "size_mult": round(base_mult * catalyst_size_mult, 4),
-        "conviction": new_conviction,
-        "amplified": True,
-    }
-
-
-_FLEX_CONVICTION_STATE_TABLE = "FlexConvictionState"
-
-
-def _load_flex_conviction_state() -> dict[str, dict]:
-    """Per-symbol confirm/release hysteresis state for the flex conviction
-    path (PK='state', RK=symbol) — mirrors `_load_thematic_state` exactly
-    (same table-per-row shape, same non-fatal-empty-on-first-run contract). A
-    SEPARATE table from `ThematicConvictionState`: a flex entry additionally
-    tracks price/stop/horizon fields a core reference-weight lift never
-    needs, so the two paths' state shapes genuinely differ even though the
-    confirm/release ALGORITHM is identical."""
-    state: dict[str, dict] = {}
-    for e in query_entities(_FLEX_CONVICTION_STATE_TABLE):
-        sym = e.get("RowKey")
-        if sym:
-            state[sym] = {
-                "active": bool(e.get("active", False)),
-                "active_conviction": (e.get("active_conviction") or None) or None,
-                "active_size_mult": float(e.get("active_size_mult") or 0.0),
-                "confirm_streak": int(e.get("confirm_streak") or 0),
-                "candidate_conviction": (e.get("candidate_conviction") or None) or None,
-                "release_streak": int(e.get("release_streak") or 0),
-                "applied_size_mult": float(e.get("applied_size_mult") or 0.0),
-            }
-    return state
-
-
-def _save_flex_conviction_state(symbol: str, state: dict) -> None:
-    upsert_entity(_FLEX_CONVICTION_STATE_TABLE, {
-        "PartitionKey": "state",
-        "RowKey": symbol,
-        "active": bool(state.get("active", False)),
-        "active_conviction": state.get("active_conviction") or "",
-        "active_size_mult": float(state.get("active_size_mult") or 0.0),
-        "confirm_streak": int(state.get("confirm_streak") or 0),
-        "candidate_conviction": state.get("candidate_conviction") or "",
-        "release_streak": int(state.get("release_streak") or 0),
-        "applied_size_mult": float(state.get("applied_size_mult") or 0.0),
-    })
-
-
-def _confirm_flex_conviction_entry(candidate: dict | None, prev: dict | None, cfg: dict) -> dict:
-    """B4 hysteresis — reuses `_confirm_thematic_entry`'s exact algorithm
-    (confirm_sessions to activate from cold, release_sessions to step down
-    once active, a different band while active builds its own confirm streak
-    without releasing the old one, `max_session_delta_pct_of_equity` ramps the
-    APPLIED size_mult toward the target) applied to `size_mult` instead of a
-    %-of-equity target. This REPLACES `time_stop_days` on the conviction path
-    (Task E) — a position steps down via `release_sessions` of the nomination
-    no longer reproducing, not a fixed calendar clock that would cut a 21-day
-    thesis at day 5.
-
-    ``candidate`` is ``None`` (no nomination this session) or
-    ``{"conviction": str, "size_mult": float, ...}`` (extra keys — symbol,
-    p_up, base_rate_up, edge, evidence, invalidation, catalyst_date,
-    horizon_days — pass through verbatim for the snapshot to render).
-    """
-    confirm_n = int(cfg.get("confirm_sessions", 2))
-    release_n = int(cfg.get("release_sessions", 2))
-    max_delta = float(cfg.get("max_session_delta_pct_of_equity", 1.5))
-    prev = prev or {}
-
-    was_active = bool(prev.get("active"))
-    active_conviction = prev.get("active_conviction")
-    active_mult = float(prev.get("active_size_mult") or 0.0)
-    prior_applied = float(prev.get("applied_size_mult") or 0.0)
-    prior_confirm_streak = int(prev.get("confirm_streak") or 0)
-    prior_candidate_conviction = prev.get("candidate_conviction")
-    prior_release_streak = int(prev.get("release_streak") or 0)
-
-    def _ramp(target: float, prior: float) -> float:
-        return min(target, prior + max_delta) if target >= prior else max(target, prior - max_delta)
-
-    def _result(*, active: bool, status: str, conviction, mult: float, applied: float,
-                confirm_streak: int, cand_conviction, release_streak: int,
-                pending_streak, release_pending: bool, meta: dict) -> dict:
-        out = {
-            "active": active, "status": status, "conviction": conviction,
-            "target_size_mult": round(mult, 4), "applied_size_mult": round(applied, 4),
-            "confirm_streak": confirm_streak, "candidate_conviction": cand_conviction,
-            "release_streak": release_streak, "pending_streak": pending_streak,
-            "release_pending": release_pending,
-            "_state": {
-                "active": active,
-                "active_conviction": conviction if active else None,
-                "active_size_mult": mult if active else 0.0,
-                "confirm_streak": confirm_streak,
-                "candidate_conviction": cand_conviction,
-                "release_streak": release_streak,
-                "applied_size_mult": applied,
-            },
-        }
-        out.update(meta)
-        return out
-
-    meta = {k: v for k, v in (candidate or {}).items() if k not in ("conviction", "size_mult")}
-
-    if candidate is None:
-        if not was_active:
-            return _result(active=False, status="indeterminate", conviction=None, mult=0.0,
-                            applied=0.0, confirm_streak=0, cand_conviction=None, release_streak=0,
-                            pending_streak=None, release_pending=False, meta={})
-        release_streak = prior_release_streak + 1
-        if release_streak >= release_n:
-            return _result(active=False, status="indeterminate", conviction=None, mult=0.0,
-                            applied=0.0, confirm_streak=0, cand_conviction=None, release_streak=0,
-                            pending_streak=None, release_pending=False, meta={})
-        return _result(active=True, status="active", conviction=active_conviction,
-                        mult=active_mult, applied=prior_applied, confirm_streak=0,
-                        cand_conviction=None, release_streak=release_streak,
-                        pending_streak=None, release_pending=True, meta={})
-
-    cand_conviction = candidate["conviction"]
-    cand_mult = float(candidate["size_mult"])
-
-    if not was_active:
-        same = cand_conviction == prior_candidate_conviction
-        streak = prior_confirm_streak + 1 if same else 1
-        if streak >= confirm_n:
-            applied = _ramp(cand_mult, 0.0)
-            return _result(active=True, status="active", conviction=cand_conviction,
-                            mult=cand_mult, applied=applied, confirm_streak=0,
-                            cand_conviction=None, release_streak=0, pending_streak=None,
-                            release_pending=False, meta=meta)
-        return _result(active=False, status="pending", conviction=None, mult=0.0, applied=0.0,
-                        confirm_streak=streak, cand_conviction=cand_conviction, release_streak=0,
-                        pending_streak=streak, release_pending=False, meta=meta)
-
-    if cand_conviction == active_conviction:
-        applied = _ramp(cand_mult, prior_applied)
-        return _result(active=True, status="active", conviction=active_conviction,
-                        mult=cand_mult, applied=applied, confirm_streak=0,
-                        cand_conviction=None, release_streak=0, pending_streak=None,
-                        release_pending=False, meta=meta)
-
-    # A different band while active — needs release_sessions consecutive
-    # occurrences of this SAME different band before the active state steps
-    # to it (mirrors _confirm_thematic_entry exactly). Old stays in force.
-    same_cand = cand_conviction == prior_candidate_conviction
-    release_streak = prior_release_streak + 1 if same_cand else 1
-    if release_streak >= release_n:
-        applied = _ramp(cand_mult, prior_applied)
-        return _result(active=True, status="active", conviction=cand_conviction,
-                        mult=cand_mult, applied=applied, confirm_streak=0,
-                        cand_conviction=None, release_streak=0, pending_streak=None,
-                        release_pending=False, meta=meta)
-    applied = _ramp(active_mult, prior_applied)
-    return _result(active=True, status="active", conviction=active_conviction,
-                    mult=active_mult, applied=applied, confirm_streak=0,
-                    cand_conviction=cand_conviction, release_streak=release_streak,
-                    pending_streak=release_streak, release_pending=True, meta=meta)
-
-
-def _build_flex_eligibility(
-    flex_candidate_symbols: set[str], held_symbols: set[str], quarantined_symbols: set[str],
-) -> dict:
-    """C1 — deterministic per-symbol flex-nomination eligibility, so the
-    report can never assert a symbol is un-nominatable without citing this
-    flag (C2 prompt doctrine: distinguish "the system could not nominate X"
-    from "the model chose not to nominate X" — the 2026-08 EUAD incident was
-    the model incorrectly asserting the FORMER when the truth was neither:
-    EUAD was flex-nominatable the whole time, the model simply never used
-    the conviction path because it didn't exist yet).
-
-    Covers every `LEGACY_EXITS` name (both re-enterable and not) UNION every
-    live flex-candidates entry (static + dynamic) — never hand-maintained.
-
-    **PR #41 review (S-1) fix:** the `flex_nominatable` BOOLEAN itself now
-    comes directly from `flex_separation_set(...)` — the SAME authoritative
-    gate the flex engine checks before ever nominating a symbol — rather than
-    a hand-rolled reconstruction of pool membership from `roles_config()`.
-    Only the `reason` LABEL (which of several possibly-overlapping causes to
-    cite — e.g. XSD is both a semis pool member AND a non-reenterable legacy
-    exit) still inspects `pool_members`/`is_legacy`/`FLEX_REENTERABLE`/`held`
-    directly; that labeling can never disagree with the engine about WHETHER
-    a symbol is blocked, because it never decides that — only explains it.
-
-    `core_re_entry`: `"closed"` for every `LEGACY_EXITS` name (core doctrine —
-    a legacy exit never re-enters the core reference, regardless of its flex-
-    re-enterable status), `"not_applicable"` for anything that was never a
-    core name to begin with.
-    """
-    held = {str(s).upper() for s in (held_symbols or ())}
-    separation = flex_separation_set(frozenset(held))
-    pool_members: set[str] = set()
-    for r in roles_config():
-        for m in r.get("pool", ()):
-            pool_members.add(str(m).upper())
-
-    universe = sorted({str(s).upper() for s in (flex_candidate_symbols or ())} | set(LEGACY_EXITS))
-    rows = []
-    for sym in universe:
-        is_legacy = sym in LEGACY_EXITS
-        core_re_entry = "closed" if is_legacy else "not_applicable"
-        if sym in (quarantined_symbols or ()):
-            nominatable, reason = False, "price_quarantined"
-        elif sym in separation:
-            nominatable = False
-            if sym in pool_members:
-                reason = "core_pool_member"
-            elif is_legacy and sym not in FLEX_REENTERABLE:
-                reason = "legacy_exit_not_reenterable"
-            else:
-                reason = "legacy_exit_held_winddown"
-        else:
-            nominatable, reason = True, None
-        rows.append({
-            "symbol": sym, "core_re_entry": core_re_entry,
-            "flex_nominatable": nominatable, "reason": reason,
-        })
-    return {"available": True, "candidates": rows}
-
-
-def _load_prior_flex_conviction_nominations(today: str) -> list[dict] | None:
-    """Mirrors `_load_prior_thematic_nominations`'s one-session-lag walkback
-    for the flex conviction path: reads back the PRIOR trading day's
-    `flex_nominations[]` from `daily-trades/{prev}.json`, filtered to
-    `path == "conviction"` entries. Catalyst-path entries in the SAME list
-    are consumed same-day, directly, by `flex/handler.py::_flex_nominations`
-    — this loader and that reader are deliberately independent; a conviction
-    entry lags a day (it needs the collector's own price cache to compute
-    `base_rate_up`), a catalyst entry does not."""
-    d0 = date.fromisoformat(today)
-    for back in range(1, 8):
-        d = (d0 - timedelta(days=back)).isoformat()
-        doc = read_trades(d)
-        if isinstance(doc, dict):
-            noms = doc.get("flex_nominations") or []
-            return [n for n in noms if isinstance(n, dict) and n.get("path") == "conviction"]
-    return None
-
-
-_FLEX_CONVICTION_HORIZON_DEFAULT = 20  # midpoint of the [15, 30] horizon_days_range
-
-
-def _build_flex_conviction(
-    risk_limits: dict,
-    prev_nominations: list[dict] | None,
-    prev_states: dict[str, dict],
-    close_by_date: dict[str, dict[str, float]],
-    eligibility: dict,
-    today: str,
-    calibration: dict,
-) -> tuple[dict, dict[str, dict]]:
-    """B1/B3/B4 — the `flex_conviction` snapshot block: the SECOND, parallel
-    flex-nomination path. The catalyst path (unchanged, `flex_nominations[]`
-    entries with `path` absent or `"catalyst"`) requires a dated catalyst and
-    is consumed SAME-DAY by `flex/handler.py`. This path requires only a
-    probability (`p_up`) and is consumed with a ONE-SESSION LAG — the exact
-    `_build_thematic_conviction` architecture (D2), reused rather than
-    duplicated: the collector emits base_rate/edge/ladder/hysteresis from the
-    PRIOR day's LLM-emitted `path == "conviction"` nominations, using its OWN
-    already-fetched price cache to compute `base_rate_up` (a flex tick has no
-    such cache — this is why the lag exists here just as it does for
-    thematic_conviction, and it is itself the hysteresis substrate: a
-    probability must survive to the FOLLOWING session before size >0 applies
-    at all).
-
-    `enabled: False` (or a crash) -> a complete no-op (D5 fail-closed
-    doctrine, mirrored): `{"available": True, "enabled": False}`, empty new-
-    state dict — any existing per-symbol hysteresis state is left untouched
-    on disk (re-enabling resumes, not restarts).
-
-    Returns ``(snapshot_block, new_states_by_symbol)`` — the caller persists
-    ``new_states_by_symbol`` via `_save_flex_conviction_state` per symbol.
-    """
-    cv_cfg = risk_limits.get("conviction") or _RISK_LIMITS_DEFAULTS["conviction"]
-    if not cv_cfg.get("enabled", True):
-        return {"available": True, "enabled": False}, {}
-
-    ladder = cv_cfg.get("ladder") or []
-    min_evidence = int(cv_cfg.get("min_evidence_items", 2))
-    horizon_lo, horizon_hi = (cv_cfg.get("horizon_days_range") or [15, 30])[:2]
-    lookback_days = int(cv_cfg.get("base_rate_lookback_days", 504))
-    min_windows = int(cv_cfg.get("base_rate_min_windows", 60))
-    catalyst_size_mult = float(cv_cfg.get("catalyst_size_mult", 1.0))
-    promotes_band = bool(cv_cfg.get("catalyst_promotes_band", False))
-
-    # D2 (2026-09-02): the effective p_up-damping factor — the MECHANICAL
-    # brier_damping ladder (unchanged computation, `calibration.damping_factor`
-    # from `_build_flex_conviction_calibration`) UNLESS Jorge has set an
-    # explicit interim override (risk-limits.json `conviction.
-    # p_up_damping_factor_override`, non-null) — the honest-interim response
-    # to calibration this inverted, while the path's OWN brier_min_sample-
-    # gated ladder is still too thin to mechanically reflect it. `None`
-    # (default once real Brier data governs) defers entirely to the ladder.
-    _mechanical_damping = float((calibration or {}).get("damping_factor", 1.0))
-    _override = cv_cfg.get("p_up_damping_factor_override")
-    damping_factor = _mechanical_damping if _override is None else float(_override)
-
-    nominatable = {
-        row["symbol"] for row in (eligibility or {}).get("candidates", []) if row.get("flex_nominatable")
-    }
-
-    excluded: list[dict] = []
-    candidates_by_symbol: dict[str, dict] = {}
-    for nom in prev_nominations or []:
-        sym = str(nom.get("symbol") or "").upper()
-        if not sym:
-            continue
-        if sym not in nominatable:
-            excluded.append({"symbol": sym, "reason": "not_flex_nominatable"})
-            continue
-        evidence = nom.get("evidence") or []
-        if len(evidence) < min_evidence:
-            excluded.append({"symbol": sym, "reason": "insufficient_evidence"})
-            continue
-        try:
-            p_up = float(nom.get("p_up"))
-        except (TypeError, ValueError):
-            excluded.append({"symbol": sym, "reason": "invalid_p_up"})
-            continue
-        try:
-            horizon_days = int(nom.get("horizon_days") or _FLEX_CONVICTION_HORIZON_DEFAULT)
-        except (TypeError, ValueError):
-            horizon_days = _FLEX_CONVICTION_HORIZON_DEFAULT
-        if not (horizon_lo <= horizon_days <= horizon_hi):
-            excluded.append({"symbol": sym, "reason": "horizon_out_of_range"})
-            continue
-
-        rate = _base_rate_up(close_by_date.get(sym) or {}, horizon_days, lookback_days, min_windows)
-        if rate["base_rate_up"] is None:
-            excluded.append({"symbol": sym, "reason": "insufficient_base_rate_history"})
-            continue
-
-        # D2: damp p_up TOWARD base_rate_up before it ever reaches edge — the
-        # STATED confidence is what's untrustworthy (inverted calibration),
-        # not merely its eventual sizing. damping_factor=1.0 is a no-op
-        # (p_up_damped == p_up); 0.0 fully flattens (edge always 0).
-        p_up_damped = _damp_p_up_toward_base_rate(p_up, rate["base_rate_up"], damping_factor)
-        edge = _conviction_edge(p_up_damped, rate["base_rate_up"])
-        size_mult, conviction = _conviction_ladder_lookup(ladder, edge)
-        amp = _conviction_catalyst_amplifier(
-            size_mult, conviction, nom.get("catalyst_date"), horizon_days, today,
-            ladder, catalyst_size_mult, promotes_band,
-        )
-        # No post-hoc size_mult multiplication anymore — damping already
-        # happened upstream, at p_up, before it ever set the ladder rung.
-
-        candidates_by_symbol[sym] = {
-            "conviction": amp["conviction"], "size_mult": round(amp["size_mult"], 4),
-            "symbol": sym, "p_up": p_up, "p_up_damped": round(p_up_damped, 4),
-            "damping_factor_applied": damping_factor,
-            "base_rate_up": rate["base_rate_up"],
-            "base_rate_windows": rate["windows"], "edge": edge,
-            "horizon_days": horizon_days, "evidence": evidence,
-            "invalidation": nom.get("invalidation"), "catalyst_date": nom.get("catalyst_date"),
-            "catalyst_amplified": amp["amplified"], "review_date": nom.get("review_date"),
-        }
-
-    active: list[dict] = []
-    pending: list[dict] = []
-    new_states: dict[str, dict] = {}
-    all_symbols = set(candidates_by_symbol) | set(prev_states)
-    for sym in sorted(all_symbols):
-        result = _confirm_flex_conviction_entry(
-            candidates_by_symbol.get(sym), prev_states.get(sym), cv_cfg,
-        )
-        new_states[sym] = result.pop("_state")
-        result["symbol"] = sym
-        if result["active"]:
-            active.append(result)
-        elif result["status"] == "pending":
-            pending.append(result)
-
-    return {
-        "available": True,
-        "enabled": True,
-        "ladder": ladder,
-        "eligibility": eligibility,
-        "excluded": excluded,
-        "active": active,
-        "pending": pending,
-        "calibration": calibration,
-    }, new_states
 
 
 # Quadrant defensiveness rank (Q1 most offensive → Q4 most defensive). A transition to a
@@ -10622,188 +9701,6 @@ def _div_dollar_vs_intl(paper_account: dict, regional_rotation: dict, today: str
                                 f"light ({intl_pct}%)."),
                 "direction_implied": "toward_international", "status": "active"}
     return {**base, "direction_implied": "aligned", "status": "indeterminate"}
-
-
-def _classify_flex_review(
-    *,
-    days_held: int,
-    excess_vs_spy_pp: float,
-    spy_return_since_entry_pct: float | None,
-    cfg: dict,
-) -> dict:
-    """PURE classifier — the flex-sleeve performance review matrix.
-
-    **Single-benchmark (SPY) as of session 2026-09-12 (B1/R1).** This was a
-    DUAL-benchmark matrix: SPY bound in a rising/flat tape, and the
-    active-quadrant ETF bound in a drawdown ("SPY is a low bar a defensive name
-    clears just by falling less"). Both the quadrant-ETF leg and the
-    `regime_fit_lost` forced-cut depended on a macro quadrant, and regime is now
-    removed from the flex sleeve entirely. G3's opportunity-cost benchmark is
-    re-pointed to SPY rather than deleted: the system's mission is to beat SPY
-    total return, so SPY is the honest opportunity cost for a flex position, and
-    it carries no regime dependency.
-
-    Consequence, stated plainly: the drawdown carve-out is GONE. A flex name that
-    falls less than a falling SPY no longer earns an "ok" on that basis — it is
-    scored against SPY in every tape. That is a real tightening, and the right
-    one for a sleeve whose thesis is a multi-day move, not defensiveness.
-
-    `spy_direction` is still resolved (DEADBAND_PP) and still reported — it is
-    useful context for the narrative — but it no longer selects a benchmark.
-    AHEAD := excess >= LAG_TOL_PP (keeping pace, absorbs noise); BEHIND
-    otherwise. The LLM echoes the status; it computes none of these inputs.
-    """
-    review_days = cfg["REVIEW_DAYS"]
-    lag = cfg["LAG_TOL_PP"]
-    brk = cfg["BREAK_PP"]
-    dead = cfg["DEADBAND_PP"]
-
-    if spy_return_since_entry_pct is None:
-        spy_dir = "flat"
-    elif spy_return_since_entry_pct > dead:
-        spy_dir = "rising"
-    elif spy_return_since_entry_pct < -dead:
-        spy_dir = "falling"
-    else:
-        spy_dir = "flat"
-
-    def _result(status: str, reason: str) -> dict:
-        return {
-            "review_status": status,
-            "binding_benchmark": "spy",
-            "spy_direction": spy_dir,
-            "reason": reason,
-        }
-
-    if days_held < review_days:
-        return _result("ok", f"within holding window (<{review_days}d)")
-    if excess_vs_spy_pp >= lag:
-        return _result("ok", "ahead of SPY")
-    if excess_vs_spy_pp < brk:
-        return _result("breaking", f"lagging SPY by more than {brk}pp")
-    return _result("review_due", "lagging SPY within the break threshold")
-
-
-def _build_flex_review(
-    fmp: FMPClient,
-    paper_account: dict,
-    trade_rows: list[dict],
-    cfg: dict,
-    today: date | None = None,
-) -> dict:
-    """Flex-sleeve performance review for every HELD flex name.
-
-    Deterministic SPY-benchmarked scoring (session 2026-09-12, B1/R1 — the
-    active-quadrant ETF leg and the `regime_fit_lost` forced cut are gone with
-    regime; see `_classify_flex_review`). Reads write-once entry metadata from
-    TradeHistory, computes days_held / returns / excess vs SPY / spy_direction /
-    status. The analyzer ECHOES the status and writes only the narrative for
-    ``review_due``. Non-fatal: any name lacking entry/return data → status
-    ``unknown``.
-    """
-    today = today or date.today()
-
-    # Latest flex-BUY entry row per symbol (carries the write-once entry metadata).
-    entry_by_sym: dict[str, dict] = {}
-    for r in trade_rows or []:
-        if (r.get("layer") or "").lower() != "flex" or (r.get("side") or "").lower() != "buy":
-            continue
-        sym = r.get("symbol")
-        if not sym:
-            continue
-        rec = r.get("entry_date") or r.get("recommended_at") or ""
-        prev = entry_by_sym.get(sym)
-        if prev is None or rec >= (prev.get("entry_date") or prev.get("recommended_at") or ""):
-            entry_by_sym[sym] = r
-
-    held = {
-        p.get("ticker"): p
-        for p in (paper_account.get("positions") or [])
-        if float(p.get("qty") or 0) > 0
-    }
-
-    series_cache: dict[str, dict] = {}
-
-    def _series(sym: str) -> dict:
-        if sym not in series_cache:
-            series_cache[sym] = _close_by_date(fmp, sym)
-        return series_cache[sym]
-
-    names: list[dict] = []
-    for sym, pos in held.items():
-        entry = entry_by_sym.get(sym)
-        if entry is None:
-            continue  # core position — not a flex name
-
-        entry_date = entry.get("entry_date") or entry.get("recommended_at")
-        entry_price = entry.get("entry_price")
-        if entry_price in (None, ""):
-            entry_price = entry.get("price_at_rec")  # fallback to the stamped rec price
-        def _unknown(missing: str) -> dict:
-            return {
-                "symbol": sym,
-                "review_status": "unknown",
-                "entry_date": entry_date,
-                "benchmark_etf": "SPY",
-                "missing": missing,
-                "note": f"flex review unavailable — missing {missing}; cannot score deterministically",
-            }
-
-        try:
-            entry_price = float(entry_price) if entry_price not in (None, "") else None
-        except (TypeError, ValueError):
-            entry_price = None
-        if not entry_date or entry_price is None:
-            names.append(_unknown("entry_date/entry_price"))
-            continue
-
-        sym_map, spy_map = _series(sym), _series("SPY")
-        cur = _close_on_or_before(sym_map, today.isoformat())
-        if cur is None:
-            cur = float(pos.get("current_price") or 0) or None
-        s0 = _close_on_or_before(spy_map, entry_date)
-        sn = _close_on_or_before(spy_map, today.isoformat())
-        if not all((cur, s0, sn)):
-            names.append(_unknown("price series (symbol/SPY)"))
-            continue
-
-        ret = (cur / entry_price - 1.0) * 100.0
-        spy_ret = (sn / s0 - 1.0) * 100.0
-        excess_spy = ret - spy_ret
-        days_held = (today - date.fromisoformat(str(entry_date)[:10])).days
-
-        verdict = _classify_flex_review(
-            days_held=days_held,
-            excess_vs_spy_pp=excess_spy,
-            spy_return_since_entry_pct=spy_ret,
-            cfg=cfg,
-        )
-        names.append({
-            "symbol": sym,
-            "entry_date": entry_date,
-            "benchmark_etf": "SPY",
-            "days_held": days_held,
-            "return_since_entry_pct": round(ret, 3),
-            "spy_return_since_entry_pct": round(spy_ret, 3),
-            "excess_vs_spy_pp": round(excess_spy, 3),
-            "spy_direction": verdict["spy_direction"],
-            "binding_benchmark": verdict["binding_benchmark"],
-            "review_status": verdict["review_status"],
-            "reason": verdict["reason"],
-        })
-
-    return {
-        "available": bool(names),
-        "as_of": today.isoformat(),
-        "review_days": cfg["REVIEW_DAYS"],
-        "config": cfg,
-        "names": names,
-        "note": (
-            "Conviction-sleeve dual-benchmark review (primary flex exit). Statuses are "
-            "computed here; the analyzer echoes them and writes the review_due narrative. "
-            "binding = SPY when its tape is rising/flat, the quadrant ETF when falling."
-        ),
-    }
 
 
 def _news_history_row(today: str, market_shock: dict, dominant_category: str | None) -> dict:
