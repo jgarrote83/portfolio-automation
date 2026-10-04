@@ -30,10 +30,9 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from collector import catalyst_screen  # noqa: E402
 from flex.config import FlexConfig  # noqa: E402
 from flex.entry import build_conviction_entry, build_flex_entry  # noqa: E402
-from flex.separation import FLEX_REENTERABLE, flex_separation_set  # noqa: E402
+from shared.separation import FLEX_REENTERABLE, flex_separation_set  # noqa: E402
 
 NOW = "2026-09-12 14:00:00"
 
@@ -71,185 +70,6 @@ def test_separation_set_is_pool_based_and_survives_intact():
     # a flat re-enterable legacy name is NOT blocked; held, it is
     assert "INTC" not in flex_separation_set(frozenset())
     assert "INTC" in flex_separation_set(frozenset({"INTC"}))
-
-
-def test_regime_fit_score_is_gone_from_the_components():
-    assert "regime_fit_score" not in catalyst_screen.COMPONENTS
-    assert "volume_surge" in catalyst_screen.COMPONENTS
-
-
-# --- R2: required-component rankability, not a bare count --------------------
-
-def test_news_recency_is_mandatory():
-    """This is a NEWS strategy. A candidate with no recent news has no thesis,
-    however well everything else scores — the exact failure the old count bar
-    allowed (rankable on momentum + regime fit alone)."""
-    ok, reason = catalyst_screen.rankability(
-        {"momentum": 1.0, "relative_strength": 1.0, "news_tone": 0.5, "volume_surge": 1.0},
-        catalyst_screen.COMPONENTS)
-    assert ok is False
-    assert reason == "missing_required:news_recency"
-
-
-def test_price_confirmation_is_mandatory():
-    """News with no tape response is a story, not a trade. Either momentum or
-    volume_surge satisfies it — they are alternatives, not both required."""
-    base = {"news_recency": 0.9, "news_tone": 0.5, "political_flow": 0.4}
-    ok, reason = catalyst_screen.rankability(base, catalyst_screen.COMPONENTS)
-    assert (ok, reason) == (False, "missing_price_confirmation")
-    assert catalyst_screen.rankability({**base, "momentum": 0.6}, catalyst_screen.COMPONENTS)[0]
-    assert catalyst_screen.rankability({**base, "volume_surge": 0.6}, catalyst_screen.COMPONENTS)[0]
-
-
-def test_earnings_proximity_never_gates_rankability():
-    """R2's core: the old universe (yesterday's reporters) could never satisfy a
-    14-day FORWARD earnings window, so requiring it was unsatisfiable by
-    construction. A catalyst is now purely opportunistic."""
-    comps = {"news_recency": 0.9, "momentum": 0.6, "news_tone": 0.5}
-    ok_without, _ = catalyst_screen.rankability(comps, catalyst_screen.COMPONENTS)
-    ok_with, _ = catalyst_screen.rankability(
-        {**comps, "earnings_proximity": 1.0}, catalyst_screen.COMPONENTS)
-    assert ok_without is True and ok_with is True
-    # ...and it still CONTRIBUTES to the score when present.
-    assert (catalyst_screen.composite_score({**comps, "earnings_proximity": 1.0})["score"]
-            > catalyst_screen.composite_score(comps)["score"])
-
-
-def test_insufficient_components_still_vetoes():
-    """The "mostly unmeasured" guard survives the rewrite, at 3."""
-    ok, reason = catalyst_screen.rankability(
-        {"news_recency": 0.9, "momentum": 0.6}, catalyst_screen.COMPONENTS)
-    assert ok is False and reason.startswith("insufficient_components:2<3")
-
-
-def test_a_required_component_that_is_not_applicable_cannot_be_required():
-    """If `news_recency` were ever made non-applicable for some instrument,
-    requiring it would be the 'judged against a bar it can never structurally
-    clear' failure `applicable_components` exists to prevent."""
-    applicable = tuple(c for c in catalyst_screen.COMPONENTS if c != "news_recency")
-    ok, reason = catalyst_screen.rankability(
-        {"momentum": 1.0, "news_tone": 0.5, "relative_strength": 1.0}, applicable)
-    assert ok is True, reason
-
-
-def test_absent_vs_zero_is_unchanged():
-    """The load-bearing rule R2 must not disturb: an absent component drops OUT
-    of the mean, it is never averaged in as 0.0."""
-    two = catalyst_screen.composite_score(
-        {"news_recency": 1.0, "momentum": 1.0, "news_tone": None})
-    assert two["score"] == 1.0            # not 0.667
-    assert two["components_available"] == 2
-
-
-# --- N1: volume_surge -------------------------------------------------------
-
-def test_volume_surge_measures_todays_volume_against_its_own_trailing_average():
-    bars = [{"c": 10.0, "v": 1_000_000} for _ in range(20)] + [{"c": 10.0, "v": 3_000_000}]
-    assert catalyst_screen.volume_surge_from_bars(bars, 20) == 3.0
-    assert catalyst_screen.volume_surge_score(3.0, 3.0) == 1.0
-
-
-def test_volume_surge_is_one_sided():
-    """Below-average volume is the ABSENCE of a surge, not a negative signal —
-    deliberately unlike momentum's symmetric clamp."""
-    assert catalyst_screen.volume_surge_score(1.0, 3.0) == 0.0
-    assert catalyst_screen.volume_surge_score(0.2, 3.0) == 0.0
-    assert catalyst_screen.volume_surge_score(2.0, 3.0) == 0.5
-
-
-def test_volume_surge_absent_on_thin_history_never_fabricates_average():
-    assert catalyst_screen.volume_surge_from_bars([{"c": 1.0, "v": 5}] * 5, 20) is None
-    assert catalyst_screen.volume_surge_from_bars([{"c": 1.0, "v": 0}] * 25, 20) is None
-    assert catalyst_screen.volume_surge_score(None) is None
-
-
-# --- N1: hours-based news recency -------------------------------------------
-
-def test_news_recency_is_measured_in_hours():
-    """A 7-DAY lookback on a sleeve that holds ~2 days scored a 6-day-old
-    headline at 0.14 and counted it as "news"."""
-    items = [{"publishedDate": "2026-09-12 08:00:00"}]
-    hrs = catalyst_screen.hours_since_latest_news(items, NOW)
-    assert hrs == 6.0
-    assert catalyst_screen.news_recency_score(hrs, 24) == 0.75
-    assert catalyst_screen.news_recency_score(30.0, 24) is None   # past the window
-
-
-def test_date_only_timestamp_reads_as_midnight_never_fabricates_freshness():
-    items = [{"publishedDate": "2026-09-12"}]
-    assert catalyst_screen.hours_since_latest_news(items, NOW) == 14.0
-
-
-# --- N1: the movers discovery universe --------------------------------------
-
-def _rows(*specs):
-    return [{"symbol": s, "price": p} for s, p in specs]
-
-
-def test_movers_universe_requires_recent_news():
-    """The news intersection is the POINT, not a filter: a mover with no recent
-    news is a price move without a reason."""
-    rows = _rows(("AAA", 50.0), ("BBB", 50.0))
-    news = {"AAA": [{"publishedDate": "2026-09-12 12:00:00"}]}
-    syms, dropped = catalyst_screen.movers_discovery_symbols(
-        rows, news, NOW, set(), 25, 24, 5.0)
-    assert syms == ["AAA"]
-    assert dropped["BBB"] == "no_recent_news"
-
-
-def test_movers_universe_applies_the_price_floor():
-    """G-7: the live mover union is ~19% sub-$1 and ~42% sub-$5 — a
-    pump-and-dump surface the ADV floor alone does not defend, since a $1 stock
-    can trade $50M on the day it is being promoted."""
-    rows = _rows(("PENNY", 0.65), ("REAL", 50.0))
-    news = {"PENNY": [{"publishedDate": NOW}], "REAL": [{"publishedDate": NOW}]}
-    syms, dropped = catalyst_screen.movers_discovery_symbols(
-        rows, news, NOW, set(), 25, 24, 5.0)
-    assert syms == ["REAL"]
-    assert dropped["PENNY"] == "below_min_price"
-
-
-def test_movers_universe_respects_exclusions_and_cap():
-    rows = _rows(("AAA", 50.0), ("BBB", 50.0), ("CCC", 50.0))
-    news = {s: [{"publishedDate": NOW}] for s in ("AAA", "BBB", "CCC")}
-    syms, _ = catalyst_screen.movers_discovery_symbols(
-        rows, news, NOW, {"AAA"}, 25, 24, 5.0)
-    assert syms == ["BBB", "CCC"]
-    capped, _ = catalyst_screen.movers_discovery_symbols(
-        rows, news, NOW, set(), 2, 24, 5.0)
-    assert len(capped) == 2
-
-
-def test_movers_universe_never_admits_a_separation_set_member():
-    """SPY/TLT/XLF are routinely in the live mover list and are core pool
-    members. The separation set is an absolute gate and survives N1 intact."""
-    sep = flex_separation_set(frozenset())
-    blocked = sorted(sep)[:3]
-    rows = _rows(*[(s, 100.0) for s in blocked], ("NEWNAME", 100.0))
-    news = {s: [{"publishedDate": NOW}] for s in blocked + ["NEWNAME"]}
-    syms, _ = catalyst_screen.movers_discovery_symbols(
-        rows, news, NOW, sep, 25, 24, 5.0)
-    assert syms == ["NEWNAME"]
-
-
-def test_end_to_end_a_real_shaped_mover_is_nominatable():
-    """The whole point of B1: a liquid, newsy mover must now reach `rankable`.
-    Mirrors the live probe (2026-09-12), which took a 96-name mover union to 7
-    discovered, 7/7 screened in, 7/7 rankable — ORCL/AAPL/HPE/SMR/SPCX/F/NVDA —
-    against 0 nominations in every session of the prior universe."""
-    comps = {
-        "news_recency": catalyst_screen.news_recency_score(6.0, 24),
-        "news_tone": catalyst_screen.news_tone_score(True, 2, 0),
-        "momentum": catalyst_screen.momentum_score(5.0),
-        "volume_surge": catalyst_screen.volume_surge_score(2.5, 3.0),
-        "earnings_proximity": None,      # no catalyst — must not matter
-        "political_flow": None,
-        "relative_strength": None,
-    }
-    cs = catalyst_screen.composite_score(comps)
-    assert cs["rankable"] is True
-    assert cs["rankability_reason"] is None
-    assert cs["components_available"] == 4
 
 
 # --- B2 (N2/N3/N4): exit profile, bracket order, window, sizing -------------
@@ -410,20 +230,6 @@ def test_g8_conviction_path_is_dormant_by_default_not_deleted():
     # the machinery survives for a future slower sub-strategy
     from flex.entry import build_conviction_entry
     assert callable(build_conviction_entry)
-
-
-def test_g10_noise_band_is_measured_and_is_not_called_an_ATR():
-    """G-10 — the fixed-vs-ATR-scaled barrier question (§8.1) gets settled on
-    measured data. A true ATR14 is NOT computable here: the light endpoint
-    returns close+volume only, and with the engine off the entry pipeline (which
-    does compute atr14) never runs. So this is an honest close-only substitute,
-    named for what it is."""
-    bars = [{"c": 100.0 * (1.04 if i % 2 else 1.0)} for i in range(25)]
-    band = catalyst_screen.mean_abs_daily_move_pct(bars, 20)
-    assert band is not None and 3.5 < band < 4.5
-    # the reading that matters: a 1.5% stop is a FRACTION of one session's move
-    assert round(1.5 / band, 2) < 0.5
-    assert catalyst_screen.mean_abs_daily_move_pct([{"c": 1.0}] * 5, 20) is None
 
 
 def test_g10_fixed_barriers_have_no_structural_edge_by_construction():

@@ -21,7 +21,7 @@ from flex.config import FlexConfig  # noqa: E402
 from flex.entry import build_flex_entry  # noqa: E402
 from flex.exit_state import build_flex_exit_state  # noqa: E402
 from flex.handler import _enums, _flex_nominations  # noqa: E402
-from flex.separation import FLEX_REENTERABLE, flex_separation_set  # noqa: E402
+from shared.separation import FLEX_REENTERABLE, flex_separation_set  # noqa: E402
 
 # Intraday/flex-only concepts; must NEVER appear in a core weight change.
 _INTRADAY_FIELDS = {"vwap", "vwap_slope", "atr14", "gap_in_adr", "stop_price", "size_shares"}
