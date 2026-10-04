@@ -116,28 +116,23 @@ def _patch_common(monkeypatch, store):
     monkeypatch.setattr(ch, "date", _FrozenDate)
 
 
-def test_each_row_graded_by_exactly_one_stamper_at_its_own_horizon(monkeypatch):
+def test_core_stamper_grades_the_core_row_and_leaves_the_historical_flex_row_alone(monkeypatch):
+    """Part B (B3): the flex_conviction stamper and calibration are gone, so a historical
+    flex_conviction row is inert history — it must NEVER be graded by the core stamper."""
     store = _FakeStore([_core_row(), _flex_row()])
     _patch_common(monkeypatch, store)
 
     ch._backfill_thematic_history_path()
     ch._stamp_thematic_outcomes(fmp=None)
-    ch._stamp_flex_conviction_outcomes(fmp=None)
 
     core = store.by_key("THM-20260101-000")
     flex = store.by_key("FLEXCV-20260101-000")
 
-    # Core row graded by the core stamper at 30/60d, never touched by flex fields.
     assert core["outcome_status"] == "resolved"
     assert "actual_up_60d" in core
-    assert "actual_up" not in core  # the flex stamper's own field name
-
-    # Flex row graded by the flex stamper at its OWN horizon_days (21d), never
-    # by the core 30/60/90 ladder.
-    assert flex["outcome_status"] == "resolved"
-    assert "actual_up" in flex
-    assert "actual_up_60d" not in flex
-    assert "actual_up_30d" not in flex
+    assert flex["outcome_status"] == ""
+    assert not any(k.startswith("actual_up") for k in flex)
+    assert not hasattr(ch, "_stamp_flex_conviction_outcomes")
 
 
 def test_core_calibration_sample_size_excludes_flex_row(monkeypatch):
@@ -145,21 +140,9 @@ def test_core_calibration_sample_size_excludes_flex_row(monkeypatch):
     _patch_common(monkeypatch, store)
     ch._backfill_thematic_history_path()
     ch._stamp_thematic_outcomes(fmp=None)
-    ch._stamp_flex_conviction_outcomes(fmp=None)
 
     core_cal = ch._build_thematic_calibration(ch._RISK_LIMITS_DEFAULTS)
     assert core_cal["sample_size"] == 1
-
-
-def test_flex_calibration_sample_size_excludes_core_row(monkeypatch):
-    store = _FakeStore([_core_row(), _flex_row()])
-    _patch_common(monkeypatch, store)
-    ch._backfill_thematic_history_path()
-    ch._stamp_thematic_outcomes(fmp=None)
-    ch._stamp_flex_conviction_outcomes(fmp=None)
-
-    flex_cal = ch._build_flex_conviction_calibration(ch._RISK_LIMITS_DEFAULTS)
-    assert flex_cal["sample_size"] == 1
 
 
 def test_legacy_row_with_no_path_field_lands_in_core_track_after_backfill(monkeypatch):
