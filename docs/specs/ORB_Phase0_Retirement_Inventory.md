@@ -77,7 +77,7 @@ After Part A the branch is measured again in `.review/phase0a-summary.md`.
 
 ## 6. PORT candidates (Phase 4 ports adapted copies — never imported, never copied in Part B)
 
-**PORT source: commit `1b6dc3a3f95a2639f2b5434322ff9d6da3055fbb`** (`master` when Part A began; it contains all of `src/flex/` and `src/daytrade/`, and Part A changes only docs, one script and its tests). **Part B is purely subtractive (U10) — nothing is copied into `src/orb/` in Part B.** Phase 4 ports *adapted* copies from this SHA, applying the §5 adaptation list. **When Part B is cut, replace this SHA with Part B's actual merge-base** (the last commit still containing the engines) if `master` has moved on to anything that touches `src/flex/`, `src/daytrade/` or their tests; every `file:line` in this section refers to that SHA.
+**PORT source: commit `01cfb40793f9374870124ea4252fe23a6cb12e5c`** (`master` after Phase 0A merged = Part B's merge-base; it contains all of `src/flex/` and `src/daytrade/`; the earlier `1b6dc3a3f95a2639f2b5434322ff9d6da3055fbb` differs from it only by Part A's docs, one script and its tests). **Part B is purely subtractive (U10) — nothing is copied into `src/orb/` in Part B.** Phase 4 ports *adapted* copies from this SHA, applying the §5 adaptation list. Part B's merge-base was recorded here when it was cut; every `file:line` in this section and in the appendices refers to Part A's tree, which is identical for `src/flex/`, `src/daytrade/` and their tests at both SHAs.
 
 | Source | Carry | Change for ORB |
 | --- | --- | --- |
