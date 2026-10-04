@@ -99,10 +99,11 @@ def test_selected_incumbent_is_core_eligible():
     assert out == {"status": "core_eligible", "reason": None}
 
 
-def test_non_roster_ticker_routes_to_flex_not_excluded():
-    """MU is not in CORE_ROSTER at all -- routes to flex, is NOT an
-    'excluded' status (excluded implies a rejected core reference; flex
-    routing is a different, non-excluded outcome)."""
+def test_non_roster_ticker_is_report_only_not_excluded():
+    """MU is not in CORE_ROSTER at all -- report-only (the classifier's internal
+    status is still the legacy name `flex_route`; the emitted reason is
+    `non_roster_report_only`, R4), is NOT an 'excluded' status (excluded implies a
+    rejected core reference)."""
     out = _thematic_classify_symbol("MU", set(), {})
     assert out["status"] == "flex_route"
     assert out["reason"] is None
@@ -164,7 +165,7 @@ def test_live_override_switch_flips_eligibility_both_ways():
 
 def test_quarantine_checked_before_roster_membership():
     """A quarantined off-roster name is still excluded (quarantine wins),
-    not silently routed to flex."""
+    not silently treated as report-only."""
     out = _thematic_classify_symbol("MU", {"MU"}, {})
     assert out == {"status": "excluded", "reason": "price_quarantined"}
 

@@ -6,8 +6,7 @@
 a partial positions list, `net_mv` goes wrong while `equity` stays right (or
 vice versa) and nothing notices, even though `equity` is the single number
 the entire performance chart rests on. `_build_equity_reconciliation` is a
-pure, non-fatal, non-gating check mirroring the existing
-`_build_flex_reconciliation` pattern exactly. Run:
+pure, non-fatal, non-gating check. Run:
     PYTHONPATH=src pytest tests/test_equity_reconciliation.py
 """
 import os

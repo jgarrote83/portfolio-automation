@@ -11,11 +11,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from collector.handler import _filter_earnings_to_universe  # noqa: E402
 
 
-def test_filters_to_universe_keeps_held_and_flex_drops_irrelevant():
+def test_filters_to_universe_keeps_held_and_listed_drops_irrelevant():
     rows = [
         {"symbol": "GOOGL", "date": "2026-07-22"},   # held
         {"symbol": "MCD", "date": "2026-07-23"},      # irrelevant
-        {"symbol": "PPA", "date": "2026-07-24"},      # flex candidate
+        {"symbol": "PPA", "date": "2026-07-24"},      # in the universe set
     ]
     universe = {"GOOGL", "PPA", "SPY", "GLD"}
     out = _filter_earnings_to_universe(rows, universe)

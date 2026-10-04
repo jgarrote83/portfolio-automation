@@ -250,7 +250,7 @@ def test_non_selected_pool_member_injected_directly_is_rejected_at_apply():
 
 
 def test_off_roster_name_injected_directly_is_rejected_at_apply():
-    """A ticker not in CORE_ROSTER at all (routes to flex, D4 rule 3) must
+    """A ticker not in CORE_ROSTER at all (report-only, D4 rule 3) must
     never receive a core reference weight even if handed directly to
     _build_reference_weights via a hand-edited/corrupted thematic block."""
     out = _build({"available": True, "enabled": True, "active": [
