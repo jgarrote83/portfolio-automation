@@ -50,7 +50,7 @@ plus verbatim text. In priority order:
    grades have matured.
 4. **Live config, verbatim, fetched from GitHub at master HEAD** (not the
    deployed package): `project-instructions.md`, `risk-limits.json`,
-   `sleeve-roles.json`, `flex-candidates.json`. The bundle also gives you
+   `sleeve-roles.json`. The bundle also gives you
    `diff_base_sha` — every diff you write must apply cleanly against these
    exact file contents.
 5. **`FOLLOWUPS.md`** (open items only — the Done section is stripped).
@@ -89,18 +89,18 @@ your `proposals[]` may contain ONLY class-0 entries. Otherwise `mode` is
 {
   "id": "AMD-2026-08-01",
   "class": 1,
-  "title": "Raise flex confidence bar for thesis_type=turnaround",
-  "change_summary": "Raise flex confidence bar for turnaround entries",
-  "data_summary": "Turnaround theses: 29% hit rate at 60d (n=14) vs 61% for quadrant-gap trades",
+  "title": "Require a dated falsifier in every sleeve-hold rationale",
+  "change_summary": "Require a dated falsifier in every sleeve-hold rationale",
+  "data_summary": "Holds with no falsifier date: 29% resolved correct (n=14) vs 61% with one",
   "target_file": "src/config/project-instructions.md",
   "diff": "<unified diff, applies cleanly at diff_base_sha>",
   "evidence": [
-    "TradeHistory: thesis_type=turnaround hit_rate_60d=0.29 (n=14)",
+    "OverrideHistory: layer=override, empty falsifier_date, resolved_correct rate 0.29 (n=14)",
     "Calibration: stated confidence 0.68 vs realized 0.31 on that bucket"
   ],
   "evidence_n": 14,
-  "expected_effect": "Fewer low-quality turnaround entries; est. 2-3 fewer flex trades/month",
-  "falsifier": "If flex 60d hit rate does not improve by 2027-01 review, revert",
+  "expected_effect": "Fewer undated holds; est. 2-3 fewer per month",
+  "falsifier": "If the resolved-correct rate for holds does not improve by 2027-01 review, revert",
   "review_by": "2027-01-03",
   "risk_class_notes": "Prompt-text only; no parameter or structural change"
 }
@@ -148,7 +148,7 @@ class-2 bar every other parameter proposal must clear.
 
 **Target-file allowlist (classes 1–2 only):**
 `src/config/project-instructions.md`, `src/config/risk-limits.json`,
-`src/config/sleeve-roles.json`, `config/flex-candidates.json`. A diff against
+`src/config/sleeve-roles.json`. A diff against
 any other path — code, workflows, the validator, infra — is not something you
 have the authority to propose as a diff; if the change requires touching one
 of those, it is class 3.

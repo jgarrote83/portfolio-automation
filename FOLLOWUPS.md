@@ -663,6 +663,19 @@ wiped them.
 
 ## Open
 
+### 114. Learning Loop allowlist named a nonexistent path — `config/flex-candidates.json` (MEDIUM — latent defect, found by the ORB Phase 0A inventory, FIXED on `feat/orb-phase0b-retire-flex` commit B5)
+`src/learning/bundle.py` (`LIVE_CONFIG_FILES`) and `src/learning/schema.py`
+(`TARGET_FILE_ALLOWLIST`) both listed `config/flex-candidates.json`. The other three
+entries carry the `src/` prefix; there is no repo-root `config/` directory (the real file was
+`src/config/flex-candidates.json`). `fetch_live_config` calls `raise_for_status()` per path
+against GitHub raw at master HEAD, so that entry would 404 and abort bundle assembly — the
+defect was never seen in production only because the Loop had not run a full cycle with
+the bundle. **Fix (B5, with the ORB Phase 0 Flex retirement):** the entry is removed from both
+lists (the file itself goes with Flex), `learning-review-instructions.md` no longer names it,
+and a regression test now asserts every `LIVE_CONFIG_FILES` path is a real repo-root file and
+that the fetch list equals the allowlist (`tests/test_learning_schema.py`). ORB config does
+**not** join the allowlist (decision R6). Move to Done when Part B merges.
+
 ### 113. ORB program — Phase 0 (retire Flex and the DayTrade Lab) (HIGH — program, blocks ORB Phases 1-5)
 Opened 2026-10-04 (branch `feat/orb-phase0a-retirement-prep`). The Flex catalyst engine
 (`src/flex/`, `FLEX_ENABLED=true` live) and the DayTrade Lab (`src/daytrade/`,

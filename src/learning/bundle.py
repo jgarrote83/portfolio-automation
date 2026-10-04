@@ -44,7 +44,6 @@ LIVE_CONFIG_FILES = (
     "src/config/project-instructions.md",
     "src/config/risk-limits.json",
     "src/config/sleeve-roles.json",
-    "config/flex-candidates.json",
 )
 FOLLOWUPS_PATH = "FOLLOWUPS.md"
 
@@ -135,7 +134,7 @@ def fetch_master_sha(session: requests.Session | None = None) -> str:
 
 
 def fetch_live_config(session: requests.Session | None = None) -> dict[str, str]:
-    """{path: content} for the 4 allowlisted config files, from GitHub raw at
+    """{path: content} for the 3 allowlisted config files, from GitHub raw at
     master HEAD — deliberately NOT the deployed function package (spec §5)."""
     out: dict[str, str] = {}
     for path in LIVE_CONFIG_FILES:
