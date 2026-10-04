@@ -9,13 +9,13 @@ Each weekday a timer collects market/macro/alt data, a deterministic layer pre-c
 - **[`CLAUDE.md`](CLAUDE.md)** — the living architecture doc: resource names, data flow (Phase 1 collect/analyze + Phase 2 execute), Table Storage schemas, the snapshot analytics blocks (`reference_weights`, `divergences`, `transition_watch`, override protocol + enforcement), the Rules, and the hard-won **Deployment lessons**. Start here for how the system actually works.
 - **[`FOLLOWUPS.md`](FOLLOWUPS.md)** — open work, backlog, and dated incident records (where we left off).
 - **[`docs/specs/growth_strategy_spec_v1.md`](docs/specs/growth_strategy_spec_v1.md)** — the north-star strategy spec (the regime-concentration machine all automation is downstream of). Read this to understand *why*, not just *how*.
-- Other companion specs (data sources, storage, analyzer pipeline, Phase C, flex engine) are listed at the bottom of `CLAUDE.md`.
+- Other companion specs (data sources, storage, analyzer pipeline, Phase C, the ORB engine plan) are listed at the bottom of `CLAUDE.md`.
 
 ## Layout (top level)
 
 | Path | What |
 |---|---|
-| `src/` | `func-pfauto` — all Azure Functions (`collector`, `analyzer`, `executor`, `flex`, `seeder`) + `shared/` libs + `config/`. Entry point: `src/function_app.py`. |
+| `src/` | `func-pfauto` — all Azure Functions (`collector`, `analyzer`, `executor`, `seeder`) + `shared/` libs + `config/`. Entry point: `src/function_app.py`. |
 | `src/config/` | Prompt (`project-instructions.md`) + all tunable config (`risk-limits.json`, `macro-series.json`, `divergence-config.json`, `fomc-stance.json`, …). **Config lives under `src/`, not at repo root.** |
 | `web/` | `swa-pfauto` Static Web App — report viewer + per-trade approval (`/today`, `/performance`, `/history`, `/portfolio`) + managed API in `web/api/`. |
 | `infra/` | Bicep IaC (`main.bicep` + `modules/`). Prod has no manual portal config. |

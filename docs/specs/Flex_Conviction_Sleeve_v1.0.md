@@ -1,5 +1,7 @@
 # Flex Conviction Sleeve — v1.0
 
+> ⚠️ **SUPERSEDED.** This conviction-sleeve design was already replaced by the intraday catalyst engine (see `Flex_Catalyst_Engine_v1.0.md`), and that engine is itself retired (2026-10, ORB Phase 0 — `docs/specs/ORB_Engine_v1.0.md`). The collector/analyzer pieces named in the status line below no longer exist. History only.
+
 **Status:** implemented (collector `_build_flex_review` + `_classify_flex_review`,
 analyzer entry-metadata persistence, prompt "Step 2 — Gatekeeper" + "Flex review").
 Supersedes the alpha-sleeve gatekeeper (catalyst gate G4 / mispricing gate G5).

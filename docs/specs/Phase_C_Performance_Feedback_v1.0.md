@@ -18,6 +18,8 @@ Two distinct feedback signals, served by different data:
 - **Learning signal** — which calls worked, and what kind of reasoning produces
   them? (drives improvement — the heart of the phase)
 
+> **Update (2026-10, ORB Phase 0):** the flex layer described here is retired and ORB does not write `TradeHistory` or `track_record` rows. Historical `layer: flex` rows are kept and still read by `track_record`; no new ones accrue.
+
 **Scope: flex-first.** Flex is where stock-picking skill lives, so the reasoning
 taxonomy and hit-rate measurement earn their keep there. Core trades are
 quadrant-weight tweaks and get a lighter treatment in a later iteration.

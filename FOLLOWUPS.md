@@ -3,7 +3,17 @@
 Running backlog of known-open work. Newest context at top. When you pick an
 item up, move it to **Done** with the date + commit so the history is visible.
 
-**▶ START HERE — last session 2026-09-13 (S1 kill switch shipped; FLEX SLEEVE RE-ENABLED).**
+**▶ START HERE — ORB Phase 0 (2026-10-04): the Flex sleeve and the DayTrade Lab are being RETIRED.**
+Phase 0A (docs, runbook, read-only flat check) is merged. **Phase 0B (this branch,
+`feat/orb-phase0b-retire-flex`) removes the code** and is **not merged or deployed**: merge
+and deploy wait for Jorge's two FLAT readings with the kill-switch trip confirmed
+(`docs/runbooks/ORB_Phase0_Flex_Shutdown.md` steps 3-4), a clear `LearningProposals` check
+(step 6) and the archive (step 7). Until then Flex is still live in production (`FLEX_ENABLED=true`).
+B8 (inert Flex keys in `risk-limits.json`) is deliberately pending that step-6 check. See
+entry #113 and `docs/specs/ORB_Phase0_Retirement_Inventory.md`. Every Flex-era entry below
+is annotated SUPERSEDED / PARTLY SUPERSEDED; the 2026-09-13 notes that follow are history.
+
+**Previous — last session 2026-09-13 (S1 kill switch shipped; FLEX SLEEVE RE-ENABLED; since superseded by ORB Phase 0).**
 Jorge chose to build the brake before enabling rather than after. **S1 (two-trip
 kill switch) is merged** — slow arm (hit rate < 0.45 after 20 graded closed
 trades) and fast arm (2.0% peak-to-trough sleeve drawdown, NO trade-count
@@ -907,7 +917,7 @@ or disabling it while it holds positions would leave them unprotected.
 - **Jorge, between A and B:** run the runbook, trip the switch, wait until the flat check
   says FLAT twice with the trip confirmed. Part B coding may start earlier; merging and
   deploying wait for that.
-- **Part B (not started):** the removal PR, `FLEX_ENABLED`/`DAYTRADE_*` out of Bicep (never
+- **Part B (CODED on `feat/orb-phase0b-retire-flex`, not merged/deployed — waits on FLAT x2 + trip confirmed + step 6 + archive):** the removal PR, `FLEX_ENABLED`/`DAYTRADE_*` out of Bicep (never
   `az` alone), `FLEX_SLEEVE_CAP_PCT` -> `ORB_SLEEVE_CAP_PCT`, SUPERSEDED banners, and marking
   the Flex-related entries superseded. Existing Flex entries are deliberately NOT edited yet.
 
@@ -966,6 +976,8 @@ change, and bump `reference_execution.settling_revision` when it ships so the
 settling window re-arms (see the 2026-09-12 cycle's Task A4).
 
 ### 98. The analyzer fabricated a per-ticker ADV by misattributing another ticker's ledger row — narration integrity, NOT a data bug (MEDIUM — cross-refs the 09-02 SOXX/GLD P&L break and #103)
+> **Note (ORB Phase 0B, 2026-10-04):** the `flex-ledger` rows this narration-integrity item refers to are archived history (the engine is retired). The guard it motivated (#103, cite per-ticker figures from a named snapshot path) still applies to Core.
+
 **REWRITTEN 2026-09-12 after a live probe. The original entry was wrong and is
 superseded in full — do not act on its "units bug" hypothesis.**
 
@@ -1123,6 +1135,8 @@ ATR-scaling is what makes "quick" mean the same thing on a 1.5%-ATR name and a
 5%-ATR name.
 
 ### 108. B2 remainder — **S1 SHIPPED 2026-09-13**; S2 at-close grading still open (HIGH — risk control)
+> **SUPERSEDED (ORB Phase 0B, 2026-10-04):** the Flex sleeve this item concerns is retired — its code was removed on `feat/orb-phase0b-retire-flex` and the sleeve is replaced by the ORB engine (`docs/specs/ORB_Engine_v1.0.md`). Last tree containing it: commit `01cfb40793f9374870124ea4252fe23a6cb12e5c`. Kept as history; do not act on it.
+
 **UPDATE 2026-09-13: S1 (the two-trip kill switch) IS BUILT AND MERGED** — see
 CLAUDE.md's "Flex kill switch, S1" section. Jorge chose to build it before
 enabling the sleeve rather than after. `FLEX_ENABLED` was set `true` (Bicep +
@@ -1164,6 +1178,8 @@ Cross-refs #104 (the trailing design, retrievable if the fixed profile
 underperforms), #105, #107.
 
 ### 104. Trailing-stop flex design SUPERSEDED for the entry path, retained and retrievable (LOW — record-keeping, cross-refs B2)
+> **Note (ORB Phase 0B, 2026-10-04):** moot — the whole Flex entry/exit profile (fixed bracket and trailing alike) is retired with the engine; ORB uses its own fixed-stop/flat-at-close profile. The spec stays in `docs/specs/` as history.
+
 `docs/specs/Flex_Trailing_Stop_v1.0.md` is superseded for the entry path by B2's
 fixed take-profit / fixed stop / native OCO bracket profile. **Do not delete it.**
 The trailing design may return if the fixed-target profile underperforms — that
@@ -1195,6 +1211,8 @@ $50M floor. Recorded rather than deleted so a future session does not re-open it
 from the original (wrong) premise — see #98 for the full correction.
 
 ### 107. Is `confirm_sessions` hysteresis compatible with a ~2-day horizon at all? (MEDIUM — architecture decision, blocking for the flex-conviction path under B2)
+> **SUPERSEDED (ORB Phase 0B, 2026-10-04):** the Flex sleeve this item concerns is retired — its code was removed on `feat/orb-phase0b-retire-flex` and the sleeve is replaced by the ORB engine (`docs/specs/ORB_Engine_v1.0.md`). Last tree containing it: commit `01cfb40793f9374870124ea4252fe23a6cb12e5c`. Kept as history; do not act on it.
+
 The flex-conviction path applies a per-symbol confirm/release hysteresis
 (`_confirm_flex_conviction_entry`, `FlexConvictionState`, `confirm_sessions`)
 inherited from the thematic overlay, where a multi-week horizon makes a
@@ -1337,6 +1355,8 @@ never has to disentangle "the streak semantics changed" from "the reference
 changed" as simultaneous causes of a shifted number.
 
 ### 90. Catalyst screen — 0/25 nominated for three consecutive sessions (MEDIUM — data/design gap, needs investigation, cross-refs the 2026-09-02 reference-degeneracy cycle)
+> **SUPERSEDED (ORB Phase 0B, 2026-10-04):** the Flex sleeve this item concerns is retired — its code was removed on `feat/orb-phase0b-retire-flex` and the sleeve is replaced by the ORB engine (`docs/specs/ORB_Engine_v1.0.md`). Last tree containing it: commit `01cfb40793f9374870124ea4252fe23a6cb12e5c`. Kept as history; do not act on it.
+
 Flagged in the 2026-09-02 reference-degeneracy cycle's source analysis
 (G-7) but NOT investigated this cycle (out of scope — see that cycle's PR
 body). The catalyst-sleeve funnel (`_CATALYST_DISCOVERY_CAP`/`_CATALYST_TOP_N`,
@@ -1362,6 +1382,8 @@ symbol/session pairs against the collector's actual FMP call log before a
 fix can be designed — not verified against live data this session.
 
 ### 92. F-3 — MU 10x price quarantine + flex-orphan reconciliation (MEDIUM — data-integrity, needs investigation, cross-refs the 2026-09-02 reference-degeneracy cycle)
+> **SUPERSEDED (ORB Phase 0B, 2026-10-04):** the Flex sleeve this item concerns is retired — its code was removed on `feat/orb-phase0b-retire-flex` and the sleeve is replaced by the ORB engine (`docs/specs/ORB_Engine_v1.0.md`). Last tree containing it: commit `01cfb40793f9374870124ea4252fe23a6cb12e5c`. Kept as history; do not act on it.
+
 Flagged in the 2026-09-02 reference-degeneracy cycle's source analysis but
 NOT investigated this cycle (out of scope). Two threads bundled in the
 source analysis: (1) an MU price observation ~10x its plausible range,
@@ -1445,6 +1467,8 @@ missing-member logic) — the two functions must stay in exact lock-step per
 CLAUDE.md's existing doctrine, and right now they don't.
 
 ### 82. `scripts/validate_palette.js` referenced by `web/performance.js` but absent from the repo (LOW — tooling gap, cross-refs #81)
+> **Update (ORB Phase 0B, 2026-10-04):** the `SLEEVE_COLOR` comment block this entry was filed against was removed with the Flex sleeve panel. The remaining reference to the absent `scripts/validate_palette.js` is the lean-rail colour comment at `web/performance.js:208`; the tooling gap stands.
+
 `web/performance.js`'s file-header comment (originally added for the Flex
 Sleeve Performance Ledger's `SLEEVE_COLOR`, session 2026-08-10) documents a
 palette-validation standard — contrast ≥3:1 and CVD ΔE ≥8 against the panel
@@ -1461,6 +1485,8 @@ citing it in comments until it exists — a comment claiming a validation ran
 that cannot actually be re-run is worse than no claim at all.
 
 ### 61. Sleeve-appropriate Phase C grading — realized R-multiple + component regression, not calendar drift (MEDIUM — data-gated, cross-refs #23 + #58)
+> **SUPERSEDED (ORB Phase 0B, 2026-10-04):** the Flex sleeve this item concerns is retired — its code was removed on `feat/orb-phase0b-retire-flex` and the sleeve is replaced by the ORB engine (`docs/specs/ORB_Engine_v1.0.md`). Last tree containing it: commit `01cfb40793f9374870124ea4252fe23a6cb12e5c`. Kept as history; do not act on it.
+
 From the 2026-08-10 Flex Sleeve Performance Ledger session (entry **#60**),
 Task F — recorded, deliberately NOT fixed this cycle (redesigning Phase C
 grading was explicitly out of scope for that PR). `collector/handler.py`'s
@@ -1504,6 +1530,8 @@ stamped) is measuring the wrong thing entirely, not just imprecisely.
   open and unaddressed.
 
 ### 63. Ladder numbers — pending Jorge's sanity check, NOW COVERS TWO LADDERS (HIGH — sizing decision, cross-refs #64/#71/#72)
+> **PARTLY SUPERSEDED (ORB Phase 0B, 2026-10-04):** the FLEX-conviction ladder half of this item is retired with the flex conviction path (`risk-limits.json → conviction`). The **core `thematic_conviction.ladder`** half is unaffected and still open.
+
 From the 2026-08-14 session (entry above). The `p_up_min` band edges and
 `target_pct_of_equity` values in `risk-limits.json → thematic_conviction.ladder`
 (0.52/0.58/0.65/0.75 → 0.50/1.25/2.5/4.0pp) and the `per_ticker_cap_pct_of_equity`
@@ -1584,6 +1612,8 @@ ramped in at `max_session_delta_pp`=1.5pp rather than jumping, the lifted symbol
 modest single-name lift.
 
 ### 67. Periodic quadrant roster review — semi-annual out-of-band task (MEDIUM — architecture, data-gated on screening universe)
+> **Note (ORB Phase 0B, 2026-10-04):** the "screening universe" this review was gated on was the retired catalyst-screen/flex candidate pipeline (removed from the collector). The roster review needs a new screening source; the doctrine (deterministic core, out-of-band review) is unchanged.
+
 **Decision (2026-08-14, Jorge).** AI-chosen core selection is **rejected for the
 daily path.** The core roster stays deterministic session-to-session and
 `CORE_ROSTER` / `sleeve-roles.json` remain the authoritative source every
@@ -1658,6 +1688,8 @@ the flex-conviction-path cycle (entry **#70**) that also depended on M5 — they
 share a prerequisite, not a scope.
 
 ### 71. G-2 decision gate — catalyst amplifier's combined effect on the flex conviction path (HIGH — sizing decision, cross-refs #63/#70)
+> **SUPERSEDED (ORB Phase 0B, 2026-10-04):** the Flex sleeve this item concerns is retired — its code was removed on `feat/orb-phase0b-retire-flex` and the sleeve is replaced by the ORB engine (`docs/specs/ORB_Engine_v1.0.md`). Last tree containing it: commit `01cfb40793f9374870124ea4252fe23a6cb12e5c`. Kept as history; do not act on it.
+
 From the 2026-08-14 flex-conviction-path session (entry **#70**). `risk-limits.json →
 conviction.catalyst_size_mult` (1.5) and `conviction.catalyst_promotes_band` (`true`)
 are BOTH on by default and compose (see `_conviction_catalyst_amplifier` — the
@@ -1674,6 +1706,8 @@ this is a risk-appetite call, not a correctness bug; the existing per-name/sleev
 caps still bind regardless of which option is chosen.
 
 ### 72. G-3 decision gate — momentum/relative-strength protection deliberately absent from the conviction path (MEDIUM — architecture decision, cross-refs #70)
+> **SUPERSEDED (ORB Phase 0B, 2026-10-04):** the Flex sleeve this item concerns is retired — its code was removed on `feat/orb-phase0b-retire-flex` and the sleeve is replaced by the ORB engine (`docs/specs/ORB_Engine_v1.0.md`). Last tree containing it: commit `01cfb40793f9374870124ea4252fe23a6cb12e5c`. Kept as history; do not act on it.
+
 From the 2026-08-14 flex-conviction-path session (entry **#70**). The catalyst path's
 Layer 2 (`build_flex_entry`) requires the entry to be above a RISING session VWAP
 (`above_vwap` + `vwap_slope > 0`) before triggering — a momentum/price-confirmation
@@ -1693,6 +1727,8 @@ since requiring RISING momentum would defeat the "enter early" design goal entir
 No recommendation.
 
 ### 73. Post-merge watch — first flex-conviction nomination reaching `confirm_sessions` (LOW — verification only, cross-refs #70)
+> **SUPERSEDED (ORB Phase 0B, 2026-10-04):** the Flex sleeve this item concerns is retired — its code was removed on `feat/orb-phase0b-retire-flex` and the sleeve is replaced by the ORB engine (`docs/specs/ORB_Engine_v1.0.md`). Last tree containing it: commit `01cfb40793f9374870124ea4252fe23a6cb12e5c`. Kept as history; do not act on it.
+
 From the 2026-08-14 flex-conviction-path session (entry **#70**). Mirrors entry
 **#66**'s thematic-conviction watch item, for the sibling flex path. The per-symbol
 hysteresis (`_confirm_flex_conviction_entry`) and the `flex_conviction` snapshot
@@ -1707,6 +1743,8 @@ expected band, and the applied `size_mult` ramped in at `max_session_delta_pct_o
 equity`=1.5 rather than jumping.
 
 ### 74. Post-merge watch — first flex-conviction entry through Layer 2, and the release-driven exit (LOW — verification only, cross-refs #70/#73)
+> **SUPERSEDED (ORB Phase 0B, 2026-10-04):** the Flex sleeve this item concerns is retired — its code was removed on `feat/orb-phase0b-retire-flex` and the sleeve is replaced by the ORB engine (`docs/specs/ORB_Engine_v1.0.md`). Last tree containing it: commit `01cfb40793f9374870124ea4252fe23a6cb12e5c`. Kept as history; do not act on it.
+
 From the 2026-08-14 flex-conviction-path session (entry **#70**). Once entry **#73**
 confirms a live active conviction nomination, the NEXT unobserved step is the actual
 `build_conviction_entry` firing intraday: the no-chase limit passing, the
@@ -1722,6 +1760,8 @@ sells the full remaining `qty_current`, cancels the resting stop first, and writ
 client only).
 
 ### 75. M-A decision gate — the flex conviction path's cash-accommodation clamp collapses the entire ladder (HIGH — architecture decision, blocking, cross-refs #63/#70)
+> **SUPERSEDED (ORB Phase 0B, 2026-10-04):** the Flex sleeve this item concerns is retired — its code was removed on `feat/orb-phase0b-retire-flex` and the sleeve is replaced by the ORB engine (`docs/specs/ORB_Engine_v1.0.md`). Last tree containing it: commit `01cfb40793f9374870124ea4252fe23a6cb12e5c`. Kept as history; do not act on it.
+
 From the PR #41 review round (M-A, blocking finding). `_cash_accommodation_
 shares` (`flex/entry.py`) funds a conviction entry from `min(literal_room,
 sleeve_room)` — but the flex engine has NO mechanism to sell SGOV to realize
@@ -1889,6 +1929,8 @@ probe demonstrating one of THESE inputs would have changed a real historical
 call.
 
 ### 58. `catalyst_score` weight tuning — gated on graded outcome rows (LOW — data-gated, do not touch early)
+> **SUPERSEDED (ORB Phase 0B, 2026-10-04):** the Flex sleeve this item concerns is retired — its code was removed on `feat/orb-phase0b-retire-flex` and the sleeve is replaced by the ORB engine (`docs/specs/ORB_Engine_v1.0.md`). Last tree containing it: commit `01cfb40793f9374870124ea4252fe23a6cb12e5c`. Kept as history; do not act on it.
+
 From the 2026-08-10 catalyst-sleeve-funnel session (entry **#57**). `src/collector/catalyst_screen.py`'s
 composite is deliberately EQUAL-WEIGHTED across its 6 components in v1 — the
 same #23 doctrine already applied to `sleeve_selection`'s momentum blend and
@@ -1937,6 +1979,8 @@ gate.
   silent non-decision.
 
 ### 59. Overnight/sector read-through investigation — gated on #34 + the `catalyst_screen` ledger (LOW — data-gated)
+> **SUPERSEDED (ORB Phase 0B, 2026-10-04):** the Flex sleeve this item concerns is retired — its code was removed on `feat/orb-phase0b-retire-flex` and the sleeve is replaced by the ORB engine (`docs/specs/ORB_Engine_v1.0.md`). Last tree containing it: commit `01cfb40793f9374870124ea4252fe23a6cb12e5c`. Kept as history; do not act on it.
+
 From the 2026-08-10 catalyst-sleeve-funnel session (entry **#57**). Once (a)
 FOLLOWUPS **#34** (`global_overnight` tone block) has an actual answer from
 `scripts/probe_fmp_tier.py` run with a live key, and (b) `catalyst_screen.ledger`
@@ -2833,6 +2877,8 @@ trades, $19.7K enforced notional), auto-exec submitted, all 11 filled at Alpaca.
   filled after a SEP. LOW.
 
 ### 34. `global_overnight` tone block — pre-open tactical signal (MEDIUM — flex-facing)
+> **PARTLY SUPERSEDED (ORB Phase 0B, 2026-10-04):** its "flex-facing" consumer (the intraday catalyst engine) is retired. Whether a `global_overnight` block is worth building for the analyzer or for ORB's pre-open step is undecided; the probe question (FMP Starter coverage) stands.
+
 **Motivation (account holder, 2026-07-04):** the collector's 09:00 ET run is the ideal
 capture point for the overnight global session — Asia closed (final), Europe five
 hours into its day, US pre-market pricing the sum — and none of it currently reaches
