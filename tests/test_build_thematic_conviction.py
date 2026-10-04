@@ -51,13 +51,14 @@ def test_non_selected_pool_member_nomination_rejected():
     assert reasons.get("SOXX") == "non_selected_pool_member"
 
 
-def test_non_roster_ticker_routes_to_flex_no_core_reference():
-    """MU is not in CORE_ROSTER (and not quarantined here) -> routes to flex,
-    never receives a core reference weight."""
+def test_non_roster_ticker_is_report_only_no_core_reference():
+    """MU is not in CORE_ROSTER (and not quarantined here) -> report-only (R4: the
+    label for NEW rows is non_roster_report_only), never receives a core reference
+    weight."""
     block, new_states = _build_thematic_conviction(RL, [_nom("MU")], {}, set(), {}, {})
     flex_entries = [e for e in block["excluded"] if e["symbol"] == "MU"]
     assert len(flex_entries) == 1
-    assert flex_entries[0]["reason"] == "routed_to_flex"
+    assert flex_entries[0]["reason"] == "non_roster_report_only"
     assert flex_entries[0]["flex_source"] == "thematic"
     assert block["active"] == []
     assert "MU" not in new_states
@@ -130,3 +131,18 @@ def test_damping_factor_applied_to_ladder_target():
     _, states1 = _build_thematic_conviction(RL, noms, {}, set(), {}, calib)
     block2, _ = _build_thematic_conviction(RL, noms, states1, set(), {}, calib)
     assert block2["active"][0]["target_pct_of_equity"] == 1.25   # 2.5 * 0.5
+
+
+def test_r4_new_rows_never_use_the_retired_routed_to_flex_label():
+    """R4 (Part B): the label for NEW rows is non_roster_report_only. Historical
+    `excluded[]` entries live only in immutable daily-snapshot blobs — no collector
+    code path reads or rewrites a past entry — so the old label must not survive
+    anywhere in the module that emits them."""
+    import inspect
+
+    import collector.handler as ch
+    block, _ = _build_thematic_conviction(RL, [_nom("MU"), _nom("NVDA")], {}, set(), {}, {})
+    reasons = {e["symbol"]: e["reason"] for e in block["excluded"] if e["symbol"] in ("MU", "NVDA")}
+    assert reasons == {"MU": "non_roster_report_only", "NVDA": "non_roster_report_only"}
+    assert all(e["reason"] != "routed_to_flex" for e in block["excluded"])
+    assert "routed_to_flex" not in inspect.getsource(ch)

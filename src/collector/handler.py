@@ -290,6 +290,13 @@ _WATCH_CANDIDATE_RE = re.compile(r'^[A-Z][A-Z0-9.\-]{0,9}$')
 _ETF_WATCHLIST = ["IDVO", "IDMO", "AIA"]
 
 _STOCK_NEWS_LIMIT = 100
+# U2 (Part B, 2026-10): the news-hits baseline restarts. The stock-news symbol list is
+# held-only again (it had been widened to held + flex candidates + movers), so rows
+# written under the wider list are not comparable. Every NEW row carries this tag and
+# the baseline (z-score history AND persistent-theme streak) counts only rows that
+# carry it; older rows stay in the blob, unused, until they roll out of the
+# `news_baseline_window_sessions` window. No production write is needed.
+_NEWS_HISTORY_BASIS = "held_only"
 # Phase C §5: horizons (calendar days) at which a recommendation's outcome vs SPY
 # is stamped onto its TradeHistory row.
 _OUTCOME_HORIZONS = [30, 60, 90]
@@ -789,15 +796,14 @@ def _load_equity_spy_series(
 
 
 def _build_price_universe(
-    tickers: list[str], flex_candidate_tickers: list[str],
+    tickers: list[str],
     effective_selected: dict[str, str] | None = None,
 ) -> list[str]:
     """The EOD-price fetch list: held tickers, every role's EFFECTIVE `selected`
-    incumbent, the ETF watchlist, and flex candidates (order-preserving, deduped).
+    incumbent, the ETF watchlist and the leading-growth extras (order-preserving,
+    deduped).
 
-    Flex candidates are included so the analyzer can size a buy (weight→shares
-    needs a price) and so gatekeeper G2 sees a price for the candidate. Every
-    role's `selected` incumbent is included (2026-07-13 audit finding 1) because
+    Every role's `selected` incumbent is included (2026-07-13 audit finding 1) because
     those are exactly the names `reference_weights` can target — a name with no
     held position and no other reason to be fetched (e.g. KMLM, IEF, VXUS while
     unheld) previously had no price, no gap row, and no way for band enforcement
@@ -809,134 +815,13 @@ def _build_price_universe(
     """
     return list(dict.fromkeys(
         tickers + list(selected_core_members(effective_selected)) + _ETF_WATCHLIST
-        + list(_LEADING_GROWTH_EXTRAS) + flex_candidate_tickers
+        + list(_LEADING_GROWTH_EXTRAS)
     ))
-
-
-def _correct_10x_ingestion_error(
-    price_now: float, high_52: float, low_52: float,
-) -> tuple[float, bool, str]:
-    """R1 (2026-08-06 audit) — ingestion-level 10x sanity CORRECTION, applied
-    BEFORE the quarantine backstop below. A feed off by a clean factor of ~10x
-    (a decimal-place / cents-vs-dollars mixup) against its OWN 52-week range
-    can be corrected at the source instead of merely re-quarantining the same
-    bad print every session forever (observed: MU printing ~10x its real
-    price every session, never corrected). Only corrects when the RESULT
-    lands back inside a generous band around the 52-week range — never
-    guesses a correction that doesn't itself look sane.
-
-    Returns ``(price, corrected, note)``; ``note`` is ``""`` when uncorrected.
-    Never raises — any bad input just returns the original price uncorrected.
-    """
-    if high_52 <= 0 or low_52 <= 0 or price_now <= 0:
-        return price_now, False, ""
-    mid = (high_52 + low_52) / 2.0
-    if mid <= 0:
-        return price_now, False, ""
-    ratio = price_now / mid
-    sane_lo, sane_hi = low_52 * 0.5, high_52 * 1.5
-    if 7.0 <= ratio <= 13.0:
-        candidate = price_now / 10.0
-        if sane_lo <= candidate <= sane_hi:
-            return candidate, True, (
-                f"price {price_now:.2f} is ~10x the 52-wk range midpoint {mid:.2f} — "
-                f"corrected to {candidate:.2f} at ingestion"
-            )
-    elif 0.07 <= ratio <= 0.13:
-        candidate = price_now * 10.0
-        if sane_lo <= candidate <= sane_hi:
-            return candidate, True, (
-                f"price {price_now:.2f} is ~1/10th the 52-wk range midpoint {mid:.2f} — "
-                f"corrected to {candidate:.2f} at ingestion"
-            )
-    return price_now, False, ""
-
-
-def _quarantine_flex_price(
-    profile: dict,
-    prices: dict,
-    prior_prices: dict,
-    company_news: dict,
-    cfg: dict,
-) -> tuple[bool, str]:
-    """Task E (F7): structural price-sanity guard for flex candidates.
-
-    Returns (quarantined: bool, reason: str).
-    First applies the R1 (2026-08-06 audit) 10x ingestion CORRECTION — when it
-    fires, ``prices[sym]["c"]`` and ``profile`` are updated in place (the fix
-    at the SOURCE) and the corrected price feeds the checks below. Quarantine
-    (the backstop, unchanged) fires when:
-      1. Price (post-correction) is outside the symbol's 52-week high/low
-         range by > range_pct, OR
-      2. Price moved > single_day_move_pct vs prior snapshot EOD without a
-         corroborating news hit in company_news for that symbol.
-
-    Never raises — returns (False, "") on any input error.
-    """
-    sym = (profile.get("symbol") or "").upper()
-    if not sym:
-        return False, ""
-    q_cfg = cfg.get("price_quarantine") or {}
-    range_pct = float(q_cfg.get("range_pct", 20.0))
-    move_pct = float(q_cfg.get("single_day_move_pct", 50.0))
-
-    price_now_raw = (prices.get(sym) or {}).get("c")
-    if price_now_raw is None:
-        return False, ""  # no price — can't quarantine on data we don't have
-    try:
-        price_now = float(price_now_raw)
-    except (TypeError, ValueError):
-        return False, ""
-
-    try:
-        high_52 = float(profile.get("yearHigh") or 0)
-        low_52 = float(profile.get("yearLow") or 0)
-    except (TypeError, ValueError):
-        high_52 = low_52 = 0.0
-
-    # --- Gate 0: 10x ingestion correction (source fix, before quarantine) ---
-    corrected_price, was_corrected, correction_note = _correct_10x_ingestion_error(
-        price_now, high_52, low_52)
-    if was_corrected:
-        prices[sym]["c"] = corrected_price
-        profile["price_corrected_10x"] = True
-        profile["price_correction_note"] = correction_note
-        logger.warning("Flex candidate %s: %s", sym, correction_note)
-        price_now = corrected_price
-
-    # --- Gate 1: 52-week range check (backstop) ------------------------------
-    if high_52 > 0 and low_52 > 0:
-        # Allow a range_pct% overshoot beyond either bound before quarantining.
-        if price_now > high_52 * (1 + range_pct / 100.0):
-            return True, (f"price {price_now:.2f} is >{range_pct}% above 52-wk high {high_52:.2f} "
-                          f"— possible data error")
-        if price_now < low_52 * (1 - range_pct / 100.0):
-            return True, (f"price {price_now:.2f} is >{range_pct}% below 52-wk low {low_52:.2f} "
-                          f"— possible data error")
-
-    # --- Gate 2: large single-day move without news corroboration -----------
-    price_prev_raw = (prior_prices.get(sym) or {}).get("c")
-    if price_prev_raw is not None:
-        try:
-            price_prev = float(price_prev_raw)
-            if price_prev > 0:
-                delta_pct = abs((price_now / price_prev - 1.0) * 100.0)
-                if delta_pct > move_pct:
-                    # Check for corroborating news (any item in company_news for this symbol).
-                    news_items = company_news.get(sym) or []
-                    if not news_items:
-                        return True, (f"price moved {delta_pct:.1f}% vs prior snapshot "
-                                      f"({price_prev:.2f}→{price_now:.2f}) with no news corroboration "
-                                      f"— possible bad print")
-        except (TypeError, ValueError, ZeroDivisionError):
-            pass
-
-    return False, ""
 
 
 def _filter_earnings_to_universe(rows: list[dict], universe) -> list[dict]:
     """Keep only earnings-calendar rows whose symbol is in the book's universe
-    (held ∪ every role's `selected` ∪ flex candidates ∪ currently-held legacy exits).
+    (held ∪ every role's `selected` ∪ currently-held legacy exits).
 
     FMP's earnings-calendar endpoint returns the MARKET-WIDE calendar; writing it
     unfiltered both buries held names' confirmed dates and pads the snapshot with
@@ -2505,12 +2390,12 @@ def run() -> None:
     # selected_core_members(effective_selected) includes a freshly auto-switched
     # incumbent (e.g. IHE) so its earnings date is never dropped mid-rotation.
     _earn_universe = (set(tickers) | set(selected_core_members(effective_selected))
-                      | set(flex_candidate_tickers) | (set(tickers) & set(LEGACY_EXITS)))
+                      | (set(tickers) & set(LEGACY_EXITS)))
     _earn_pre = len(earnings_raw)
     earnings           = _filter_earnings_to_universe(earnings_raw, _earn_universe)
     logger.info("Earnings calendar filtered to book universe: %d → %d rows",
                 _earn_pre, len(earnings))
-    _news_symbols = list(dict.fromkeys(tickers + flex_candidate_tickers))
+    _news_symbols = list(dict.fromkeys(tickers))
     stock_news         = fmp.get_stock_news(_news_symbols, limit=_STOCK_NEWS_LIMIT)
     etf_holdings: dict = {etf: fmp.get_etf_holdings(etf) for etf in _ETF_WATCHLIST}
     etf_country: dict  = {etf: fmp.get_etf_country_weights(etf) for etf in _ETF_WATCHLIST}
@@ -2585,23 +2470,10 @@ def run() -> None:
     logger.info("FRED: %d series collected", sum(1 for v in macro_data.values() if v))
 
     # --- EOD prices (FMP batch-quote, single call) --------------------------
-    all_tickers = _build_price_universe(tickers, flex_candidate_tickers, effective_selected)
+    all_tickers = _build_price_universe(tickers, effective_selected)
     prices = fmp.get_eod_prices(all_tickers)
-    logger.info("FMP prices: %d/%d collected (universe: held+selected-core+watchlist+flex)",
+    logger.info("FMP prices: %d/%d collected (universe: held+selected-core+watchlist)",
                 len(prices), len(all_tickers))
-
-    # Task E (F7): load prior snapshot prices for the quarantine delta check.
-    _prior_prices: dict = {}
-    try:
-        d0 = date.fromisoformat(today)
-        for _back in range(1, 8):
-            _prior_snap = read_json_blob("daily-snapshots",
-                                         f"{(d0 - timedelta(days=_back)).isoformat()}.json")
-            if isinstance(_prior_snap, dict) and _prior_snap.get("prices"):
-                _prior_prices = _prior_snap["prices"]
-                break
-    except Exception:  # noqa: BLE001
-        logger.debug("Price quarantine: could not load prior snapshot prices (non-fatal)")
 
     # --- Regional rotation pre-compute --------------------------------------
     regional_rotation = _build_regional_rotation(fmp, macro_data)
@@ -2624,25 +2496,6 @@ def run() -> None:
 
     logger.info("Finnhub: %d market news, %d company news items",
                 len(market_news), sum(len(v) for v in company_news.values()))
-
-    # --- Task E (F7): price-sanity quarantine for flex candidates -----------
-    # Apply after company_news is available (needed for news-corroboration gate).
-    _quarantine_cfg = _load_risk_limits()
-    _quarantined_count = 0
-    for _fcp in flex_candidate_profiles:
-        _quar, _quar_reason = _quarantine_flex_price(
-            _fcp, prices, _prior_prices, company_news, _quarantine_cfg)
-        if _quar:
-            _fcp["price_quarantined"] = True
-            _fcp["quarantine_reason"] = _quar_reason
-            _quarantined_count += 1
-            logger.warning(
-                "Flex candidate %s QUARANTINED: %s",
-                _fcp.get("symbol"), _quar_reason,
-            )
-    if _quarantined_count:
-        logger.info("Price quarantine: %d/%d flex candidates quarantined",
-                    _quarantined_count, len(flex_candidate_profiles))
 
     # --- Market shock detector (short-horizon moves + news keyword scan) ----
     bond_signals = _build_bond_signals(macro_data)
@@ -2693,12 +2546,7 @@ def run() -> None:
         _news_hist_window = int(
             (_load_risk_limits().get("market_shock") or {}).get("news_baseline_window_sessions", 20))
         _news_hist_updated = [h for h in _news_hist if h.get("date") != today]
-        _news_hist_updated.append({
-            "date": today,
-            "total_hits": market_shock.get("news_hits_total", 0),
-            "hits_by_category": market_shock.get("news_hits_by_category", {}),
-            "dominant_category": _dominant_cat,
-        })
+        _news_hist_updated.append(_news_history_row(today, market_shock, _dominant_cat))
         _news_hist_updated = _news_hist_updated[-_news_hist_window:]
         write_json_blob("market-shock", "news-hits-history.json", _news_hist_updated)
     except Exception:  # noqa: BLE001
@@ -2999,14 +2847,12 @@ def run() -> None:
     # as a floor lift). One-session lag: reads the PRIOR day's LLM-emitted
     # nominations, applies eligibility/caps/hysteresis. Non-fatal.
     thematic_conviction: dict = {"available": False}
+    # U3 (Part B): the price-quarantine set was sourced from flex candidate profiles; with
+    # the quarantine gone it is always empty (the parameter stays on the pure builders).
     _tc_quarantined: set[str] = set()
     try:
         _tc_prev_noms = _load_prior_thematic_nominations(today)
         _tc_prev_states = _load_thematic_state()
-        _tc_quarantined = {
-            str(p.get("symbol") or "").upper()
-            for p in flex_candidate_profiles if p.get("price_quarantined")
-        }
         _tc_calibration = _build_thematic_calibration(_load_risk_limits())
         thematic_conviction, _tc_new_states = _build_thematic_conviction(
             _load_risk_limits(), _tc_prev_noms, _tc_prev_states,
@@ -7071,7 +6917,7 @@ def _build_thematic_conviction(
             # it is routed to flex instead. Recorded for visibility; no core
             # hysteresis/target applies to it.
             excluded.append({
-                "symbol": sym, "reason": "routed_to_flex",
+                "symbol": sym, "reason": "non_roster_report_only",
                 "flex_source": "thematic", "theme": nom.get("theme"),
             })
             continue
@@ -10960,6 +10806,18 @@ def _build_flex_review(
     }
 
 
+def _news_history_row(today: str, market_shock: dict, dominant_category: str | None) -> dict:
+    """One persisted `market-shock/news-hits-history.json` row. Every NEW row carries
+    `basis: _NEWS_HISTORY_BASIS` (U2) — the baseline counts only rows that do."""
+    return {
+        "date": today,
+        "total_hits": market_shock.get("news_hits_total", 0),
+        "hits_by_category": market_shock.get("news_hits_by_category", {}),
+        "dominant_category": dominant_category,
+        "basis": _NEWS_HISTORY_BASIS,
+    }
+
+
 def _build_market_shock(
     fmp: FMPClient,
     macro_data: dict,
@@ -11202,7 +11060,7 @@ def _build_market_shock(
     persistent_floor = float(_mscfg.get("persistent_theme_hits_floor", 15.0))
     no_baseline_floor = float(_mscfg.get("no_baseline_watch_floor_hits", 5))
 
-    hist = news_hits_history or []
+    hist = [h for h in (news_hits_history or []) if h.get("basis") == _NEWS_HISTORY_BASIS]
     hist_counts = [float(h["total_hits"]) for h in hist if isinstance(h.get("total_hits"), (int, float))]
     news_z: float | None = None
     if len(hist_counts) >= min_baseline:

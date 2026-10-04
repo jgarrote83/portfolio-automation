@@ -2,7 +2,7 @@
 
 The reference can target any role's `selected` incumbent (sleeve-roles.json), but
 the collector's price fetch previously only covered held tickers + the ETF
-watchlist + flex candidates — an unheld reference target (KMLM, IEF, VXUS, XLV,
+watchlist + flex candidates (flex candidates left the universe in Part B) — an unheld reference target (KMLM, IEF, VXUS, XLV,
 USMV, COWZ, VTIP, ...) had no price, no gap row, and no way for band enforcement
 to synthesize the buy that would close its underweight. Run:
     PYTHONPATH=src pytest tests/test_price_universe.py
@@ -32,18 +32,18 @@ def test_selected_core_members_deduped_and_upper():
 def test_price_universe_includes_unheld_reference_targets():
     """None of these are held, in the ETF watchlist, or a flex candidate — only
     Task A's selected-core-members addition puts them in the fetch list."""
-    universe = _build_price_universe(tickers=["SPY", "QQQ"], flex_candidate_tickers=[])
+    universe = _build_price_universe(tickers=["SPY", "QQQ"])
     for sym in ("KMLM", "IEF", "VXUS", "XLV", "USMV", "COWZ", "VTIP"):
         assert sym in universe
 
 
 def test_price_universe_dedupes_preserving_first_occurrence_order():
-    universe = _build_price_universe(tickers=["SMH", "SPY"], flex_candidate_tickers=["SMH"])
+    universe = _build_price_universe(tickers=["SMH", "SPY", "SMH"])
     assert universe.count("SMH") == 1
-    assert universe.index("SMH") == 0   # held ticker order wins over selected-core/flex
+    assert universe.index("SMH") == 0   # held ticker order wins over selected-core
 
 
-def test_price_universe_includes_watchlist_and_flex_candidates():
-    universe = _build_price_universe(tickers=[], flex_candidate_tickers=["MU"])
+def test_price_universe_includes_watchlist_and_nothing_flex():
+    universe = _build_price_universe(tickers=[])
     assert "AIA" in universe   # _ETF_WATCHLIST member
-    assert "MU" in universe
+    assert "MU" not in universe   # a non-roster flex name is no longer fetched

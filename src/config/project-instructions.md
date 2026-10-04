@@ -1721,7 +1721,7 @@ A single JSON snapshot for one trading day containing:
   config), `per_ticker_cap_pct_of_equity`, `aggregate_cap_pct_of_equity`, `eligible_universe`
   (CORE_ROSTER names currently eligible for a lift), `excluded` (`{symbol, reason}` —
   `legacy_exit` / `price_quarantined` / `non_selected_pool_member` / `insufficient_evidence`
-  / `routed_to_flex`), `active[]` (confirmed, currently-applied entries — each
+  / `non_roster_report_only`), `active[]` (confirmed, currently-applied entries — each
   `{symbol, p_up, conviction, target_pct_of_equity, applied_pct_of_equity, theme, evidence,
   confirm_streak, review_date}`), `pending[]` (building toward confirmation, not yet applied),
   and `calibration` (`sample_size`, `brier_score`, `hit_rate`, `damping_factor`). **Already
@@ -2446,7 +2446,7 @@ reflect a theme directly` bullet points here.
 - **State honestly when a theme is real but the book has no eligible expression for it** —
   name the excluded ticker and cite its exact reason from `thematic_conviction.excluded`
   (`legacy_exit` / `price_quarantined` / `non_selected_pool_member` / `insufficient_evidence`
-  / `routed_to_flex`). Silence about an inexpressible theme is the exact failure this
+  / `non_roster_report_only`). Silence about an inexpressible theme is the exact failure this
   mechanism replaces — do not just drop the idea quietly.
 - **Cite `thematic_conviction.calibration`** (`sample_size`, `brier_score`, `hit_rate`,
   `damping_factor`) whenever proposing or maintaining ANY thematic weight. You may **not**

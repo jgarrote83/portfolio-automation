@@ -282,8 +282,7 @@ def test_config_commit_adopted_when_unpinned():
 
 def test_price_universe_includes_effective_incumbents():
     eff = {"healthcare_def": "IHE", "semis": "SOXX"}
-    universe = _build_price_universe(tickers=["SPY"], flex_candidate_tickers=[],
-                                     effective_selected=eff)
+    universe = _build_price_universe(tickers=["SPY"], effective_selected=eff)
     assert "IHE" in universe
     assert "SOXX" in universe
 
