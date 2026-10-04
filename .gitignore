@@ -62,3 +62,8 @@ memory/
 # -- decision J-4: offline-only local research data, never committed or put in
 # production blob storage.
 scripts/.alfred_cache/
+
+# ORB program
+.review/
+data/cache/
+reports/orb/
