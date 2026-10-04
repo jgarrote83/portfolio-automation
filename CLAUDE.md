@@ -81,6 +81,7 @@ portfolio-automation/
 │                              #   admission.py, config/regime-turns.json,
 │                              #   config/admission-rule.json — FOLLOWUPS #23, NEVER
 │                              #   imported by src/ or web/)
+├── backtest/                 # ORB offline backtest package (Phase 1 data layer: get_bars + parquet cache + SQLite manifest); NEVER deployed, own requirements.txt
 ├── tests/                    # pytest suite (PYTHONPATH=src)
 ├── .github/workflows/
 │   ├── ci.yml               # pytest + ruff on PR/push
@@ -746,7 +747,9 @@ The intl sleeve is the `intl_broad` (VXUS; pool VXUS/ACWX/IXUS) + `intl_leader` 
 
 ## ORB program (replacing Flex)
 
-**Spec: `docs/specs/ORB_Engine_v1.0.md` (source of truth; markdown-only, no paired .docx).** The Flex catalyst engine (`src/flex/`) and the DayTrade Lab (`src/daytrade/`) retire; a new `src/orb/` engine trades the 5-minute Opening Range Breakout on Stocks in Play inside the same 25% sleeve, unlevered, paper endpoint only. Phase 0 (retirement) is split: Part A (prep and map, no runtime change) then, after Jorge confirms production is flat, Part B (removal). Inventory: `docs/specs/ORB_Phase0_Retirement_Inventory.md`; shutdown steps: `docs/runbooks/ORB_Phase0_Flex_Shutdown.md`. Standing rules for every ORB phase:
+**Spec: `docs/specs/ORB_Engine_v1.0.md` (source of truth; markdown-only, no paired .docx).** The Flex catalyst engine (`src/flex/`) and the DayTrade Lab (`src/daytrade/`) retire; a new `src/orb/` engine trades the 5-minute Opening Range Breakout on Stocks in Play inside the same 25% sleeve, unlevered, paper endpoint only. Phase 0 (retirement) is split: Part A (prep and map, no runtime change) then, after Jorge confirms production is flat, Part B (removal). Inventory: `docs/specs/ORB_Phase0_Retirement_Inventory.md`; shutdown steps: `docs/runbooks/ORB_Phase0_Flex_Shutdown.md`. **ORB Phase 1 (backtest data layer) — built on `feat/orb-phase1-data-layer`.** `backtest/data/get_bars` is the only way a backtest reads market data (rule 6): cached in `data/cache/` (gitignored) with a SQLite manifest, holdout-guarded (`allow_holdout`), offline-capable, rate-limited to 180 req/min, read-only against `data.alpaca.markets` (+ the assets list). Keys come from a gitignored repo-root `.env` (`backtest/env.example` is the template) — never Key Vault, never printed. `backtest/requirements.txt` holds its dependencies (pandas, pyarrow); `src/requirements.txt` is untouched. See `backtest/README.md`. The IEX-vs-SIP report (`python -m backtest.iex_vs_sip`) reports numbers only — the $99/month SIP decision is Jorge's.
+
+Standing rules for every ORB phase:
 
 1. Work one phase at a time; a phase is done only when its checklist is ticked, `pytest` passes, `ruff` is clean and `FOLLOWUPS.md` records it.
 2. Read every strategy parameter from `src/orb/config.py`; any threshold change bumps `spec_version`.

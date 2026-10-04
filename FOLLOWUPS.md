@@ -663,6 +663,18 @@ wiped them.
 
 ## Open
 
+### 116. ORB Phase 1 — backtest data layer (HIGH — program, unblocks Phase 2; branch `feat/orb-phase1-data-layer`, not merged)
+Built per `docs/specs/ORB_Engine_v1.0.md` Phase 1: `backtest/data/` (`get_bars`, parquet cache, SQLite
+manifest, 180 req/min limiter, holdout guard, offline mode, assets incl. inactive) + `backtest/iex_vs_sip.py`
++ 58 mocked-HTTP tests. Nothing under `src/`, `infra/`, `web/`; the only `.github/` change is CI's
+install line (adds `backtest/requirements.txt`). **Open:** (1) the IEX-vs-SIP report has NOT been run on
+real data — it needs Alpaca paper keys in a gitignored `.env` (`backtest/env.example`) and takes hours on a
+cold cache; `.review/phase1-iex-vs-sip.md` is PENDING until then; (2) the $99/month SIP question is
+Jorge's and the reviewer's, decided from that report; (3) optional `scripts/warm_cache.py` not built (the CLI
+prefills any range); (4) design notes worth knowing: trading days are derived from SPY daily bars (no trading-API
+calendar), the assets list lives on the Trading API host (`GET /v2/assets` only), and the one-file-per-symbol-month
+layout means ~375k small daily-bar files for the full universe.
+
 ### 113. ORB program — Phase 0 (retire Flex and the DayTrade Lab) (HIGH — program, blocks ORB Phases 1-5)
 Opened 2026-10-04 (branch `feat/orb-phase0a-retirement-prep`). The Flex catalyst engine
 (`src/flex/`, `FLEX_ENABLED=true` live) and the DayTrade Lab (`src/daytrade/`,

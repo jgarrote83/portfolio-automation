@@ -109,10 +109,10 @@ get_bars(symbols, start, end, timeframe="1Min", feed="sip") -> pandas.DataFrame
 
 Test windows: develop on January 2024 to December 2025; hold out January–September 2026 and run it once, after a strategy is chosen.
 
-- [ ] `backtest/data/` with `get_bars`, the manifest and the rate limiter
-- [ ] Tests with a mocked Alpaca client: a repeated call makes zero API calls, an interrupted write leaves no partial file, empty days are recorded
-- [ ] IEX vs. SIP report: daily overlap of the two top-20 lists across 2024–2025; high overlap means the free real-time feed could replace the $99 plan
-- [ ] Optional `scripts/warm_cache.py` to prefill a date range overnight
+- [x] `backtest/data/` with `get_bars`, the manifest and the rate limiter
+- [x] Tests with a mocked Alpaca client: a repeated call makes zero API calls, an interrupted write leaves no partial file, empty days are recorded
+- [ ] IEX vs. SIP report: daily overlap of the two top-20 lists across 2024–2025; high overlap means the free real-time feed could replace the $99 plan *(code + tests done; the real run is PENDING — no `.env` keys yet)*
+- [ ] Optional `scripts/warm_cache.py` to prefill a date range overnight *(not built; `python -m backtest.data.cli bars …` prefills any range)*
 
 Live trading needs no separate data store: the ORB engine builds its candidate list from Alpaca each morning (Phase 4), using whichever volume basis the IEX vs. SIP report supports.
 
