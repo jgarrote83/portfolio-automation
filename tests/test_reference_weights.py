@@ -108,6 +108,15 @@ def test_sums_to_about_100():
     assert abs(_total(rw) - 100.0) < 0.5
 
 
+def test_rule_text_no_longer_mentions_the_retired_flex_sleeve():
+    """Part B fix-up, decision (d): `reference_weights.rule` is echoed to the analyzer; it must
+    not describe a sleeve that no longer exists. The rest of the sentence is unchanged."""
+    g, i = _axes("rising", "falling")
+    rw = _build(_paper({"SPY": 20, "QQQ": 20, "SGOV": 10}), g, i, _gate("open", "dovish"))
+    assert "flex" not in rw["rule"].lower()
+    assert rw["rule"].endswith("AMZN/GOOGL never forced down; cash sleeve held to its band.")
+
+
 def test_floor_respected_no_sleeve_below_floor():
     g, i = _axes("rising", "falling")  # Q1: damper names go to floor
     rw = _build(_paper({"SPY": 30, "GLD": 20, "TLT": 10, "SGOV": 10}), g, i, _gate("open", "dovish"))

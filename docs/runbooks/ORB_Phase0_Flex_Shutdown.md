@@ -227,4 +227,90 @@ $s | ConvertTo-Json -Depth 10 | Set-Content kill-switch.cleared.json -Encoding u
 Get-Content kill-switch.cleared.json    # confirm cleared_at is present and non-empty
 az storage blob upload --account-name $acct --subscription $sub --auth-mode login -c flex-ledger -n kill-switch.json -f kill-switch.cleared.json --overwrite --no-progress
 ```
-**Expect:** after the next in-hours tick the blob reads `tripped: false` and entries resume (the engine re-evaluates the drawdown and hit-rate arms from the closed-trade ledger, so a genuinely tripped condition would re-trip on its own). Alternatively restore the pre-trip file saved in step 2b with `--overwrite`. If `FLEX_ENABLED` was already removed by a later Part B deploy, rollback also needs that change reverted through Bicep — the trip alone is not enough.
+**Expect:** after the next in-hours tick the blob reads `tripped: false` and entries resume (the engine re-evaluates the drawdown and hit-rate arms from the closed-trade ledger, so a genuinely tripped condition would re-trip on its own). Alternatively restore the pre-trip file saved in step 2b with `--overwrite`. After a Part B deploy the engine code itself is gone, so clearing the trip resumes nothing — rolling back then means redeploying the pre-Part-B commit (`01cfb40793f9374870124ea4252fe23a6cb12e5c`) through the deploy workflows, which also restores the `FLEX_ENABLED` / `DAYTRADE_ENABLED` Bicep lines (see Step 9's last paragraph). Before Part B deploys, if `FLEX_ENABLED` was already removed, rollback also needs that change reverted through Bicep — the trip alone is not enough.
+
+
+## Step 9 — Post-deploy verification (after Part B has been merged and deployed; all read-only)
+
+Run this after **both** deploys have finished (the code deploy and the `infra/**` deploy that removes `FLEX_ENABLED` / `DAYTRADE_ENABLED`). Same scope rule as everywhere: subscription `EasyGridsProduction`, resource group `rg-portfolio-automation-prod`, data-plane names verified in Step 1 (re-run its ownership check first if this is a fresh shell). Nothing here writes to Azure. Use the **ET trading date** for `$d`.
+
+```powershell
+$sub = "EasyGridsProduction"; $rg = "rg-portfolio-automation-prod"; $acct = "stpfautoprod"
+$d = "<YYYY-MM-DD>"      # the first trading day whose 09:00 ET collector run happened AFTER the deploy
+```
+
+**9a. The deploys themselves succeeded** (GitHub CLI, read-only; not Azure):
+```powershell
+gh run list --workflow "Deploy function code" --limit 3
+gh run list --workflow "Deploy Infrastructure" --limit 3
+```
+**Expect:** the latest run of each is `completed` / `success`, on the Part B merge commit. (Workflow display names: "Deploy function code", "Deploy Infrastructure"; `gh workflow list` shows them.)
+
+**9b. The function list shows no Flex/DayTrade functions:**
+```powershell
+$names = az functionapp function list -n func-pfauto -g $rg --subscription $sub --query "[].name" -o tsv |
+  ForEach-Object { ($_ -split '/')[-1] } | Sort-Object
+$names -join ", "
+$names | Where-Object { $_ -match '^(flex|daytrade)' }     # must print NOTHING
+```
+**Expect exactly:** `analyzer, auto_executor, auto_executor_retry, backfill, collector, executor, learning_reviewer, learning_run, seeder` (nine functions — the same nine `function_app.py` registers; verified from the code, not yet against the live host), and no line from the second command. The five that must be gone are `flex_intraday`, `flex`, `daytrade_manage`, `daytrade_nominate`, `daytrade`. If the CLI returns nothing for this Flex Consumption app (not verified), use the portal's Functions blade for `func-pfauto` instead.
+
+**9c. The app settings no longer carry the switches** (names only — no values are printed):
+```powershell
+az functionapp config appsettings list -n func-pfauto -g $rg --subscription $sub `
+  --query "[?starts_with(name,'FLEX_') || starts_with(name,'DAYTRADE_')].name" -o tsv
+```
+**Expect: no output.** Any `FLEX_*` / `DAYTRADE_*` name means the infra deploy did not take (or an `az` change re-added it) — stop and tell me.
+
+**9d. The next collector run wrote its snapshot, and the snapshot is clean.** The collector fires at 09:00 ET on weekdays.
+```powershell
+az storage blob show --account-name $acct --subscription $sub --auth-mode login -c daily-snapshots -n "$d.json" `
+  --query "{lastModified:properties.lastModified, bytes:properties.contentLength}" -o json
+az storage blob download --account-name $acct --subscription $sub --auth-mode login -c daily-snapshots -n "$d.json" -f snap.json --no-progress | Out-Null
+$s = Get-Content snap.json -Raw | ConvertFrom-Json
+$s.PSObject.Properties.Name | Where-Object { $_ -match '^(flex|catalyst|earnings_calendar_market)' }    # must print NOTHING
+"market_shock: news_hits_zscore=[$($s.market_shock.news_hits_zscore)]  news_level=$($s.market_shock.news_level)  shock_level=$($s.market_shock.shock_level)"
+```
+**Expect:** `lastModified` shortly after 09:00 ET on `$d`; a size in the same ballpark as recent snapshots (~1 MB; it loses the flex candidate profiles and the catalyst blocks, so a modest drop is normal); no `flex_*`, `catalyst_screen` or `earnings_calendar_market` keys; and `news_hits_zscore=[]` (null — the **no-baseline path**) with `news_level` of `0` or `1` (the no-baseline watch floor caps news-alone at 1). If `news_hits_zscore` is a number on the first run, the U2 basis filter did not take — stop and tell me.
+
+**9e. The news-hits baseline restarted on the new basis:**
+```powershell
+az storage blob download --account-name $acct --subscription $sub --auth-mode login -c market-shock -n news-hits-history.json -f nh.json --no-progress | Out-Null
+$h = @(Get-Content nh.json -Raw | ConvertFrom-Json)
+$h[-1] | Select-Object date, total_hits, basis
+"tagged rows: $(@($h | Where-Object basis -eq 'held_only').Count) of $($h.Count)"
+```
+**Expect:** the last row is dated `$d` with `basis` = `held_only`; `tagged rows` is `1` after the first post-deploy run and grows by one per session; older untagged rows are still in the file (unused) until they roll out of the 20-row window. The z-score stays `null` until 10 tagged sessions have accrued.
+
+**9f. The analyzer completed — the removed `FLEX_SCHEMA_V1` assertion must not be missed.** The analyzer runs when the snapshot lands (allow ~10–20 minutes after 09:00 ET). This is the step that catches a deploy where the old prompt-gate and the new prompt disagree: if the deployed analyzer still asserted the Flex markers it would have refused to run and no report would exist.
+```powershell
+az storage blob show --account-name $acct --subscription $sub --auth-mode login -c daily-reports -n "$d.md"   --query properties.lastModified -o tsv
+az storage blob show --account-name $acct --subscription $sub --auth-mode login -c daily-trades  -n "$d.json" --query properties.lastModified -o tsv
+az storage blob download --account-name $acct --subscription $sub --auth-mode login -c daily-reports -n "$d.md"   -f report.md  --no-progress | Out-Null
+az storage blob download --account-name $acct --subscription $sub --auth-mode login -c daily-trades  -n "$d.json" -f trades.json --no-progress | Out-Null
+Select-String -Path report.md -Pattern 'FLEX_SCHEMA|flex_nominations|\*\*Flex\*\*|\[FLEX\]|Themes & flex'   # must print NOTHING
+$t = Get-Content trades.json -Raw | ConvertFrom-Json
+$t.PSObject.Properties.Name | Where-Object { $_ -in 'flex_nominations','watch_candidates' }               # must print NOTHING
+"validation_error: [$($t.validation_error)]   trades: $(@($t.trades).Count)"
+```
+**Expect:** both blobs exist with a `lastModified` after the snapshot's; the report has no Flex dashboard row or Flex section (the prompt no longer has them); the trades file has no `flex_nominations` / `watch_candidates` keys; `validation_error: []` (absent/false — a `True` means the Tier-1 validator crashed and the auto-executor will refuse the file). Then confirm there was no startup/assertion failure in Application Insights (Logs):
+```kusto
+traces     | where timestamp > ago(1d) | where message has "flex schema markers" or message has "Refusing to run" | project timestamp, message
+exceptions | where timestamp > ago(1d) | project timestamp, cloud_RoleName, type, outerMessage | order by timestamp desc | take 20
+requests   | where timestamp > ago(1d) | where name in ("collector", "analyzer") | project timestamp, name, success, resultCode
+```
+**Expect:** no rows from the first query; no flex/daytrade/import-related exceptions from the second (an `ImportError` here would mean a deleted module is still referenced); and `success == true` for the post-deploy `collector` and `analyzer` rows in the third.
+
+**9g. The retired engine is really not running:**
+```powershell
+az storage blob list --account-name $acct --subscription $sub --auth-mode login -c flex-state --prefix $d --query "[].name" -o tsv
+```
+**Expect: no output** — the retired engine writes a `flex-state/{date}.json` on every in-hours tick; none for `$d` means it is not running. (Historical blobs from earlier dates stay; they are archived, not deleted.)
+
+**9h. Alpaca is still flat** (the Flex ledger and its orders must stay empty — re-run Step 4's check):
+```powershell
+python scripts/orb_phase0_flat_check.py
+```
+**Expect:** `VERDICT: FLAT -- kill switch tripped; …` (the sticky trip blob is still there). `NOT SAFE`/`NOT FLAT` after the deploy means something re-opened; stop and tell me.
+
+**If any check fails:** do not re-enable Flex. Stop and tell me; the rollback is a human action — redeploy the pre-Part-B commit (`01cfb40793f9374870124ea4252fe23a6cb12e5c`) through the deploy workflows (`gh workflow run "Deploy function code" --ref <sha>`; infra via its own workflow), which also restores the `FLEX_ENABLED` / `DAYTRADE_ENABLED` Bicep lines. Clearing the kill-switch trip (Step 8) alone resumes nothing once the engine code is gone.

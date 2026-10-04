@@ -239,13 +239,15 @@ _RISK_LIMITS_DEFAULTS = {
 
 _ETF_WATCHLIST = ["IDVO", "IDMO", "AIA"]
 
-_STOCK_NEWS_LIMIT = 100
+_STOCK_NEWS_LIMIT = 30   # the held-only default, restored with the held-only symbol list (U2 fix-up)
 # U2 (Part B, 2026-10): the news-hits baseline restarts. The stock-news symbol list is
 # held-only again (it had been widened to held + flex candidates + movers), so rows
 # written under the wider list are not comparable. Every NEW row carries this tag and
 # the baseline (z-score history AND persistent-theme streak) counts only rows that
 # carry it; older rows stay in the blob, unused, until they roll out of the
-# `news_baseline_window_sessions` window. No production write is needed.
+# `news_baseline_window_sessions` window. No production write is needed. The article
+# limit is back at 30 (the client default, and the value before the list was widened) for
+# the same reason: the fresh baseline must start on its final basis.
 _NEWS_HISTORY_BASIS = "held_only"
 # Phase C §5: horizons (calendar days) at which a recommendation's outcome vs SPY
 # is stamped onto its TradeHistory row.
@@ -8203,7 +8205,7 @@ def _build_reference_weights(
             "only via a falsifiable, magnitude-bounded, logged override (de-risk cheap / "
             "re-risk dear). Deterministic + echoed; never re-derive. Active quadrant "
             "capped at the ceiling; every core sleeve floored; AMZN/GOOGL never forced "
-            "down; cash sleeve held to its band; flex is a separate sleeve."
+            "down; cash sleeve held to its band."
         ),
     }
 
