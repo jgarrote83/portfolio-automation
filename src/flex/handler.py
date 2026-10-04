@@ -24,7 +24,7 @@ from flex.exit_state import build_flex_exit_state
 from flex.killswitch import evaluate_kill_switch
 from flex.ledger import new_entry, read_ledger, write_ledger
 from flex.reconcile import reconcile_ledger
-from flex.separation import flex_separation_set
+from shared.separation import flex_separation_set
 from shared.clients.alpaca import AlpacaClient
 from shared.keyvault import load_secrets
 from shared.storage import (

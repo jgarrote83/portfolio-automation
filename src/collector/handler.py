@@ -47,10 +47,7 @@ from shared.quadrants import (
     selected_for_role,
     selection_config,
 )
-from flex import trades as flex_trades
-from flex.config import load_flex_config
-from flex.indicators import avg_dollar_volume
-from flex.separation import FLEX_REENTERABLE, flex_separation_set
+from shared.separation import FLEX_REENTERABLE, flex_separation_set
 from shared.reference_execution import (
     REFERENCE_EXECUTION_DEFAULTS,
     advance_settling_window,
@@ -58,7 +55,6 @@ from shared.reference_execution import (
     resolve_settling_tranche_cap,
 )
 from shared.overrides import evaluate_falsifier
-from collector import catalyst_screen
 
 logger = logging.getLogger(__name__)
 
@@ -293,88 +289,7 @@ _DYNAMIC_WALKBACK_DAYS = 7
 _WATCH_CANDIDATE_RE = re.compile(r'^[A-Z][A-Z0-9.\-]{0,9}$')
 _ETF_WATCHLIST = ["IDVO", "IDMO", "AIA"]
 
-# --- Catalyst-sleeve funnel (Task A/B/D, session 2026-08-10) ----------------
-# G1 fix: the market-wide earnings calendar was fetched then discarded outright
-# (_filter_earnings_to_universe). Row cap for the market-wide subset now
-# emitted alongside the book's own `earnings_calendar` — protects snapshot size
-# since the calendar row carries no volume/market-cap field to screen on
-# directly (the real ADV floor applies downstream, once a name is promoted to
-# the catalyst screen and its price history is fetched). `_TICKER_FORMAT_RE` is
-# a cheap proxy that drops obvious non-common-stock symbols (class shares,
-# warrants, OTC/foreign suffixes) before the count cap is applied.
-_EARNINGS_MARKET_CAP = 40
-_TICKER_FORMAT_RE = re.compile(r'^[A-Z]{1,5}$')
-# G3 fix: how many genuinely-new (never held, never nominated) candidates get
-# their profile + full daily-bar history fetched per run (2 FMP calls each —
-# the only recurring cost this funnel adds; see FOLLOWUPS + the PR body for
-# the daily delta). Decision gate 3 (PR body): proposed default, not yet
-# confirmed by the account holder.
-_CATALYST_DISCOVERY_CAP = 25
-# How many of the scored, screened survivors get nominated into flex_candidates
-# each run (Task D spec default).
-_CATALYST_TOP_N = 15
-_CATALYST_MIN_COMPONENTS = catalyst_screen.MIN_COMPONENTS_RANKABLE
-# Forward window for the earnings_proximity component — mirrors the earnings
-# calendar's own 2-week fetch horizon (`to_2w` below), so nothing in
-# `earnings_market` can fall outside the window earnings_proximity scores.
-_CATALYST_EARNINGS_HORIZON_DAYS = 14
-# News lookback (calendar days) for the news_recency component, and the
-# get_stock_news article limit — bumped from the held-only default (30) now
-# that the symbol list is much larger (decision gate 3, PR body).
-_CATALYST_NEWS_LOOKBACK_DAYS = 7
-# N1 (2026-09-12) — the news window for the MOVERS discovery intersection AND
-# the `news_recency` component's own decay horizon, in HOURS. The old 7-CALENDAR-DAY
-# lookback paired a week-old headline (still scoring 0.14) with a sleeve that
-# holds ~2 days. Decision gate G-2: 24 proposed, not confirmed.
-_FLEX_NEWS_WINDOW_H = 24
-# N1 hard price screen (amendment G-7, proposed). The live mover union is ~19%
-# sub-$1 and ~42% sub-$5 — a pump-and-dump surface the ADV floor alone does not
-# defend ($1 x 50M shares clears a $50M floor on the day a name is promoted).
-_FLEX_MIN_PRICE_USD = 5.00
-# Trailing window + cap for the volume_surge component (N1): today's volume as a
-# multiple of its own trailing average. 3.0x or more scores a full 1.0.
-_CATALYST_VOLUME_WINDOW_D = 20
-_CATALYST_VOLUME_CAP_X = 3.0
 _STOCK_NEWS_LIMIT = 100
-# Trailing trading-day window + symmetric clamp for the momentum component.
-_CATALYST_MOMENTUM_WINDOW_D = 10
-_CATALYST_MOMENTUM_CAP_PCT = 15.0
-# relative_strength (Task D, 2026-08-14 flex-conviction-path cycle) — 60
-# trading days matches the SAME window `regional_rotation`'s rotation-score
-# dashboard already reports daily (the "EUAD +17.37pp / EWZ -13.39pp" figure);
-# echoing that window rather than inventing a new one keeps the two numbers
-# reconcilable. Cap is wider than momentum's own 15% (an ETF's 60d excess vs
-# SPY realistically swings further than a 10d raw price move) but the SAME
-# symmetric-clamp mechanism. Kept as bare module constants alongside the
-# other catalyst_screen tuning knobs immediately above/below (this
-# subsystem's own established pattern) rather than introducing a new config
-# section for a single sibling component.
-_CATALYST_RELATIVE_STRENGTH_WINDOW_D = 60
-_CATALYST_RELATIVE_STRENGTH_CAP_PCT = 20.0
-# Congressional-purchase cluster size that scores a full 1.0 political_flow.
-_CATALYST_POLITICAL_CAP = 5
-# Minimum close-price observations for the "price history present" hard filter.
-# NOT a literal ATR presence check — the integrated FMP historical-price-eod
-# /light endpoint returns close+volume only (no high/low); see the Task C
-# probe + catalyst_screen.py's module docstring for the full finding. Matches
-# avg_dollar_volume's own 20-day window (no point requiring more than its
-# consumer needs).
-_CATALYST_MIN_PRICE_OBS = 20
-# Company-level tone keyword sets for the news_tone component — mirrors the
-# `_SHOCK_KEYWORDS` scan shape/style above (Task B): same headline+summary
-# text extraction, same first-match-per-item-per-category counting.
-_CATALYST_TONE_KEYWORDS: dict[str, list[str]] = {
-    "positive": [
-        "beats", "beat estimates", "raises guidance", "record revenue",
-        "upgrade", "outperform", "strong demand", "contract win", "expands",
-        "surpasses", "accelerating growth", "buyback", "new order", "wins bid",
-    ],
-    "negative": [
-        "misses", "miss estimates", "cuts guidance", "downgrade",
-        "underperform", "weak demand", "recall", "investigation", "lawsuit",
-        "delisting", "restatement", "resigns", "layoffs", "guidance cut",
-    ],
-}
 # Phase C §5: horizons (calendar days) at which a recommendation's outcome vs SPY
 # is stamped onto its TradeHistory row.
 _OUTCOME_HORIZONS = [30, 60, 90]
@@ -464,7 +379,7 @@ def _load_flex_candidates(
     dynamic list is exactly the newest trades file's emission; re-emit a name to
     keep it in the funnel (A-G1 default: simplest, no stale ledger). See FOLLOWUPS #8 v2.
     """
-    from flex.separation import FLEX_REENTERABLE, flex_separation_set
+    from shared.separation import FLEX_REENTERABLE, flex_separation_set
 
     # --- Static seed ---------------------------------------------------------
     static_names: list[str] = []
@@ -1030,183 +945,6 @@ def _filter_earnings_to_universe(rows: list[dict], universe) -> list[dict]:
     report listed MCD/MPC/REZI/HALO — none held). Row schema preserved."""
     keep = {str(s).upper() for s in (universe or ())}
     return [r for r in (rows or []) if str(r.get("symbol") or "").upper() in keep]
-
-
-def _screen_earnings_market_rows(
-    rows: list[dict], universe, cap: int,
-) -> tuple[list[dict], int]:
-    """Task A (2026-08-10 catalyst-sleeve funnel, G1 fix) — the market-wide rows
-    NOT already covered by the book's own `earnings_calendar` (this is the
-    ADDITIONAL subset; existing consumers of `earnings_calendar` are untouched).
-
-    The calendar row carries no volume/market-cap field, so there is no ADV/size
-    figure to screen on directly here — `_TICKER_FORMAT_RE` is a cheap PROXY
-    (plain 1-5 letter tickers only, dropping class shares / warrants / OTC-style
-    suffixes) rather than a true liquidity floor; the real ADV floor applies
-    downstream once a name is promoted to the catalyst screen (Task D) and its
-    price history is fetched. Capped at `cap` rows, nearest-dated first, so the
-    snapshot never balloons on a heavy earnings week. Returns
-    ``(kept_rows, dropped_by_cap_count)``.
-    """
-    seen = {str(s).upper() for s in (universe or ())}
-    candidates = [
-        r for r in (rows or [])
-        if _TICKER_FORMAT_RE.match(str(r.get("symbol") or "").upper())
-        and str(r.get("symbol") or "").upper() not in seen
-    ]
-    candidates.sort(key=lambda r: r.get("date") or "9999-99-99")
-    kept = candidates[:cap]
-    dropped = len(candidates) - len(kept)
-    return kept, dropped
-
-
-def _build_catalyst_screen(
-    discovery: list[str],
-    profiles_by_symbol: dict[str, dict],
-    bars_by_symbol: dict[str, list[dict]],
-    earnings_market_rows: list[dict],
-    stock_news: list[dict],
-    congressional: list[dict],
-    held: set[str],
-    exclude: set[str],
-    legacy_blocked: set[str],
-    min_adv_usd: float,
-    today: str,
-    top_n: int,
-    close_by_date: dict[str, dict[str, float]] | None = None,
-    now_iso: str | None = None,
-) -> dict:
-    """Task D (2026-08-10 catalyst-sleeve funnel, G3 fix) — scores the catalyst
-    discovery universe and returns the `catalyst_screen` snapshot block.
-
-    Everything passed in is ALREADY FETCHED (no I/O here) — this is the
-    collector-side glue that shapes raw FMP/Quiver/Finnhub data into
-    `catalyst_screen`'s per-candidate input contract. The
-    flex_candidates MERGE (appending to collector-local mutable lists, running
-    the price-quarantine guard) has side effects and stays in `collect()` —
-    this function only returns the block, it never mutates its inputs.
-    """
-    # N1: `news_recency` is scored in HOURS now, so the screen needs a real
-    # timestamp. Defaults to midnight of `today` when the caller omits it — the
-    # conservative (older) reading, never fabricated freshness.
-    now_iso = now_iso or f"{today} 00:00:00"
-    earnings_dates: dict[str, str] = {}
-    for r in earnings_market_rows or ():
-        sym = str(r.get("symbol") or "").upper()
-        if sym and r.get("date") and sym not in earnings_dates:
-            earnings_dates[sym] = r["date"]
-
-    news_by_symbol = catalyst_screen.group_news_by_symbol(stock_news)
-
-    # Political-flow cluster count: congressional PURCHASE rows only (a buy
-    # cluster is the standard bullish-attention reading; Quiver's field name
-    # for transaction direction varies by response vintage, so several
-    # aliases are checked — a missing/unrecognized field degrades to 0
-    # (absent, per composite_score's own absent-vs-zero handling) rather than
-    # fabricating a direction).
-    political_counts: dict[str, int] = {}
-    for r in congressional or ():
-        sym = (r.get("Ticker") or r.get("ticker") or "").upper()
-        if not sym:
-            continue
-        txn = str(r.get("Transaction") or r.get("transaction")
-                   or r.get("TransactionType") or "").lower()
-        if "purchase" in txn or "buy" in txn:
-            political_counts[sym] = political_counts.get(sym, 0) + 1
-
-    close_by_date = close_by_date or {}
-    spy_closes = close_by_date.get("SPY") or {}
-    candidates = []
-    for sym in discovery:
-        profile = profiles_by_symbol.get(sym) or {}
-        bars = bars_by_symbol.get(sym) or []
-        adv = avg_dollar_volume(bars) if bars else None
-        items = news_by_symbol.get(sym) or []
-        hits = catalyst_screen.keyword_hits(items, _CATALYST_TONE_KEYWORDS)
-        raw_momentum = catalyst_screen.momentum_from_bars(bars, _CATALYST_MOMENTUM_WINDOW_D)
-        raw_volume_surge = catalyst_screen.volume_surge_from_bars(
-            bars, _CATALYST_VOLUME_WINDOW_D)
-        # G-10 (2026-09-12) — dry-window instrumentation, DESCRIBE-ONLY. Feeds no
-        # component and no gate; it exists so the fixed-vs-ATR-scaled barrier
-        # question (§8.1) is settled on measured data instead of an assumed ATR.
-        raw_noise_band = catalyst_screen.mean_abs_daily_move_pct(
-            bars, _CATALYST_VOLUME_WINDOW_D)
-        raw_rel_strength = catalyst_screen.relative_strength_from_closes(
-            close_by_date.get(sym) or {}, spy_closes, _CATALYST_RELATIVE_STRENGTH_WINDOW_D)
-        # D-priority-4 (2026-08-14 flex-conviction-path cycle): FMP's own
-        # isEtf/isFund profile booleans, not sector-string inference (a sector
-        # field is frequently absent or unreliable for a fund) — determines
-        # which components are structurally not_applicable vs merely
-        # missing_data (see catalyst_screen.applicable_components).
-        _is_fund = bool(profile.get("isEtf")) or bool(profile.get("isFund"))
-        candidates.append({
-            "symbol": sym,
-            "applicable": catalyst_screen.applicable_components(_is_fund),
-            "screen": {
-                "held": sym in held,
-                "separated": sym in exclude,
-                "non_reenterable_legacy": sym in legacy_blocked,
-                "has_price_data": len(bars) >= _CATALYST_MIN_PRICE_OBS,
-                "adv_usd": adv,
-                "min_adv_usd": min_adv_usd,
-            },
-            "components": {
-                "earnings_proximity": catalyst_screen.earnings_proximity_score(
-                    earnings_dates.get(sym), today, _CATALYST_EARNINGS_HORIZON_DAYS),
-                "news_recency": catalyst_screen.news_recency_score(
-                    catalyst_screen.hours_since_latest_news(items, now_iso),
-                    _FLEX_NEWS_WINDOW_H),
-                "news_tone": catalyst_screen.news_tone_score(
-                    bool(items), hits["positive"], hits["negative"]),
-                "momentum": catalyst_screen.momentum_score(
-                    raw_momentum, _CATALYST_MOMENTUM_CAP_PCT),
-                "volume_surge": catalyst_screen.volume_surge_score(
-                    raw_volume_surge, _CATALYST_VOLUME_CAP_X),
-                "political_flow": catalyst_screen.political_flow_score(
-                    political_counts.get(sym, 0), _CATALYST_POLITICAL_CAP),
-                "relative_strength": catalyst_screen.relative_strength_score(
-                    raw_rel_strength, _CATALYST_RELATIVE_STRENGTH_CAP_PCT),
-            },
-            "basis": {
-                "sector": profile.get("sector"),
-                "is_fund": _is_fund,
-                # G-10: routine noise band vs the B2 stop. NOT an ATR (the light
-                # endpoint has no high/low) — see mean_abs_daily_move_pct.
-                "mean_abs_daily_move_pct_20d": raw_noise_band,
-                "b2_stop_pct": 1.5,
-                "stop_vs_noise_band": (
-                    round(1.5 / raw_noise_band, 3) if raw_noise_band else None
-                ),
-                "adv_usd": adv,
-                "price_observations": len(bars),
-                "earnings_date": earnings_dates.get(sym),
-                "news_item_count": len(items),
-                "news_positive_hits": hits["positive"],
-                "news_negative_hits": hits["negative"],
-                "political_purchase_count": political_counts.get(sym, 0),
-                "momentum_raw_pct": raw_momentum,
-                "relative_strength_raw_pct": raw_rel_strength,
-            },
-        })
-
-    result = catalyst_screen.build_ranking_ledger(candidates, top_n)
-    return {
-        "available": True,
-        "discovery_universe": discovery,
-        "discovery_cap": _CATALYST_DISCOVERY_CAP,
-        "top_n": top_n,
-        "min_components_rankable": _CATALYST_MIN_COMPONENTS,
-        # N1/R2 (2026-09-12) — the rankability contract and the discovery
-        # screens, echoed so a zero-nomination session is diagnosable from the
-        # snapshot alone rather than by reading the source.
-        "required_component": catalyst_screen.REQUIRED_COMPONENT,
-        "price_confirmation_components": list(catalyst_screen.PRICE_CONFIRMATION_COMPONENTS),
-        "news_window_hours": _FLEX_NEWS_WINDOW_H,
-        "min_price_usd": _FLEX_MIN_PRICE_USD,
-        "discovery_source": "movers",
-        "ledger": result["ledger"],
-        "nominated": result["nominated"],
-    }
 
 
 def _roster_closes(prices: dict | None) -> dict:
@@ -2772,69 +2510,8 @@ def run() -> None:
     earnings           = _filter_earnings_to_universe(earnings_raw, _earn_universe)
     logger.info("Earnings calendar filtered to book universe: %d → %d rows",
                 _earn_pre, len(earnings))
-    # Task A (G1 fix): the market-wide rows are no longer simply discarded — the
-    # ADDITIONAL subset (not already in the book's universe) is screened + capped
-    # and emitted separately. API cost: zero — `earnings_raw` is already fetched
-    # above; these rows were being thrown away, not re-fetched.
-    _earn_market_rows, _earn_market_dropped = _screen_earnings_market_rows(
-        earnings_raw, _earn_universe, _EARNINGS_MARKET_CAP,
-    )
-    earnings_calendar_market: dict = {
-        "rows": _earn_market_rows,
-        "cap": _EARNINGS_MARKET_CAP,
-        "dropped_by_cap": _earn_market_dropped,
-    }
-    logger.info("Earnings calendar market-wide (Task A): %d kept (cap=%d), %d dropped by cap",
-                len(_earn_market_rows), _EARNINGS_MARKET_CAP, _earn_market_dropped)
-
-    # --- Catalyst discovery universe (Task D early phase, G3 fix) ------------
-    # Genuinely NEW names — never held, never in the static/dynamic flex-
-    # candidate lists — sourced from the two market-wide feeds above at zero
-    # incremental API cost (earnings_calendar_market + congressional). Computed
-    # here, before the (now-extended) stock_news fetch, so news gets fetched for
-    # the FULL discovery set rather than a pre-ranked slice: the eventual
-    # ranking depends on news_recency/news_tone as inputs, so cutting the
-    # symbol list by a preliminary rank before fetching news would starve
-    # exactly the component that should help decide the cut.
-    _catalyst_exclude = (
-        set(tickers) | set(flex_candidate_tickers)
-        | flex_separation_set(set(tickers))
-        | (set(LEGACY_EXITS) - FLEX_REENTERABLE)
-    )
-    # N1 (2026-09-12) — MOVERS discovery. Two market-wide calls (not per-symbol);
-    # endpoint availability verified live on Starter 2026-09-12 (FOLLOWUPS #34).
-    # Non-fatal: an endpoint failure degrades to an empty mover list, which
-    # yields an empty discovery set and a `available: True, nominated: []`
-    # catalyst_screen — never a lost snapshot.
-    _mover_rows: list[dict] = []
-    try:
-        _mover_rows = list(fmp.get_most_actives()) + list(fmp.get_biggest_gainers())
-    except Exception:  # noqa: BLE001
-        logger.exception("Movers fetch failed (non-fatal) — discovery will be empty")
-
-    # The news intersection needs news BEFORE discovery can be cut, so news is
-    # fetched for the FULL mover union up front. Still ONE call regardless of
-    # symbol-list size (verified against the client — see
-    # scripts/probe_fmp_tier.py and tests/test_catalyst_news.py), so widening
-    # the list costs nothing in call count.
-    _mover_syms = [str((r or {}).get("symbol") or "").upper() for r in _mover_rows]
-    _news_symbols = list(dict.fromkeys(
-        tickers + flex_candidate_tickers + [x for x in _mover_syms if x]))
+    _news_symbols = list(dict.fromkeys(tickers + flex_candidate_tickers))
     stock_news         = fmp.get_stock_news(_news_symbols, limit=_STOCK_NEWS_LIMIT)
-    _news_by_sym = catalyst_screen.group_news_by_symbol(stock_news)
-    _catalyst_discovery, _discovery_dropped = catalyst_screen.movers_discovery_symbols(
-        _mover_rows, _news_by_sym, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-        _catalyst_exclude, _CATALYST_DISCOVERY_CAP,
-        _FLEX_NEWS_WINDOW_H, _FLEX_MIN_PRICE_USD,
-    )
-    logger.info(
-        "Catalyst discovery (movers): %d mover rows -> %d discovered (cap=%d); "
-        "dropped: %d no_recent_news, %d below_min_price. Universe: %s",
-        len(_mover_rows), len(_catalyst_discovery), _CATALYST_DISCOVERY_CAP,
-        sum(1 for v in _discovery_dropped.values() if v == "no_recent_news"),
-        sum(1 for v in _discovery_dropped.values() if v == "below_min_price"),
-        _catalyst_discovery,
-    )
     etf_holdings: dict = {etf: fmp.get_etf_holdings(etf) for etf in _ETF_WATCHLIST}
     etf_country: dict  = {etf: fmp.get_etf_country_weights(etf) for etf in _ETF_WATCHLIST}
     etf_sector: dict   = {etf: fmp.get_etf_sector_weights(etf) for etf in _ETF_WATCHLIST}
@@ -3440,118 +3117,16 @@ def run() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Role selection build failed (non-fatal)")
 
-    # --- Catalyst screen: score the discovery universe, rank, nominate ------
-    # Task D (G3 fix). Non-fatal — a failure here
-    # must never block the snapshot; on failure the funnel falls back to the
-    # pre-existing static+dynamic flex_candidates only (unchanged behavior).
-    catalyst_screen_block: dict = {"available": False}
-    # Hoisted above the try (2026-08-14 flex-conviction-path cycle, Task B) so
-    # it's ALWAYS bound even if the try body below raises before reaching its
-    # own (re-)initialization — the flex-conviction block built further down
-    # this function reads it unconditionally and must never hit a NameError
-    # on a catalyst-screen failure day.
+    # Closes for the static/dynamic flex candidates + SPY — the only input the flex
+    # conviction block below still needs from the old catalyst-screen fetch loop
+    # (removed with the catalyst screen; this whole block goes with flex_conviction).
     _flex_close_cache: dict[str, dict[str, float]] = {}
     try:
-        _flex_cfg = load_flex_config()
-
-        # 2 FMP calls per discovery candidate (profile + historical price) — the
-        # only recurring cost this funnel adds; see the PR body for the daily
-        # delta. Historical rows come back DESCENDING (newest first) — reversed
-        # to ascending and reshaped to the {"c","v"} pair the shared indicator
-        # helpers expect (see catalyst_screen.py's data-availability note: no
-        # high/low on this endpoint, so no literal ATR here).
-        _cs_profiles: dict[str, dict] = {}
-        _cs_bars: dict[str, list[dict]] = {}
-        # Task D (2026-08-14 flex-conviction-path cycle): relative_strength
-        # (the 7th catalyst_screen component) needs a {date: close} map, not
-        # the ascending {"c","v"} list `momentum_from_bars` takes — reshaped
-        # from the SAME `_rows` fetch below at zero extra FMP calls for every
-        # discovery candidate. Static+dynamic flex_candidates (never in
-        # `_catalyst_discovery` — `_catalyst_exclude` excludes them) get their
-        # own fetch further below; this dict is shared across both.
-        _flex_close_cache: dict[str, dict[str, float]] = {}
-        for _sym in _catalyst_discovery:
-            _prof = fmp.get_profile(_sym)
-            if _prof:
-                _cs_profiles[_sym] = _prof
-            _rows = fmp.get_historical_price_light(_sym)
-            if _rows:
-                _cs_bars[_sym] = [
-                    {"c": r.get("price") if r.get("price") is not None else r.get("close"),
-                     "v": r.get("volume")}
-                    for r in reversed(_rows)
-                ]
-                _cache_row: dict[str, float] = {}
-                for _r in _rows:
-                    _d = _r.get("date")
-                    _c = _r.get("price") if _r.get("price") is not None else _r.get("close")
-                    if _d and _c is not None:
-                        try:
-                            _cache_row[str(_d)[:10]] = float(_c)
-                        except (TypeError, ValueError):
-                            continue
-                _flex_close_cache[_sym] = _cache_row
-        logger.info(
-            "Catalyst discovery fetch: %d/%d profiles, %d/%d price histories "
-            "(2 FMP calls/candidate)",
-            len(_cs_profiles), len(_catalyst_discovery),
-            len(_cs_bars), len(_catalyst_discovery),
-        )
-
-        # D-priority-2 (2026-08-14, re-scoped per decision): the static seed
-        # list + analyzer-emitted dynamic watch_candidates (flex_candidate_
-        # tickers) never went through the discovery fetch above, so they
-        # never had ENOUGH price history for relative_strength or the
-        # conviction path's base_rate_up (both need 60-500+ trading days;
-        # `_build_price_universe` only ever gave them a single EOD quote).
-        # ~14 tickers/day, one call each (A1 probe: well within the 250/day
-        # budget alongside the ~50/day discovery fetch already above).
         for _sym in flex_candidate_tickers:
-            if _sym in _flex_close_cache:
-                continue
             _flex_close_cache[_sym] = _close_by_date(fmp, _sym)
         _flex_close_cache["SPY"] = _close_by_date(fmp, "SPY")
-
-        catalyst_screen_block = _build_catalyst_screen(
-            _catalyst_discovery, _cs_profiles, _cs_bars, _earn_market_rows,
-            stock_news, congressional,
-            set(tickers), _catalyst_exclude, set(LEGACY_EXITS) - FLEX_REENTERABLE,
-            _flex_cfg.min_adv_usd, today, _CATALYST_TOP_N,
-            close_by_date=_flex_close_cache,
-            now_iso=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-        )
-        _cs_nominated = catalyst_screen_block["nominated"]
-
-        # Feed the nominees into flex_candidates (Task D final step) — same
-        # mechanism as the pre-existing static/dynamic merge, third provenance
-        # value "movers" (N1, 2026-09-12 — was "screened" when the universe was
-        # earnings+congressional), so each name's origin stays auditable. Nominees are
-        # ALSO run through the existing price-quarantine guard (F7) for
-        # consistency with every other flex candidate, and their already-fetched
-        # latest close is merged into `prices` directly — `_build_price_universe`
-        # already ran earlier in this function, so a nominee would otherwise have
-        # no price entry at all this run.
-        for _sym in _cs_nominated:
-            _nom_profile = dict(_cs_profiles.get(_sym) or {"symbol": _sym})
-            _nom_profile["source"] = "movers"
-            _nom_quar, _nom_quar_reason = _quarantine_flex_price(
-                _nom_profile, prices, _prior_prices, company_news, _quarantine_cfg)
-            if _nom_quar:
-                _nom_profile["price_quarantined"] = True
-                _nom_profile["quarantine_reason"] = _nom_quar_reason
-            flex_candidate_profiles.append(_nom_profile)
-            flex_candidate_tickers.append(_sym)
-            _flex_provenance[_sym] = "movers"
-            _nom_bars = _cs_bars.get(_sym) or []
-            if _sym not in prices and _nom_bars:
-                _latest = _nom_bars[-1]  # ascending order — last is most recent
-                prices[_sym] = {"c": _latest.get("c"), "v": _latest.get("v")}
-        logger.info(
-            "Catalyst screen: %d/%d nominated into flex_candidates: %s",
-            len(_cs_nominated), len(_catalyst_discovery), _cs_nominated or "none",
-        )
     except Exception:  # noqa: BLE001
-        logger.exception("Catalyst screen build failed (non-fatal)")
+        logger.exception("Flex candidate close fetch failed (non-fatal)")
 
     # --- Flex eligibility (Task C1) + flex conviction path (Task B/E, 2026-08-14 --
     # flex-conviction-path cycle). Independent of reference_weights (this is a
@@ -3617,19 +3192,6 @@ def run() -> None:
     # recent prior state (up to a week back). Non-fatal. The conviction-sleeve
     # flex_review was retired when Flex became a separate intraday engine.
     flex_state: dict = {"available": False}
-    # S1: read the engine's persisted kill-switch state (flex-ledger blob).
-    # Non-fatal and deliberately NOT re-evaluated here -- the engine owns the
-    # decision; the collector only echoes it, so the two can never disagree.
-    flex_kill_switch: dict = {"available": False}
-    try:
-        _ks = flex_trades.read_kill_switch_state()
-        if _ks:
-            flex_kill_switch = {"available": True, **_ks}
-        if _ks.get("tripped"):
-            logger.warning("Flex kill switch TRIPPED (%s): %s",
-                           _ks.get("trip_reason"), _ks.get("note"))
-    except Exception:  # noqa: BLE001
-        logger.exception("Flex kill-switch state read failed (non-fatal)")
     try:
         d0 = date.fromisoformat(today)
         for back in range(0, 8):
@@ -3922,8 +3484,6 @@ def run() -> None:
         "fundamentals": profiles,
         "flex_candidates": flex_candidate_profiles,
         "earnings_calendar": earnings,
-        "earnings_calendar_market": earnings_calendar_market,
-        "catalyst_screen": catalyst_screen_block,
         "stock_news": stock_news,
         "congressional_trades": congressional,
         "lobbying": lobbying,
@@ -3962,7 +3522,6 @@ def run() -> None:
         # engine's own persisted state so the report states plainly whether
         # the sleeve is live and why. Independent of FLEX_ENABLED -- a
         # tripped switch and a disabled engine are different facts.
-        "flex_kill_switch": flex_kill_switch,
         "performance": performance,
         "quadrant_performance": quadrant_performance,
         "track_record": track_record,
