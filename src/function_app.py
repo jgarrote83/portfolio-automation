@@ -1,16 +1,13 @@
 import json
 import logging
-import os
 from datetime import date
 
 import azure.functions as func
 
 from collector.handler import run as collector_run
 from analyzer.handler import analyze_snapshot
-from daytrade.handler import run_daytrade_manage, save_daytrade_nominations
 from executor.handler import execute_approvals, run_auto_execute
 from seeder.handler import seed_positions
-from flex.handler import run_flex_intraday
 from learning.handler import already_ran_today, is_first_saturday, run_cycle
 from shared.storage import read_blob_bytes
 
@@ -86,136 +83,6 @@ def auto_executor_retry(timer: func.TimerRequest) -> None:
     if timer.past_due:
         logger.warning("auto_executor_retry timer was past due — running now")
     run_auto_execute("auto_executor_retry")
-
-
-@app.timer_trigger(
-    # Every 15 min, weekdays. The cron is TIMEZONE-INDEPENDENT by design: market
-    # hours are NOT encoded — the engine gates on Alpaca's clock (is_open) inside
-    # run_flex_intraday, which is the DST-safe choice. Do NOT add a TZ-local note.
-    schedule="0 */15 * * * 1-5",
-    arg_name="timer",
-    run_on_startup=False,
-    use_monitor=True,
-)
-def flex_intraday(timer: func.TimerRequest) -> None:
-    """Intraday catalyst Flex engine. Gated by FLEX_ENABLED app setting.
-
-    Reconciles the flex ledger to Alpaca, manages held flex positions, and
-    enters confirmed nominations inside the morning window. Closed-market ticks
-    self-skip after the clock check (effectively free).
-    """
-    if os.getenv("FLEX_ENABLED", "false").lower() != "true":
-        logger.info("FLEX_ENABLED is not 'true' — skipping flex_intraday")
-        return
-    try:
-        result = run_flex_intraday()
-        logger.info("flex_intraday result: %s", result.get("status"))
-    except Exception:  # noqa: BLE001
-        logger.exception("flex_intraday failed")
-
-
-@app.route(
-    route="flex",
-    methods=["POST"],
-    auth_level=func.AuthLevel.FUNCTION,
-)
-def flex(req: func.HttpRequest) -> func.HttpResponse:
-    """Manual/dry-run invocation of the flex engine. Body: {"date"?, "dry_run"?}.
-
-    `dry_run=true` computes and persists the would-do state but places no orders —
-    use it to validate the engine before flipping FLEX_ENABLED on.
-    """
-    try:
-        body = req.get_json()
-    except ValueError:
-        body = {}
-    body = body or {}
-    date_str = body.get("date")
-    dry_run = bool(body.get("dry_run", False))
-    try:
-        result = run_flex_intraday(date_str=date_str, dry_run=dry_run)
-    except Exception as e:  # noqa: BLE001
-        logger.exception("flex run failed")
-        return func.HttpResponse(
-            json.dumps({"error": str(e)}), status_code=500, mimetype="application/json",
-        )
-    return func.HttpResponse(
-        json.dumps(result, default=str), status_code=200, mimetype="application/json",
-    )
-
-
-@app.timer_trigger(
-    # Every minute, weekdays. TIMEZONE-INDEPENDENT by design (repo doctrine):
-    # market hours are NOT encoded — the handler gates on the Alpaca clock and
-    # the calendar-derived session window [open−5m, open+110m]; outside it the
-    # tick is a fast no-op (~115 live ticks/day).
-    schedule="0 * * * * 1-5",
-    arg_name="timer",
-    run_on_startup=False,
-    use_monitor=False,   # 1-min cadence — monitor bookkeeping is pure overhead
-)
-def daytrade_manage(timer: func.TimerRequest) -> None:
-    """DayTrade Lab 1-min loop. Gated by the DAYTRADE_ENABLED app setting."""
-    if os.getenv("DAYTRADE_ENABLED", "false").lower() != "true":
-        return
-    try:
-        result = run_daytrade_manage()
-        status = result.get("status")
-        if status not in ("outside_window",):
-            logger.info("daytrade_manage result: %s", status)
-    except Exception:  # noqa: BLE001
-        logger.exception("daytrade_manage failed")
-
-
-@app.route(
-    route="daytrade_nominate",
-    methods=["POST"],
-    auth_level=func.AuthLevel.FUNCTION,
-)
-def daytrade_nominate(req: func.HttpRequest) -> func.HttpResponse:
-    """Manual pre-open nominations for the DayTrade Lab (spec §3).
-
-    Body: {date?, tone: risk_on|neutral|risk_off|carry_stress,
-    candidates: [{symbol, catalyst_note, catalyst_class|null}]}.
-    """
-    try:
-        body = req.get_json()
-    except ValueError:
-        body = {}
-    result = save_daytrade_nominations(body or {})
-    code = 400 if "error" in result else 200
-    return func.HttpResponse(
-        json.dumps(result, default=str), status_code=code, mimetype="application/json",
-    )
-
-
-@app.route(
-    route="daytrade",
-    methods=["POST"],
-    auth_level=func.AuthLevel.FUNCTION,
-)
-def daytrade(req: func.HttpRequest) -> func.HttpResponse:
-    """Manual/dry-run invocation of the DayTrade Lab tick. Body: {"date"?, "dry_run"?}.
-
-    `dry_run=true` computes (reconcile detection, validation, signals) but places
-    no orders — use it to validate before flipping DAYTRADE_ENABLED on.
-    """
-    try:
-        body = req.get_json()
-    except ValueError:
-        body = {}
-    body = body or {}
-    try:
-        result = run_daytrade_manage(date_str=body.get("date"),
-                                     dry_run=bool(body.get("dry_run", False)))
-    except Exception as e:  # noqa: BLE001
-        logger.exception("daytrade run failed")
-        return func.HttpResponse(
-            json.dumps({"error": str(e)}), status_code=500, mimetype="application/json",
-        )
-    return func.HttpResponse(
-        json.dumps(result, default=str), status_code=200, mimetype="application/json",
-    )
 
 
 @app.route(
