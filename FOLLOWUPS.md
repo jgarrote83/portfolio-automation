@@ -663,6 +663,24 @@ wiped them.
 
 ## Open
 
+### 113. ORB program — Phase 0 (retire Flex and the DayTrade Lab) (HIGH — program, blocks ORB Phases 1-5)
+Opened 2026-10-04 (branch `feat/orb-phase0a-retirement-prep`). The Flex catalyst engine
+(`src/flex/`, `FLEX_ENABLED=true` live) and the DayTrade Lab (`src/daytrade/`,
+`DAYTRADE_ENABLED=false`) are being replaced by the ORB engine (`src/orb/`) in the same
+25% sleeve. Spec: `docs/specs/ORB_Engine_v1.0.md`. Phase 0 is split because Flex holds
+positions up to 2 trading days under DAY stops the engine re-places every tick — deleting
+or disabling it while it holds positions would leave them unprotected.
+- **Part A (this branch, no runtime change):** spec + CLAUDE.md "ORB program" rules,
+  `docs/specs/ORB_Phase0_Retirement_Inventory.md` (every Flex/DayTrade reference classified
+  DELETE/DECOUPLE/PORT/KEEP/UNSURE + proposed Part B commit order),
+  `docs/runbooks/ORB_Phase0_Flex_Shutdown.md` (manual sticky kill-switch trip, wait for
+  flat, archive, rollback), `scripts/orb_phase0_flat_check.py` (read-only FLAT verdict).
+- **Jorge, between A and B:** run the runbook, trip the switch, wait until the flat check
+  says FLAT, answer the inventory's UNSURE questions.
+- **Part B (not started):** the removal PR, `FLEX_ENABLED`/`DAYTRADE_*` out of Bicep (never
+  `az` alone), `FLEX_SLEEVE_CAP_PCT` -> `ORB_SLEEVE_CAP_PCT`, SUPERSEDED banners, and marking
+  the Flex-related entries superseded. Existing Flex entries are deliberately NOT edited yet.
+
 ### 95. Settling window is applied PER SLEEVE, not as a session-aggregate envelope (HIGH — architecture decision, cross-refs the 2026-09-12 de-risk-classifier cycle + B3/G-2)
 From the 2026-09-12 de-risk-classifier cycle (`fix/20260912-derisk-classifier`,
 Task A4, deliberately left out of scope there). `resolve_settling_tranche_cap`
