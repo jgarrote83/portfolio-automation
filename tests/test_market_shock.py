@@ -59,6 +59,7 @@ def _history_day(total_hits: int, dominant: str | None, floor_hits: int) -> dict
         "total_hits": total_hits,
         "hits_by_category": {dominant: floor_hits} if dominant else {},
         "dominant_category": dominant,
+        "basis": "held_only",
     }
 
 
@@ -134,3 +135,67 @@ def test_reduced_shock_level_yields_operative_ceiling_below_25pct():
         else float(cash_band["ceiling"])
     )
     assert operative_ceiling < 25.0
+
+
+# --- U2 (Part B): the news baseline restarts on a held-only basis ---------------
+
+def _shock(history, hits=130):
+    fmp = _FakeFMP(_spy_rows(today_pct=2.0, background_pct=1.0))
+    macro = {"VIXCLS": _vix_rows(14.0, -6.0)}
+    return _build_market_shock(
+        fmp=fmp, macro_data=macro,
+        market_news=_news_items(hits), forex_news=[], stock_news=[], company_news={},
+        bond_signals=None, news_hits_history=history,
+    )
+
+
+def _untagged(total_hits=10, dominant="geopolitical", floor_hits=10):
+    row = _history_day(total_hits, dominant, floor_hits)
+    row.pop("basis")
+    return row
+
+
+def test_u2_rows_without_basis_are_excluded_from_the_baseline():
+    """20 old-basis rows (no `basis`) must NOT form a baseline: the detector enters its
+    designed no-baseline mode (z-score None, conservative watch floor)."""
+    result = _shock([_untagged() for _ in range(20)])
+    assert result["news_hits_zscore"] is None
+    assert result["news_level"] == 1          # no_baseline_watch_floor_hits, errs defensive
+    assert result["news_persistent_theme_streak"] == 1   # untagged rows do not extend it
+
+
+def test_u2_fewer_than_min_baseline_tagged_rows_takes_the_no_baseline_path():
+    from collector.handler import _load_risk_limits
+    min_n = int(_load_risk_limits()["market_shock"]["news_baseline_min_sessions"])
+    hist = [_untagged() for _ in range(20)] + [_history_day(10, "geopolitical", 10)
+                                                for _ in range(min_n - 1)]
+    assert _shock(hist)["news_hits_zscore"] is None
+    hist = hist + [_history_day(10, "geopolitical", 10)]          # now exactly min_n tagged
+    assert _shock(hist)["news_hits_zscore"] is not None
+
+
+def test_u2_baseline_uses_only_tagged_rows():
+    """Old untagged rows (wildly different level) must not move the z-score."""
+    tagged = [_history_day(10, "geopolitical", 10) for _ in range(15)]
+    noisy_untagged = [_untagged(total_hits=300) for _ in range(5)]
+    assert _shock(noisy_untagged + tagged)["news_hits_zscore"] == _shock(tagged)["news_hits_zscore"]
+
+
+def test_u2_new_history_rows_carry_the_basis_tag():
+    from collector.handler import _NEWS_HISTORY_BASIS, _news_history_row
+    row = _news_history_row("2026-10-05", {"news_hits_total": 7,
+                                           "news_hits_by_category": {"geopolitical": 7}},
+                            "geopolitical")
+    assert row["basis"] == _NEWS_HISTORY_BASIS == "held_only"
+    assert row["date"] == "2026-10-05" and row["total_hits"] == 7
+    assert row["dominant_category"] == "geopolitical"
+
+
+def test_u2_stock_news_symbols_are_held_only_in_the_collector_source():
+    """The widened symbol list (held + flex candidates + movers) is gone."""
+    import inspect
+
+    import collector.handler as ch
+    src = inspect.getsource(ch.run)
+    assert "_news_symbols = list(dict.fromkeys(tickers))" in src
+    assert "_mover" not in src and "flex_candidate_tickers + " not in src.split("_news_symbols")[1][:200]
