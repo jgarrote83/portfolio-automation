@@ -712,80 +712,10 @@ def _quadrant_series(points: list[dict], quadrant_map: dict) -> tuple[list[dict]
     return rows, coverage, meta
 
 
-def _sleeve_series(points: list[dict]) -> list[dict]:
-    """Flex sleeve contribution, cumulative from the WINDOW START (Flex Sleeve
-    Performance Ledger Task D) — deliberately NOT normalized to a start=100
-    buy-and-hold index like portfolio/spy/quadrants. The sleeve is
-    intermittently deployed and flat much of the time; indexing it the same
-    way would render simply opening a position as a "return" and make the
-    line meaningless. Each point is
-    ``{sleeve_contribution_pp, sleeve_trade_count}`` — both None (a gap, never
-    interpolated) whenever that day's mark or equity basis is unavailable.
-
-    ``points`` are rows from ``flex-ledger/equity-series.json`` already
-    filtered to the window (same cutoff as the portfolio/SPY series).
-    """
-    base_pp: float | None = None
-    base_trades: int | None = None
-    out: list[dict] = []
-    for p in points:
-        equity = p.get("total_equity")
-        realized = p.get("cumulative_realized_usd")
-        unrealized = p.get("unrealized_usd")
-        trades_to_date = p.get("closed_trades_to_date")
-
-        contribution = None
-        if equity and realized is not None and unrealized is not None:
-            raw_pp = (realized + unrealized) / equity * 100.0
-            if base_pp is None:
-                base_pp = raw_pp
-            contribution = round(raw_pp - base_pp, 4)
-
-        trade_count = None
-        if trades_to_date is not None:
-            if base_trades is None:
-                base_trades = trades_to_date
-            trade_count = trades_to_date - base_trades
-
-        out.append({"sleeve_contribution_pp": contribution, "sleeve_trade_count": trade_count})
-    return out
-
-
-def _attach_sleeve_series(payload: dict, cutoff_str: str) -> None:
-    """Best-effort attach of the flex sleeve panel data to a performance
-    response, mutating ``payload["series"]`` in place. An absent/malformed
-    blob must yield the response UNCHANGED (Task D) — the existing chart's
-    datasets must never break because this feature isn't populated yet, so
-    every failure mode here degrades to simply not adding the fields.
-    """
-    payload["sleeve_available"] = False
-    payload["sleeve_closed_trade_count_total"] = 0
-    try:
-        raw = _download_json("flex-ledger", "equity-series.json")
-        if not isinstance(raw, list) or not raw:
-            return
-        pts = [p for p in raw if isinstance(p, dict) and (p.get("date") or "") >= cutoff_str]
-        if not pts:
-            return
-        sleeve_rows = _sleeve_series(pts)
-        by_date = {p["date"]: row for p, row in zip(pts, sleeve_rows)}
-        for pt in payload.get("series") or []:
-            row = by_date.get(pt.get("date"))
-            if row:
-                pt["sleeve_contribution_pp"] = row["sleeve_contribution_pp"]
-                pt["sleeve_trade_count"] = row["sleeve_trade_count"]
-        payload["sleeve_available"] = True
-        payload["sleeve_closed_trade_count_total"] = int(raw[-1].get("closed_trades_to_date") or 0)
-    except Exception:  # noqa: BLE001
-        log.exception("sleeve series attach failed (non-fatal)")
-        payload["sleeve_available"] = False
-        payload["sleeve_closed_trade_count_total"] = 0
-
-
 def _attach_quadrant_accountability(payload: dict, snap: dict | None) -> None:
     """Best-effort attach of the regime-call accountability scorecard
     (`quadrant_performance`, PR #42 Task E) to a performance response.
-    Mirrors the `_attach_sleeve_series` contract exactly: an absent/malformed
+    An absent/malformed
     block must yield the response UNCHANGED except `quadrant_accountability`
     itself degrading to `{"available": False}` — never an exception, never a
     fabricated value. Echoes only — never recomputes an excess or a suspect
@@ -965,7 +895,6 @@ def performance(req: func.HttpRequest) -> func.HttpResponse:
                 "quadrant_config": qcfg or None,
                 "quadrant_index_meta": quadrant_index_meta,
             }
-            _attach_sleeve_series(payload, cutoff_str)
             _attach_quadrant_accountability(payload, snap)
             return _json(payload)
 
@@ -1033,7 +962,6 @@ def performance(req: func.HttpRequest) -> func.HttpResponse:
             "holdings": holdings,
             "balances": latest_balances,
         }
-        _attach_sleeve_series(payload, cutoff_str)
         _attach_quadrant_accountability(payload, snap if all_names else None)
         return _json(payload)
     except Exception as e:
