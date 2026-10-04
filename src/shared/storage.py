@@ -244,7 +244,7 @@ def _read_json_blob(container: str, name: str) -> dict | list | None:
     return json.loads(raw)
 
 
-# --- generic JSON / JSONL blob helpers (used by the flex engine) -------------
+# --- generic JSON / JSONL blob helpers ---------------------------------------
 
 def read_json_blob(container: str, name: str) -> dict | list | None:
     """Public best-effort JSON blob read (None if missing)."""
@@ -295,7 +295,7 @@ def read_jsonl_blob(container: str, name: str) -> list[dict]:
 def append_jsonl_blob(container: str, name: str, record: dict) -> None:
     """Append one JSON record as a line to a .jsonl blob (read-modify-write).
 
-    Fine for the flex per-tick decision audit (~26 lines/day). Best-effort:
+    Fine for a low-volume per-tick audit log (tens of lines/day). Best-effort:
     never raises so a logging failure can't break the trading loop.
     """
     try:

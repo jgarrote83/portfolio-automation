@@ -2985,10 +2985,6 @@ def run() -> None:
         "transition_watch": transition_watch,
         "thematic_conviction": thematic_conviction,
         "divergences": divergences,
-        # S1 (2026-09-13): the sleeve kill switch, read straight from the
-        # engine's own persisted state so the report states plainly whether
-        # the sleeve is live and why. Independent of FLEX_ENABLED -- a
-        # tripped switch and a disabled engine are different facts.
         "performance": performance,
         "quadrant_performance": quadrant_performance,
         "track_record": track_record,
@@ -3275,8 +3271,7 @@ def _build_equity_reconciliation(
     `net_mv` (`sum(position market_value)`) were computed on adjacent lines
     in `run()` and never checked against each other. If Alpaca ever returns
     a partial positions list, `net_mv` goes wrong while `equity` stays
-    correct (or vice versa) and nothing would notice. Mirrors the existing
-    `_build_flex_reconciliation` pattern exactly: pure, non-fatal,
+    correct (or vice versa) and nothing would notice. Pure, non-fatal,
     non-gating — records and warns, never blocks a snapshot or a trading day.
 
     `status` is `"unavailable"` (never a fabricated `"ok"`/`"mismatch"`)
@@ -4061,7 +4056,7 @@ def _build_quadrant_allocation(positions: list[dict], equity: float, cash_usd: f
     `intl` (the two rotation roles), `legacy_exits` (a held LEGACY_EXITS name —
     a dedicated row so a wind-down position is never silently folded into a
     quadrant it no longer represents), `off_roster` (held but outside CORE_ROSTER
-    and not a legacy exit — a flex leftover like MU), or `cash_sleeve` (SGOV +
+    and not a legacy exit — an off-roster leftover like MU), or `cash_sleeve` (SGOV +
     literal cash). A name `primary_quadrant` cannot classify despite being in
     CORE_ROSTER (should not happen by construction) lands in `unmapped` rather
     than vanishing silently. Buckets sum to ~100% of equity within rounding.
@@ -6174,9 +6169,9 @@ def _thematic_classify_symbol(
        The correct response to a theme pointing at a non-selected pool member
        is a sleeve-selection switch, not a thematic lift (decision gate D-6).
     4. A ticker NOT in `CORE_ROSTER` at all is never excluded here — it is
-       simply not core-eligible, and routes to the flex pipeline instead
-       (`flex_source: "thematic"`, D4 rule 3). New tickers enter only via
-       flex; this PR does not relax that doctrine either.
+       simply not core-eligible and is REPORT-ONLY (reason
+       `non_roster_report_only`, ORB Phase 0B R4 — replaces the retired flex-route label);
+       it never receives a core reference.
 
     Evidence-count sufficiency (D4 rule 4, `min_evidence_items`) is a
     NOMINATION-level check, not a universe-membership check — it depends on
@@ -6474,7 +6469,7 @@ def _build_thematic_conviction(
         target = target * damping
         if cls["status"] == "flex_route":
             # D4 rule 3: a non-roster ticker never receives a core reference —
-            # it is routed to flex instead. Recorded for visibility; no core
+            # it is report-only. Recorded for visibility; no core
             # hysteresis/target applies to it.
             excluded.append({
                 "symbol": sym, "reason": "non_roster_report_only",
@@ -6525,44 +6520,6 @@ def _build_thematic_conviction(
         "pending": pending,
         "calibration": calibration,
     }, new_states
-
-
-# ---------------------------------------------------------------------------
-# Flex conviction path (2026-08-14 cycle, decisions from the flex-nomination
-# drought: the catalyst path REQUIRES a dated catalyst, so a real, live theme
-# with no scheduled event (EUAD's European-defense-capex re-rating) could
-# never be nominated — 4 of 5 sessions filed zero nominations for exactly
-# this reason. This is a SECOND, parallel nomination path: the LLM advises
-# via p_up (probability of a positive total return over horizon_days) rather
-# than a dated event. Reuses PR #38's thematic-conviction MACHINERY (ladder
-# lookup shape, Brier grading, confirm/release hysteresis) — never a second
-# parallel probability system — but with its own state/config, since flex
-# entries track price/stop/horizon in ways a core reference weight doesn't.
-# ---------------------------------------------------------------------------
-
-
-def _damp_p_up_toward_base_rate(p_up: float, base_rate_up: float, damping_factor: float) -> float:
-    """D2 (2026-09-02) — MECHANICAL confidence damping on the conviction path.
-
-    08-31 calibration (n=102 matured): predicted 0.65 -> actual 0.46 (n=26);
-    0.73 -> 0.44 (n=54); 0.82 -> 0.50 (n=16); 0.92 -> 0.33 (n=6). Calibration
-    is not merely poor but INVERTED — higher stated confidence predicts WORSE
-    outcomes. The 08-31 report's response ("I am compressing confidence
-    toward 0.5") was prose and did not survive into the 09-01/09-02 sessions
-    — this makes it mechanical.
-
-    Flattens `p_up` toward its own empirical `base_rate_up` by
-    `damping_factor` (1.0 = no change, full trust in the stated probability;
-    0.0 = fully flattened to the base rate, `edge` always 0 regardless of
-    what was claimed) BEFORE `edge = p_up - base_rate_up` — reuses the SAME
-    `brier_damping` ladder already computed for the path (see
-    `_build_flex_conviction_calibration` / `_thematic_damping_factor`), now
-    applied upstream of the edge/ladder lookup instead of as a post-hoc
-    multiplier on the final size_mult (the prior mechanism, superseded here —
-    damping the INPUT belief is the honest fix; damping only the output size
-    left a miscalibrated p_up still setting the ladder RUNG, just at a
-    smaller multiple of it)."""
-    return base_rate_up + (p_up - base_rate_up) * damping_factor
 
 
 # Quadrant defensiveness rank (Q1 most offensive → Q4 most defensive). A transition to a
@@ -8181,7 +8138,7 @@ def _build_reference_weights(
     target_pct = {t: w for t, w in sorted(weights.items()) if w >= 0.05}
     by_quadrant = _aggregate_by_quadrant(target_pct, literal_cash_pct, effective_selected)
 
-    # --- which constraints bound (surface, like flex `binding`) -----------------
+    # --- which constraints bound (surface) -----------------
     binding: list[str] = []
     if active_target_core >= ceiling_core:
         binding.append("active_quadrant_ceiling")
@@ -9127,7 +9084,7 @@ def _build_pnl_decomposition(
       core_current  — symbol in CORE_ROSTER (incl. role-pool members) AND
                       currently held or a role's selected member
       legacy_exits  — LEGACY_EXITS names
-      off_roster_flex — everything else (flex leftovers like MU)
+      off_roster_flex — everything else (off-roster leftovers like MU)
 
     Non-fatal: returns {available: False, reason: ...} on any Alpaca error.
     """

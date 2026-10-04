@@ -17,8 +17,8 @@ V1 — Gate rule (absolute; overrides cannot cross): `deployment_gate` not "open
     the role's old member at >= the buy notional) which is regime-neutral and passes.
     Additionally a BUY of any name off the CORE_ROSTER is rejected regardless of gate,
     and a BUY of any LEGACY_EXITS name is rejected regardless of gate ("legacy exit —
-    core re-entry closed (flex only)") — `trades[]` is core-only and legacy names are
-    wind-down-only; flex goes through `flex_nominations[]`.
+    core re-entry closed") — `trades[]` is core-only and legacy names are
+    wind-down-only.
 
 V1.5 — Selected-member-only buys (role-based roster seam): a BUY of a name that
     belongs to a role's `pool` but is not that role's `selected` incumbent ⇒ REJECT
@@ -282,13 +282,12 @@ def validate_trades(
         if side == "buy":
             if sym in LEGACY_EXITS:
                 _reject(t, reasons + [
-                    "legacy exit — core re-entry closed (flex only)"
+                    "legacy exit — core re-entry closed"
                 ])
                 continue
             if sym not in CORE_ROSTER:
                 _reject(t, reasons + [
-                    f"off-roster buy {sym} forbidden in trades[] (core-only; flex goes "
-                    "through flex_nominations)"
+                    f"off-roster buy {sym} forbidden in trades[] (core-only)"
                 ])
                 continue
             if gate != "open" and sym in _amp:
