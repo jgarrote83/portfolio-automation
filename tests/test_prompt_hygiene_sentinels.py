@@ -46,12 +46,6 @@ _POST_TRADE_CASH_SENTINELS = (
     "pre_trade_literal_cash",
 )
 
-# Task E3: prior-session flex nomination adjudication (C4 extension).
-_FLEX_ADJUDICATION_SENTINELS = (
-    "Task E3",
-    "Prior-session nomination adjudication is mandatory",
-    "flex_state.entries",
-)
 
 # Task E4: trade de-risk/re-risk class vs override direction vocabulary.
 _TRADE_DIRECTION_VOCAB_SENTINELS = (
@@ -59,11 +53,6 @@ _TRADE_DIRECTION_VOCAB_SENTINELS = (
     "SEPARATE axis from an OVERRIDE's",
 )
 
-# Task E5: symmetric catalyst-date discipline, no exceptions.
-_CATALYST_DATE_SENTINELS = (
-    "Task E5",
-    "No exceptions, either",
-)
 
 # Task E6: general no-visible-deliberation-chatter + symmetric oil-overlay wording.
 _NO_CHATTER_SENTINELS = (
@@ -119,61 +108,6 @@ _THEMATIC_CONVICTION_SENTINELS = (
 )
 _THEMATIC_OLD_INSTRUCTION_RETIRED_PHRASE = "note the linkage in the rebalancing rationale"
 
-# Task B/E (2026-08-14 flex-conviction-path cycle): the SECOND, parallel flex-
-# nomination path — no dated catalyst required, edge-over-base-rate sizing,
-# invalidation-as-stop, no time stop. Closes the EUAD 4-of-5-sessions drought
-# (a real thesis with no dated catalyst had no nomination path at all).
-_FLEX_CONVICTION_PATH_SENTINELS = (
-    'path: "conviction"',
-    "edge = p_up",
-    "base_rate_up",
-    "No time stop on this path",
-)
-# Task C1/C2 (2026-08-14 flex-conviction-path cycle): flex_eligibility citation
-# doctrine, closing the EUAD false-prohibition failure mode — a report must
-# distinguish "the system could not nominate this" (cited, deterministic) from
-# "I am choosing not to nominate this" (a live judgment call), and must
-# adjudicate regional_rotation's top-named candidate every session.
-_FLEX_ELIGIBILITY_SENTINELS = (
-    "flex_eligibility.candidates",
-    "the system could not",
-    "I am choosing not to nominate this",
-    "top-named rotation candidate",
-)
-
-# Task D-priority-3/4 (2026-08-14 flex-conviction-path cycle): applicable-set
-# split (missing_data vs not_applicable) + the double-clause rankability
-# guard, so "components_missing is empty" alone is never read as full
-# coverage for a fund with a structurally narrow applicable set.
-# R2 (2026-09-12): the DOUBLE-CLAUSE COUNT bar is replaced by a
-# required-component set. The applicable-vs-missing distinction survives intact
-# (it is a different, still-correct idea); the count sentinels are superseded.
-_APPLICABLE_SET_SENTINELS = (
-    "components_not_applicable",
-    "is_fund",
-    "REQUIRED-COMPONENT SET, not a count",
-    "`news_recency` is present",
-    "at least one price confirmation",
-    "rankability_reason",
-    "`earnings_proximity` gates NOTHING",
-)
-
-# PR #41 review round — M-A "also fix" (surface the clamped-but-nonzero cash-
-# floor case explicitly, not just via a silent binding echo).
-_CASH_FLOOR_VISIBILITY_SENTINELS = (
-    'binding == "cash_floor"',
-    "cash_floor_breach",
-    "FOLLOWUPS #75",
-)
-
-# PR #41 review round — S-2 (carried from PR #40): flex_state.as_of staleness
-# doctrine, since the collector now correctly runs pre-market and as_of is
-# normally the PRIOR trading day.
-_FLEX_STATE_AS_OF_STALENESS_SENTINELS = (
-    "flex_state.as_of` staleness",
-    "must be narrated in the past",
-    "say the engine state is stale",
-)
 
 # 2026-08-21 quadrant-reachability audit, Task A: diagonal (joint) projection
 # doctrine.
@@ -247,22 +181,10 @@ def test_post_trade_cash_formula_present():
         assert s in text, f"missing post-trade-cash sentinel: {s!r}"
 
 
-def test_flex_nomination_adjudication_present():
-    text = _text()
-    for s in _FLEX_ADJUDICATION_SENTINELS:
-        assert s in text, f"missing flex-adjudication sentinel: {s!r}"
-
-
 def test_trade_direction_vocabulary_present():
     text = _text()
     for s in _TRADE_DIRECTION_VOCAB_SENTINELS:
         assert s in text, f"missing trade-direction-vocabulary sentinel: {s!r}"
-
-
-def test_catalyst_date_symmetry_present():
-    text = _text()
-    for s in _CATALYST_DATE_SENTINELS:
-        assert s in text, f"missing catalyst-date-symmetry sentinel: {s!r}"
 
 
 def test_no_visible_deliberation_chatter_present():
@@ -315,36 +237,6 @@ def test_old_decorative_theme_narration_instruction_retired():
     four-session floor-pin incident)."""
     text = _text()
     assert _THEMATIC_OLD_INSTRUCTION_RETIRED_PHRASE not in text
-
-
-def test_flex_conviction_path_doctrine_present():
-    text = _text()
-    for s in _FLEX_CONVICTION_PATH_SENTINELS:
-        assert s in text, f"missing flex-conviction-path sentinel: {s!r}"
-
-
-def test_flex_eligibility_doctrine_present():
-    text = _text()
-    for s in _FLEX_ELIGIBILITY_SENTINELS:
-        assert s in text, f"missing flex_eligibility sentinel: {s!r}"
-
-
-def test_applicable_set_doctrine_present():
-    text = _text()
-    for s in _APPLICABLE_SET_SENTINELS:
-        assert s in text, f"missing applicable-set sentinel: {s!r}"
-
-
-def test_cash_floor_visibility_doctrine_present():
-    text = _text()
-    for s in _CASH_FLOOR_VISIBILITY_SENTINELS:
-        assert s in text, f"missing cash-floor-visibility sentinel: {s!r}"
-
-
-def test_flex_state_as_of_staleness_doctrine_present():
-    text = _text()
-    for s in _FLEX_STATE_AS_OF_STALENESS_SENTINELS:
-        assert s in text, f"missing flex_state.as_of staleness sentinel: {s!r}"
 
 
 def test_joint_projection_doctrine_present():

@@ -94,28 +94,12 @@ def _load_reference_execution_cfg() -> dict:
             out[key] = float(data[key])
     return out
 
-# Prompt↔code schema gate for the Flex catalyst engine. The engine consumes
-# `flex_nominations` from the analyzer's output; if a stale/reverted prompt no
-# longer emits them (or the sentinel), the two engines silently desync. Fail
-# loud at load rather than ship old-style flex trades.
-_FLEX_SCHEMA_SENTINELS = ("FLEX_SCHEMA_V1", "flex_nominations")
-
 # Prompt↔code gate for the Phase-4 override protocol: the live prompt must instruct the
 # model to consume `reference_weights` and emit the override-record schema, or the analyzer
 # is executing against a stale prompt that ignores the reference (the 2026-06-30 pathology).
 # V1_1 (Finding 2): overrides became per-sleeve records with residual-cap semantics; a
 # prompt still on V1 would emit sleeve-less records the validator now rejects wholesale.
 _OVERRIDE_SCHEMA_SENTINELS = ("OVERRIDE_SCHEMA_V1_1", "reference_weights", "overrides")
-
-
-def assert_flex_prompt_schema(prompt: str) -> None:
-    """Raise if the system prompt is missing the flex nomination schema markers."""
-    missing = [s for s in _FLEX_SCHEMA_SENTINELS if s not in prompt]
-    if missing:
-        raise RuntimeError(
-            f"project-instructions.md is missing flex schema markers {missing} — "
-            "prompt/code desync (a reverted prompt?). Refusing to run."
-        )
 
 
 def assert_override_prompt_schema(prompt: str) -> None:
@@ -182,7 +166,6 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
         )
 
     system_prompt = _SYSTEM_PROMPT_FILE.read_text(encoding="utf-8")
-    assert_flex_prompt_schema(system_prompt)
     assert_override_prompt_schema(system_prompt)
     recent = list_recent_reports(limit=_MAX_RECENT_REPORTS)
     logger.info("Loaded %d recent reports for continuity", len(recent))
@@ -461,10 +444,6 @@ def analyze_snapshot(snapshot_bytes: bytes, blob_name: str) -> None:
         _write_thematic_history(date_str, trades_obj.get("thematic_conviction") or [], gaps)
     except Exception:  # noqa: BLE001
         logger.exception("Thematic history write failed (non-fatal)")
-    try:
-        _write_flex_conviction_history(date_str, trades_obj.get("flex_nominations") or [])
-    except Exception:  # noqa: BLE001
-        logger.exception("Flex-conviction history write failed (non-fatal)")
 
     logger.info(
         "=== Analyzer completed for %s — %d trades recommended ===",
@@ -1340,46 +1319,6 @@ def _split_response(raw: str, date_str: str) -> tuple[str, dict]:
             logger.warning("Could not persist debug raw response: %s", e)
         trades_obj = {"trades": []}
 
-    # A1 (2026-07-22): sanitize optional watch_candidates — drop malformed entries
-    # with a log line, never fatal. The executor and both trade-validator passes
-    # ignore this key entirely (they only read trades[]/validation_error), so a bad
-    # watch list must not cost the day's trades file.
-    raw_wc = trades_obj.get("watch_candidates")
-    if raw_wc is not None:
-        if not isinstance(raw_wc, list):
-            logger.warning(
-                "watch_candidates for %s: removed non-list value (type=%s)",
-                date_str, type(raw_wc).__name__,
-            )
-            trades_obj.pop("watch_candidates", None)
-        else:
-            cleaned: list[dict] = []
-            for item in raw_wc:
-                if not isinstance(item, dict):
-                    logger.warning(
-                        "watch_candidates for %s: dropped non-dict entry %r", date_str, item
-                    )
-                    continue
-                sym = item.get("symbol")
-                if not isinstance(sym, str) or not sym.strip():
-                    logger.warning(
-                        "watch_candidates for %s: dropped entry with missing/invalid symbol %r",
-                        date_str, item,
-                    )
-                    continue
-                reason = item.get("reason")
-                cleaned.append({
-                    "symbol": sym.strip().upper(),
-                    "reason": str(reason) if isinstance(reason, str) else "",
-                })
-            if len(cleaned) > 6:
-                logger.warning(
-                    "watch_candidates for %s: trimmed from %d to 6 entries",
-                    date_str, len(cleaned),
-                )
-                cleaned = cleaned[:6]
-            trades_obj["watch_candidates"] = cleaned
-
     trades_obj.setdefault("generated_at", datetime.now(timezone.utc).isoformat())
     trades_obj.setdefault("date", date_str)
     return md_part, trades_obj
@@ -1417,28 +1356,8 @@ def _write_trade_history(date_str: str, trades_obj: dict, snapshot: dict | None 
     quadrant_projected_6m = trades_obj.get("quadrant_projected_6m") or ""
     risk_score = trades_obj.get("risk_score")
 
-    # Entry metadata for the flex review (computed here, NOT taken from the LLM):
-    # the snapshot entry price, persisted write-once on a flex BUY.
-    #
-    # Session 2026-09-12 (B1/R1): `entry_quadrant` / `flex_benchmark_etf` are no
-    # longer stamped. Regime is removed from the flex sleeve entirely, and the
-    # review's opportunity-cost benchmark is re-pointed to SPY (G3 re-pointed,
-    # not deleted — see collector `_classify_flex_review`). Historical rows keep
-    # their stamped values; nothing reads them any more.
-    snap = snapshot or {}
-    prices = snap.get("prices") or {}
-
-    def _entry_price(symbol: str) -> float | None:
-        row = prices.get(symbol) or {}
-        c = row.get("c") if isinstance(row, dict) else None
-        try:
-            return round(float(c), 4) if c is not None else None
-        except (TypeError, ValueError):
-            return None
-
     for t in trades_obj.get("trades", []):
         trade_id = t.get("id") or f"T-{date_str.replace('-', '')}-X"
-        is_flex_buy = (t.get("layer") == "flex") and (t.get("side") == "buy")
         try:
             entity = {
                 "PartitionKey":         year_month,
@@ -1449,7 +1368,6 @@ def _write_trade_history(date_str: str, trades_obj: dict, snapshot: dict | None 
                 "symbol":               t.get("symbol", ""),
                 "layer":                t.get("layer", ""),
                 "source":               t.get("source") or "",   # "band_enforcement" for D3 synthesis
-                "flex_source":          t.get("flex_source") or "",
                 "quantity":             int(t.get("quantity") or 0),
                 "order_type":           t.get("order_type", ""),
                 "limit_price":          t.get("limit_price"),
@@ -1458,20 +1376,10 @@ def _write_trade_history(date_str: str, trades_obj: dict, snapshot: dict | None 
                 "confidence":           float(t.get("confidence") or 0.0),
                 "stop_loss":            t.get("stop_loss"),
                 "take_profit":          t.get("take_profit"),
-                # Phase C §7 reasoning capture (write-once, flex trades; core
-                # trades emit nulls). Feeds the track_record learning aggregates.
-                "primary_trigger":      t.get("primary_trigger") or "",
-                "thesis_type":          t.get("thesis_type") or "",
-                "trigger_evidence":     (t.get("trigger_evidence") or "")[:32000],
-                "catalyst_date":        t.get("catalyst_date"),
                 "quadrant_current":     quadrant_current,
                 "quadrant_projected_6m": quadrant_projected_6m,
                 "risk_score":           risk_score,
             }
-            if is_flex_buy:
-                # Flex entry metadata (write-once on the flex BUY).
-                entity["entry_date"] = date_str
-                entity["entry_price"] = _entry_price(t.get("symbol", ""))
             upsert_entity("TradeHistory", entity)
         except Exception as e:  # noqa: BLE001
             logger.error("TradeHistory upsert failed for %s: %s", trade_id, e)
@@ -1587,61 +1495,6 @@ def _write_thematic_history(date_str: str, thematic_nominations: list[dict],
             upsert_entity("ThematicHistory", entity)
         except Exception as e:  # noqa: BLE001
             logger.error("ThematicHistory upsert failed for %s: %s", row_key, e)
-
-
-def _write_flex_conviction_history(date_str: str, flex_nominations: list[dict]) -> None:
-    """Task F (2026-08-14 flex-conviction-path cycle) — WRITE ONLY: one
-    `ThematicHistory` row per `path == "conviction"` entry in the model's
-    `flex_nominations[]` this session, tagged `path: "flex_conviction"` so its
-    calibration/grading NEVER blends with the core thematic-conviction track
-    (`_build_flex_conviction_calibration`/`_stamp_flex_conviction_outcomes` in
-    collector/handler.py query on this exact tag). Reuses `ThematicHistory` —
-    NOT a new table — per the cycle's explicit "reuse, don't duplicate"
-    instruction; distinguished from core-thematic rows by RowKey prefix
-    (`FLEXCV-` vs `THM-`) and this `path` field.
-
-    Unlike `_write_thematic_history`, this path has no `gaps`-table price
-    source (flex candidates are off the core roster) — `entry_price` is left
-    unset here; the stamper resolves its own base price at grading time via
-    the identical perf-series-closes-first/FMP-fallback mechanism
-    `_stamp_thematic_outcomes` already uses (see `_px` there), so nothing is
-    lost by not precomputing it here. Non-fatal per row. Catalyst-path
-    entries in the SAME `flex_nominations[]` list are skipped entirely — they
-    are graded by the existing flex-sleeve TradeHistory mechanism, not this
-    p_up/Brier track.
-    """
-    convictions = [n for n in flex_nominations if isinstance(n, dict) and n.get("path") == "conviction"]
-    if not convictions:
-        return
-    year_month = date_str[:7]
-    for idx, nom in enumerate(convictions):
-        sym = str(nom.get("symbol") or "").upper()
-        if not sym:
-            continue
-        row_key = f"FLEXCV-{date_str.replace('-', '')}-{idx:03d}"
-        try:
-            evidence = nom.get("evidence") or []
-            try:
-                horizon_days = int(nom.get("horizon_days") or 0)
-            except (TypeError, ValueError):
-                horizon_days = 0
-            entity = {
-                "PartitionKey": year_month,
-                "RowKey": row_key,
-                "symbol": sym,
-                "filed_date": date_str,
-                "path": "flex_conviction",
-                "p_up": float(nom.get("p_up")) if nom.get("p_up") is not None else None,
-                "horizon_days": horizon_days,
-                "evidence": (" | ".join(str(e) for e in evidence))[:32000],
-                "evidence_count": len(evidence),
-                "invalidation": str(nom.get("invalidation") or "")[:32000],
-                "catalyst_date": nom.get("catalyst_date") or "",
-                "outcome_status": "",
-            }
-            upsert_entity("ThematicHistory", entity)
-        except Exception as e:  # noqa: BLE001
-            logger.error("ThematicHistory (flex_conviction) upsert failed for %s: %s", row_key, e)
 
 
 def _write_regime_suspect_history(date_str: str, snapshot: dict, trades_obj: dict) -> None:
