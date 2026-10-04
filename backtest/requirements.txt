@@ -1,0 +1,6 @@
+# Dependencies for the offline backtest package (backtest/). NEVER add these to
+# src/requirements.txt -- backtest/ is never deployed (deploy-code.yml packages src/ only).
+pandas>=2.2
+pyarrow>=15.0
+requests>=2.32.0
+tzdata>=2024.1
