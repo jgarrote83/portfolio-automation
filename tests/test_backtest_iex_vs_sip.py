@@ -232,3 +232,16 @@ def test_end_to_end_runs_fully_offline_after_a_warm_run(tmp_path):
     b, _ = R.run("2024-01-09", "2024-01-10", cold, csv_path=None, summary_path=None, exclude=set(),
                  offline=True)
     pd.testing.assert_frame_equal(a, b)
+
+
+def test_main_reports_missing_keys_as_one_line_error_not_a_traceback(monkeypatch, capsys, tmp_path):
+    # Keys unavailable -> a clean `error:` line and exit 2 (never a traceback). The credential lookup
+    # is patched at its call site (client.py) so this can never read a real .env or touch the network,
+    # whether or not the developer has created one.
+    def _no_keys(*_a, **_k):
+        raise R.MissingCredentialsError("Alpaca keys not found. Create a gitignored `.env`")
+    monkeypatch.setattr("backtest.data.client.load_credentials", _no_keys)
+    rc = R.main(["--start", "2024-01-02", "--end", "2024-01-05", "--cache-dir", str(tmp_path / "c"),
+                 "--csv", str(tmp_path / "o.csv"), "--summary", str(tmp_path / "o.md")])
+    err = capsys.readouterr().err
+    assert rc == 2 and err.startswith("error: Alpaca keys not found") and "Traceback" not in err

@@ -34,6 +34,9 @@ import pandas as pd
 
 from .data import DataLayer
 from .data import config as C
+from .data.bars import CacheMissError, HoldoutError
+from .data.client import AlpacaDataError
+from .data.credentials import MissingCredentialsError
 
 LOOKBACK = 14
 MIN_PRICE = 5.0
@@ -344,8 +347,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cache-dir")
     args = ap.parse_args(argv)
     layer = DataLayer(args.cache_dir)
-    df, stats = run(args.start, args.end, layer, csv_path=Path(args.csv), summary_path=Path(args.summary),
-                    exclude=core_roster(), offline=args.offline, limit_symbols=args.limit_symbols)
+    try:
+        df, stats = run(args.start, args.end, layer, csv_path=Path(args.csv),
+                        summary_path=Path(args.summary), exclude=core_roster(), offline=args.offline,
+                        limit_symbols=args.limit_symbols)
+    except (CacheMissError, HoldoutError, MissingCredentialsError, AlpacaDataError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)          # same one-line contract as backtest.data.cli
+        return 2
     print(f"{stats.get('days', 0)} days; mean overlap {stats.get('mean_overlap', float('nan')):.2f}/20; "
           f"median {stats.get('median_overlap', float('nan'))}")
     return 0
