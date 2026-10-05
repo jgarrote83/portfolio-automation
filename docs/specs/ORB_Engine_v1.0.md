@@ -133,8 +133,8 @@ Engine rules, applied minute by minute after 9:35:
 
 Reports per run: equity curve, Sharpe, max drawdown, hit ratio, average R, R distribution, results by year and long vs. short, sleeve return and contribution to total equity, and how often each sizing limit binds.
 
-- [ ] Build the engine and test it on synthetic price paths with known answers, such as a day built to return exactly +3R
-- [ ] Run it locally through the Phase 1 data layer
+- [x] Build the engine and test it on synthetic price paths with known answers, such as a day built to return exactly +3R *(`src/orb/` + `backtest/engine.py`; `tests/test_backtest_engine.py`, `tests/test_backtest_orb_e2e.py`)*
+- [ ] Run it locally through the Phase 1 data layer *(code + tests done; the real run is PENDING — no `.env` keys yet; `python -m backtest.cli run`)*
 - [x] Write the go/no-go thresholds down before seeing results; a starting point is net Sharpe ≥ 1.0 at 2 cents per side and a positive result in each calendar year *(done before any code or result: `docs/specs/ORB_Phase2_Preregistration.md`, locked at its first commit)*
 - [ ] Tune only on 2024–2025, then run the 2026 holdout once; any change after the holdout needs a fresh test period
 

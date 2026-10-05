@@ -663,7 +663,31 @@ wiped them.
 
 ## Open
 
-### 116. ORB Phase 1 — backtest data layer (HIGH — program, unblocks Phase 2; branch `feat/orb-phase1-data-layer`, not merged)
+### 117. ORB Phase 2 — backtest engine (HIGH — program, the go/no-go gate; branch `feat/orb-phase2-backtest`, not merged)
+Built per `docs/specs/ORB_Engine_v1.0.md` Phase 2 and `docs/specs/ORB_Phase2_Preregistration.md` (rules, thresholds and
+the mechanical go/no-go written and committed **before any code or result**; locked). `src/orb/` = the strategy as pure
+Python (`config` / `universe` / `signals` / `sizing`; stdlib + `shared` only; inert — not registered in `function_app.py`);
+`backtest/` = `engine.py` (minute-by-minute, every variant), `selection.py`, `slippage.py`, `sessions.py`, `etf.py`,
+`reports.py`, `provenance.py`, `cli.py` (`python -m backtest.cli run`). The engine refuses any date on/after 2026-01-01 and
+has no override flag. Tested on synthetic price paths with known answers (+3R day, gaps through entry and stop,
+same-bar stop, never-triggered, doji, short mirror, cap vs risk sizing, integer rounding, loss limit, costs at 0/1/2/5¢,
+half-day close, the 2026 refusal, reproducibility) and cross-checked against the Phase 1 report's independent pandas
+implementation of the same universe / RVOL / top-20 on random data with gaps.
+**Open:** (1) **the real 2024–2025 run is PENDING** — no `.env` with Alpaca paper keys at the repo root; it needs hours on a
+cold cache; `.review/phase2-results.md` is PENDING until then and the verdict is mechanical (net Sharpe ≥ 1.0 AND positive
+net P&L in both 2024 and 2025, primary variant only); (2) merging this branch triggers a code deploy of inert modules
+(`src/**` path filter) — nothing imports `orb` at startup (pinned by test); (3) interpretations made in the pre-registration
+for Jorge to challenge BEFORE the first run (section 5, 18 items) — in particular: one entry per symbol per day, dojis not
+replaced by the 21st name, entry orders live through the bar stamped 15:45 (12:45 on a half-day), stop rounded to the cent away
+from the entry, R/sizing price = the trigger, slippage booked per fill rather than moved into the fill price (same net P&L),
+the six NYSE early closes hard-coded and cross-checked against SPY on the real run; (4) known limitations: the ETF list
+reflects securities listed on 2026-10-04 (an ETF delisted earlier is not flagged), short availability and borrow cost are not
+modeled, "Core roster excluded" means `CORE_ROSTER` only (the `LEGACY_EXITS` names AMZN/GOOGL/… are not excluded — a Phase 4
+live-trading question, since Core still holds them); (5) arithmetic worth knowing before the run: with stop = 0.1 × ATR the
+risk limit binds only when price ≤ 0.5 × ATR, so the sleeve/20 position cap will bind on essentially every trade and per-trade
+risk will be a small fraction of the 1% budget — the run reports how often each limit binds.
+
+### 116. ORB Phase 1 — backtest data layer (HIGH — program, unblocks Phase 2; MERGED to master `b76c4af` 2026-10-04; the IEX-vs-SIP real run is still PENDING)
 Built per `docs/specs/ORB_Engine_v1.0.md` Phase 1: `backtest/data/` (`get_bars`, parquet cache, SQLite
 manifest, 180 req/min limiter, holdout guard, offline mode, assets incl. inactive) + `backtest/iex_vs_sip.py`
 + 58 mocked-HTTP tests. Nothing under `src/`, `infra/`, `web/`; the only `.github/` change is CI's

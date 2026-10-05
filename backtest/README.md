@@ -50,3 +50,35 @@ python -m backtest.iex_vs_sip --start 2024-01-02 --end 2025-12-31 `
 ```
 
 Tests need no keys and no network: `PYTHONPATH=src pytest -q tests/test_backtest_*.py`.
+
+## Phase 2 — the ORB backtest engine
+
+`src/orb/` holds the strategy as **pure Python** (`config.py`, `universe.py`, `signals.py`, `sizing.py`:
+stdlib + `shared.*` only, no I/O, not registered in `function_app.py`); `backtest/` imports them, so the
+logic that is tested is the logic that will trade (Phase 4). The rules, thresholds and the mechanical
+go/no-go were written down **before any code or result**: `docs/specs/ORB_Phase2_Preregistration.md`
+(locked at its first commit; a change needs a new pre-registration and a fresh test period).
+
+| Module | What it does |
+| --- | --- |
+| `engine.py` | `simulate_day` (minute-by-minute, one variant) and `run_backtest` (all variants over the window). Refuses any date on/after 2026-01-01; **no override flag exists**. |
+| `selection.py` | universe → Relative Volume → top 20 → direction, from cached SIP bars, for the ETFs-excluded and ETFs-included universes |
+| `slippage.py`, `sessions.py`, `etf.py` | cost model; NYSE early closes (cross-checked against SPY's own bars on a real run); the Nasdaq Trader ETF list |
+| `reports.py`, `provenance.py` | metrics, the go/no-go verdict, run output; code commit and pre-registration hash for every run header |
+| `cli.py` | `python -m backtest.cli run` |
+
+```powershell
+# one-time, read-only: Nasdaq Trader's ETF flags into data/reference/ (gitignored)
+New-Item -ItemType Directory -Force data/reference | Out-Null
+foreach ($f in "nasdaqlisted","otherlisted") { Invoke-WebRequest "https://www.nasdaqtrader.com/dynamic/SymDir/$f.txt" -OutFile "data/reference/$f.txt" }
+
+$env:PYTHONPATH = "src"
+python -m backtest.cli run --review-file .review/phase2-results.md        # the pre-registered run (needs .env; hours on a cold cache)
+python -m backtest.cli run --start 2024-01-02 --end 2024-03-29 --limit-symbols 300   # smoke test: labelled NOT A PRE-REGISTERED RUN
+```
+
+Only the exact pre-registered invocation (window 2024-01-02..2025-12-31, no `--limit-symbols`, default
+config, all variants, pre-registration unchanged) produces a go/no-go verdict. Outputs go to
+`reports/orb/phase2/<run-id>/` (gitignored): `header.json` (config, code commit, pre-registration
+hash, data statistics), `summary.md`, and per variant `metrics.json` / `trades.csv` / `daily.csv`.
+The CLI reports; it does not tune.
