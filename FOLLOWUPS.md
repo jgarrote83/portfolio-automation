@@ -675,6 +675,19 @@ prefills any range); (4) design notes worth knowing: trading days are derived fr
 calendar), the assets list lives on the Trading API host (`GET /v2/assets` only), and the one-file-per-symbol-month
 layout means ~375k small daily-bar files for the full universe.
 
+**Phase 2 must decide two things the Phase 1 report only assumed (recorded 2026-10-04, per Jorge's
+review of the report definitions):** (a) **ONE ATR definition.** The report uses the *simple mean* of the
+prior 14 true ranges; Wilder smoothing is the other common reading and the two differ most right after a
+volatility spike. The ORB stop distance is derived from ATR, so this choice changes realized risk per trade
+and the universe filter (ATR > $0.50) and must be made once, explicitly, then used identically by the
+backtest, the live engine and the report (the report's number is only comparable if it matches). (b) **An
+ETF policy.** The report includes ETFs because the assets list does not separate them and the paper
+universe is unspecified; ETFs have different opening-volume behaviour from single stocks (market-maker
+creation/redemption, index-driven open volume) and can dominate a "Stocks in Play" ranking by RVOL
+on index-event days. Phase 2 must say whether the live universe includes, excludes, or separately
+treats them, then re-run the ranking on that universe — the IEX-vs-SIP overlap measured here is for the
+all-securities universe and is not automatically the answer for a stocks-only one.
+
 ### 113. ORB program — Phase 0 (retire Flex and the DayTrade Lab) (HIGH — program, blocks ORB Phases 1-5)
 Opened 2026-10-04 (branch `feat/orb-phase0a-retirement-prep`). The Flex catalyst engine
 (`src/flex/`, `FLEX_ENABLED=true` live) and the DayTrade Lab (`src/daytrade/`,

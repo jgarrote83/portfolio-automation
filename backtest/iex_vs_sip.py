@@ -147,7 +147,11 @@ def compare_day(day: date, candidates: list[str], rvol: dict[str, pd.DataFrame],
         "iex_qualified_n": int((rvol["iex"].loc[day].reindex(candidates) >= RVOL_MIN).sum())
         if day in rvol["iex"].index else 0,
         "sip_top_n": len(sip_top), "iex_top_n": len(iex_top), "overlap_n": overlap,
-        "overlap_frac": overlap / TOP_N, "dir_agree_n": agree, "dir_den": den, "iex_missing_n": miss,
+        "overlap_frac": overlap / TOP_N,
+        # overlap relative to how many names SIP actually ranked that day (NaN when SIP ranked none);
+        # on a day with fewer than 20 names at RVOL >= 100% the /20 figure is capped by supply
+        "overlap_of_sip_top": (overlap / len(sip_top)) if sip_top else float("nan"),
+        "dir_agree_n": agree, "dir_den": den, "iex_missing_n": miss,
         "sip_top20": " ".join(sip_top), "iex_top20": " ".join(iex_top)}
 
 
@@ -180,11 +184,15 @@ def summarize(df: pd.DataFrame) -> dict:
     for yr, g in df.groupby(df["date"].str[:4]):
         by_year[yr] = {"days": int(len(g)), "mean_overlap": float(g["overlap_n"].mean()),
                        "median_overlap": float(g["overlap_n"].median())}
+    of_sip = df["overlap_of_sip_top"].dropna()
     worst = df.sort_values(["overlap_n", "date"]).head(10)[
         ["date", "overlap_n", "sip_qualified_n", "iex_qualified_n"]].to_dict("records")
     return {
         "days": int(len(df)), "mean_overlap": float(n.mean()), "median_overlap": float(n.median()),
         "share_ge_15": float((n >= 15).mean()), "share_le_10": float((n <= 10).mean()),
+        "mean_overlap_of_sip": float(of_sip.mean()) if len(of_sip) else float("nan"),
+        "median_overlap_of_sip": float(of_sip.median()) if len(of_sip) else float("nan"),
+        "days_overlap_of_sip": int(len(of_sip)),
         "direction_agreement": float(df["dir_agree_n"].sum() / den) if den else float("nan"),
         "direction_den": den,
         "iex_bar_missing_share": float(miss / sip_total) if sip_total else float("nan"),
@@ -213,6 +221,8 @@ Window {start} .. {end}, {stats['days']} trading days, {n_symbols} symbols consi
 | --- | --- |
 | Mean overlap | **{stats['mean_overlap']:.2f} / 20** |
 | Median overlap | **{stats['median_overlap']:.1f} / 20** |
+| Mean overlap ÷ names SIP ranked (`overlap_n / sip_top_n`) | **{stats['mean_overlap_of_sip']:.1%}** |
+| Median overlap ÷ names SIP ranked | **{stats['median_overlap_of_sip']:.1%}** (over {stats['days_overlap_of_sip']} days on which SIP ranked at least one name) |
 | Days with overlap ≥ 15/20 | **{stats['share_ge_15']:.1%}** |
 | Days with overlap ≤ 10/20 | **{stats['share_le_10']:.1%}** |
 | Direction agreement (SIP top 20, first 5-min bar up/down in both feeds) | **{stats['direction_agreement']:.1%}** (n = {stats['direction_den']} non-doji picks) |

@@ -113,16 +113,36 @@ def test_summary_statistics_on_a_hand_built_table():
         "date": ["2024-01-02", "2024-01-03", "2025-01-02", "2025-01-03"],
         "overlap_n": [20, 16, 10, 4], "sip_qualified_n": [30, 30, 15, 30], "iex_qualified_n": [30, 30, 30, 12],
         "sip_top_n": [20, 20, 15, 20], "dir_agree_n": [18, 10, 5, 6], "dir_den": [20, 20, 10, 10],
-        "iex_missing_n": [0, 0, 5, 5], "universe_n": [100, 100, 100, 100]})
+        "iex_missing_n": [0, 0, 5, 5], "universe_n": [100, 100, 100, 100],
+        "overlap_of_sip_top": [20 / 20, 16 / 20, 10 / 15, 4 / 20]})
     s = R.summarize(df)
     assert s["mean_overlap"] == 12.5 and s["median_overlap"] == 13.0
+    assert abs(s["mean_overlap_of_sip"] - (1.0 + 0.8 + 10 / 15 + 0.2) / 4) < 1e-9
+    assert abs(s["median_overlap_of_sip"] - (0.8 + 10 / 15) / 2) < 1e-9 and s["days_overlap_of_sip"] == 4
     assert s["share_ge_15"] == 0.5 and s["share_le_10"] == 0.5
     assert abs(s["direction_agreement"] - 39 / 60) < 1e-9 and s["direction_den"] == 60
     assert abs(s["iex_bar_missing_share"] - 10 / 75) < 1e-9
     assert s["days_sip_lt_20_qualified"] == 1 and s["days_iex_lt_20_qualified"] == 1
     assert s["by_year"]["2024"]["mean_overlap"] == 18.0 and s["worst_ten"][0]["date"] == "2025-01-03"
-    assert "Mean overlap" in R.render_summary(s, {"requests_made": 5, "disk_bytes": 1e6}, wall_s=60,
-                                              start="a", end="b", n_symbols=3, limited=False)
+    text = R.render_summary(s, {"requests_made": 5, "disk_bytes": 1e6}, wall_s=60,
+                            start="a", end="b", n_symbols=3, limited=False)
+    assert "Mean overlap" in text and "overlap_n / sip_top_n" in text and "66.7%" in text
+
+
+def test_overlap_of_sip_top_ignores_days_where_sip_ranked_nobody():
+    # a day with sip_top_n == 0 has no ratio (NaN), and is excluded from the mean/median -- it is
+    # NOT scored as 0% (that would punish the feed on a day with nothing to rank)
+    df = pd.DataFrame({
+        "date": ["2024-01-02", "2024-01-03", "2024-01-04"],
+        "overlap_n": [10, 0, 5], "sip_qualified_n": [10, 0, 5], "iex_qualified_n": [10, 0, 5],
+        "sip_top_n": [10, 0, 5], "dir_agree_n": [1, 0, 1], "dir_den": [1, 0, 1],
+        "iex_missing_n": [0, 0, 0], "universe_n": [50, 50, 50],
+        "overlap_of_sip_top": [1.0, float("nan"), 1.0]})
+    s = R.summarize(df)
+    assert s["mean_overlap_of_sip"] == 1.0 and s["median_overlap_of_sip"] == 1.0
+    assert s["days_overlap_of_sip"] == 2
+    # the existing /20 statistics still count the empty day (unchanged semantics)
+    assert abs(s["mean_overlap"] - 5.0) < 1e-9
 
 
 # ----------------------------------------------------------- end to end on the fake market
@@ -179,16 +199,19 @@ def test_end_to_end_overlap_and_direction_match_the_constructed_answer(tmp_path)
     iex20 = sorted(cand, key=lambda s: (-_iex_spike(int(s[1:])), s))[:20]
     assert row["sip_top20"].split() == sip20 and row["iex_top20"].split() == iex20
     assert row["overlap_n"] == len(set(sip20) & set(iex20)) and row["overlap_frac"] == row["overlap_n"] / 20
+    assert row["sip_top_n"] == 20 and row["overlap_of_sip_top"] == row["overlap_n"] / row["sip_top_n"]
     expected_agree = sum(1 for s in sip20 if int(s[1:]) % 2 == 0)         # SIP up; IEX up only for even names
     assert (row["dir_agree_n"], row["dir_den"]) == (expected_agree, 20) and row["iex_missing_n"] == 0
     # a flat day BEFORE the spike: every name sits at RVOL exactly 1.0 -> both feeds pick the same
     # first 20 by symbol
     flat = df[df["date"] == "2024-01-09"].iloc[0]
     assert flat["overlap_n"] == 20 and flat["sip_top20"] == flat["iex_top20"]
+    assert flat["overlap_of_sip_top"] == 1.0
     # the day AFTER the spike: the spike sits in the prior-14-day average, so baseline volume is
     # below 100% of it for every name -> nobody qualifies (documents the no-same-day-leak rule)
     after = df[df["date"] == "2024-01-11"].iloc[0]
     assert after["sip_top_n"] == 0 and after["iex_top_n"] == 0 and after["overlap_n"] == 0
+    assert pd.isna(after["overlap_of_sip_top"])                          # nothing ranked -> no ratio
     assert stats["days"] == 3 and csv.is_file() and "Mean overlap" in md.read_text(encoding="utf-8")
     # re-running is free: everything is cached
     n = client.requests_made
