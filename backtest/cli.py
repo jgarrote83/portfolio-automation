@@ -34,6 +34,7 @@ from .data.credentials import MissingCredentialsError
 from .engine import ALL_VARIANTS, assert_not_holdout, run_backtest
 from .etf import EtfListMissingError, load_etf_list
 from .iex_vs_sip import equity_symbols
+from .invalid import invalid_summary
 from .selection import FETCH_FROM, build_selection
 from .sessions import check_early_closes
 
@@ -113,6 +114,8 @@ def cmd_run(args) -> int:
         "valid_for_verdict": not why, "invalid_reasons": why,
         "symbols_considered": len(symbols), "etf_files": list(etf.files),
         "selection": selection.stats, "minute_data": run.minute_data_stats,
+        "invalid_symbols": invalid_summary(layer.invalid_symbols(), symbols, selection.daily_symbols,
+                                           selection.eligible_union),
         "early_close_check": {"mismatches": early, "n_mismatches": len(early)},
         "data_layer": layer.cache_stats(), "wall_time_s": round(time.time() - t0, 1),
         "holdout": "2026 was never read (the engine refuses any date on/after 2026-01-01)",

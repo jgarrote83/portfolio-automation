@@ -4,6 +4,7 @@
         --timeframe 1Day --feed sip [--window 09:30-09:35] [--offline]
     python -m backtest.data.cli assets [--refresh] [--offline]
     python -m backtest.data.cli stats
+    python -m backtest.data.cli probe-invalid    # recover the rejected-symbol list for an older cache
 
 `--offline` fails on any cache miss instead of calling the API (exact reruns, no keys needed).
 Keys (when a fetch is needed) come from the gitignored `.env`; they are never printed.
@@ -34,6 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--refresh", action="store_true")
     a.add_argument("--offline", action="store_true")
     sub.add_parser("stats")
+    sub.add_parser("probe-invalid", help="recover the list of symbols the bars endpoint rejects (read-only)")
     args = ap.parse_args(argv)
 
     layer = DataLayer(args.cache_dir)
@@ -56,6 +58,8 @@ def _dispatch(args, layer: DataLayer) -> int:
         df = layer.get_assets(refresh=args.refresh, offline=args.offline)
         print(f"{len(df)} assets ({int((df['status'] == 'active').sum())} active, "
               f"{int((df['status'] == 'inactive').sum())} inactive)")
+    elif args.cmd == "probe-invalid":
+        print(layer.probe_invalid())
     else:
         print(layer.cache_stats())
     return 0

@@ -37,6 +37,7 @@ from .data import config as C
 from .data.bars import CacheMissError, HoldoutError
 from .data.client import AlpacaDataError
 from .data.credentials import MissingCredentialsError
+from .invalid import invalid_summary, render_invalid_md
 
 LOOKBACK = 14
 MIN_PRICE = 5.0
@@ -214,6 +215,7 @@ def render_summary(stats: dict, cache: dict, *, wall_s: float, start: str, end: 
                   for r in stats["worst_ten"])
     yrs = "\n".join(f"| {y} | {v['days']} | {v['mean_overlap']:.2f} | {v['median_overlap']:.1f} |"
                     for y, v in sorted(stats["by_year"].items()))
+    inv = render_invalid_md(stats.get("invalid"))
     return f"""# IEX vs SIP — can the free feed rank Stocks in Play?
 
 Window {start} .. {end}, {stats['days']} trading days, {n_symbols} symbols considered.{lim}
@@ -249,6 +251,7 @@ Ten worst days (lowest overlap):
 
 Requests made {cache.get('requests_made', 0):,} (symbols the API rejected as invalid and that were dropped: {cache.get('invalid_symbols_dropped', 0):,}) · parquet files {cache.get('parquet_files', 0):,} · rows {cache.get('rows', 0):,} · disk {mb:,.1f} MB · wall time {wall_s / 60:.1f} min.
 
+{inv}
 ## How to read this (numbers only — the $99/month question is NOT decided here)
 
 Per the build plan, high overlap would mean the free real-time feed could replace the paid SIP plan; low overlap would mean IEX cannot rank the same stocks. Read the median and the ≥15/20 and ≤10/20 shares together with the direction-agreement rate, because the live engine trades only names whose first 5-minute bar has a direction. Caveats that bear on interpretation:
@@ -324,6 +327,9 @@ def run(start: str, end: str, layer: DataLayer, *, csv_path: Path | None, summar
 
     df = compute_report(daily, opens["sip"], opens["iex"], window_days, exclude)
     stats = summarize(df)
+    stats["invalid"] = invalid_summary(
+        layer.invalid_symbols() if hasattr(layer, "invalid_symbols") else [], symbols,
+        set(daily["symbol"]), set().union(*[set(v) for v in eligible.values()]) if eligible else set())
     if csv_path is not None:
         csv_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(csv_path, index=False)

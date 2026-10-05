@@ -51,6 +51,17 @@ python -m backtest.iex_vs_sip --start 2024-01-02 --end 2025-12-31 `
 
 Tests need no keys and no network: `PYTHONPATH=src pytest -q tests/test_backtest_*.py`.
 
+### Symbols the bars endpoint rejects
+
+The inactive-assets list carries placeholders (`0029900E0`, `046CVR015`, `*_DELISTED`, …) and the real
+endpoint fails a whole multi-symbol request with HTTP 400 `invalid symbol: X` for one of them. The client
+drops each named symbol and retries; the layer records it in the manifest, so the list survives the process.
+Both reports (`iex_vs_sip`, `backtest.cli run`) print the count, the full list if fewer than 100 (otherwise an
+evenly spaced sample of 20 plus the count), and a check computed from the run's own data that none of them
+returned a daily bar or passed the universe filter on any day (`backtest/invalid.py`). For a cache built before
+this was persisted, `python -m backtest.data.cli probe-invalid` recovers the list (read-only; adds nothing to the
+bar cache).
+
 ## Phase 2 — the ORB backtest engine
 
 `src/orb/` holds the strategy as **pure Python** (`config.py`, `universe.py`, `signals.py`, `sizing.py`:

@@ -134,3 +134,21 @@ class FakeSession:
         if url == ASSETS_URL:
             return FakeResponse(200, self.market.assets.get(params["status"], []))
         return FakeResponse(404, {"message": "not found"})
+
+
+class RejectingSession(FakeSession):
+    """Mimics the real bars endpoint: ONE unknown symbol in a multi-symbol request fails the whole
+    request with HTTP 400 `invalid symbol: X` (naming only the first offender)."""
+
+    def __init__(self, market, bad, **kw):
+        super().__init__(market, **kw)
+        self.bad = set(bad)
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        if url == BARS_URL:
+            asked = [s for s in params["symbols"].split(",") if s]
+            offenders = [s for s in asked if s in self.bad]
+            if offenders:
+                self.calls.append({"url": url, "params": dict(params), "method": "GET"})
+                return FakeResponse(400, {"message": f"invalid symbol: {offenders[0]}"})
+        return super().get(url, params=params, headers=headers, timeout=timeout)

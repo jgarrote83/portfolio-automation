@@ -34,6 +34,9 @@ class Selection:
     # day -> {include_etfs: picks (top-N by RVOL, with direction; doji picks carry side=None)}
     picks_by_day: dict[date, dict[bool, list[Pick]]]
     stats: dict = field(default_factory=dict)
+    # for the rejected-symbol check: who returned any daily bar, who passed the universe filter on any day
+    daily_symbols: frozenset[str] = frozenset()
+    eligible_union: frozenset[str] = frozenset()
 
 
 def _log_default(msg: str) -> None:
@@ -169,4 +172,5 @@ def build_selection(layer, symbols: Iterable[str], etfs: frozenset[str], cfg: Or
         "picks_total_excl_etfs": picks_total,
         "etf_picks_in_top_n_incl_etfs": etf_in_top,
     }
-    return Selection(window_days, picks_by_day, stats)
+    elig_union = frozenset(s for v in eligible.values() for s, _atr in v)
+    return Selection(window_days, picks_by_day, stats, frozenset(syms_p), elig_union)

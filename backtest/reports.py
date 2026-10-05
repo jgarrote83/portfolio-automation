@@ -21,6 +21,7 @@ from orb.config import OrbConfig
 from orb.signals import LONG, SHORT
 
 from .engine import BacktestRun, DayResult, Trade, Variant
+from .invalid import render_invalid_md
 
 SLEEVE_SHARE_OF_EQUITY = 0.25          # sleeve = 25% of a $100k account (pre-registration, section 1)
 GO_MIN_SHARPE = 1.0
@@ -229,6 +230,9 @@ def render_summary_md(header: dict, metrics: dict[str, dict], verdict: dict | No
                 + ", ".join(f"{y}: {_fmt(p, 0, usd=True)}" for y, p in verdict["net_pnl_by_year"].items()) + ".", ""]
     top += ["## Headline table", "", headline_table(metrics, order), ""]
     top += ["## Variant detail", ""] + [variant_detail(n, metrics[n]) for n in order]
+    inv = render_invalid_md(header.get("invalid_symbols"))
+    if inv:
+        top += [inv]
     return "\n".join(top)
 
 

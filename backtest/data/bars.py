@@ -155,6 +155,7 @@ class DataLayer:
         self.manifest = Manifest(manifest_path or self.cache_dir / "manifest.sqlite")
         self._client = client
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self._invalid_persisted: set[str] = set()
 
     # ----------------------------------------------------------------- plumbing
     @property
@@ -240,6 +241,7 @@ class DataLayer:
                     f"offline=True but {n} (symbol, day) pair(s) are not cached for "
                     f"{feed}/{timeframe}/{win} (e.g. {ex[0]} on {ex[1][0]}).")
             self._fetch_missing(timeframe, feed, window, win, missing, days)
+            self._persist_invalid("bars_400")
         months = sorted({month_key(d) for d in days})
         df = self.store.read(feed, timeframe, symbols, months)
         if df.empty:
@@ -296,6 +298,7 @@ class DataLayer:
             if offline:
                 raise CacheMissError(f"offline=True but {fresh[0]} is today (never cached).")
             frames.append(self._fetch_uncached(syms, timeframe, feed, window, fresh))
+            self._persist_invalid("bars_400")
         frames = [f for f in frames if not f.empty]
         if not frames:
             return empty_frame()
@@ -315,6 +318,40 @@ class DataLayer:
         df = (df.assign(_o=df["symbol"].map(order)).sort_values(["_o", "ts"])
               .drop(columns="_o").reset_index(drop=True))
         return df[C.COLUMNS].astype({"volume": "int64"})
+
+    # ------------------------------------------------- symbols the endpoint rejected
+    def _persist_invalid(self, source: str) -> None:
+        """Write symbols the client has seen rejected (HTTP 400 invalid symbol) to the manifest, so
+        the list survives the process and a later run can report it."""
+        seen = set(getattr(self._client, "invalid_symbols", ()) or ()) - self._invalid_persisted
+        if seen:
+            self.manifest.record_invalid(sorted(seen), self._now().astimezone(timezone.utc).isoformat(), source)
+            self._invalid_persisted |= seen
+
+    def invalid_symbols(self) -> list[str]:
+        """Every symbol the bars endpoint has rejected as invalid (persisted + this process)."""
+        mem = set(getattr(self._client, "invalid_symbols", ()) or ())
+        return sorted(set(self.manifest.invalid_symbols()) | mem)
+
+    def probe_invalid(self, *, day: date = date(2024, 1, 2), chunk: int = 1000) -> dict:
+        """Recover the rejected-symbol list for a cache built before it was persisted.
+
+        Candidates = cached equity assets with NO daily SIP bar anywhere in the cache. They are asked
+        for one reference day (read-only, discarded): the client drops and records every symbol the
+        endpoint rejects; a valid symbol with no data just returns nothing. Adds nothing to the bar cache."""
+        self._guard_holdout(day, day, False)
+        assets = self.get_assets(offline=True)
+        syms = sorted(set(assets.loc[assets["exchange"].isin(C.EQUITY_EXCHANGES), "symbol"].astype(str)))
+        have = self.manifest.symbols_with_bars("sip", "1Day", C.ADJUSTMENT, "full", syms)
+        cands = [s for s in syms if s not in have]
+        start, end = day_bounds(day, day)
+        for chunk_syms in _chunks(cands, chunk):
+            for _ in self.client.iter_bars(chunk_syms, "1Day", start, end, "sip"):
+                pass
+        before = len(self.manifest.invalid_symbols())
+        self._persist_invalid("probe")
+        return {"candidates": len(cands), "newly_recorded": len(self.manifest.invalid_symbols()) - before,
+                "total_recorded": len(self.manifest.invalid_symbols())}
 
     # ---------------------------------------------------------------------- assets
     def get_assets(self, *, refresh: bool = False, offline: bool = False) -> pd.DataFrame:
@@ -350,7 +387,7 @@ class DataLayer:
         s = self.manifest.stats()
         s["disk_bytes"] = self.store.disk_bytes()
         s["requests_made"] = getattr(self._client, "requests_made", 0) if self._client else 0
-        s["invalid_symbols_dropped"] = len(getattr(self._client, "invalid_symbols", ()) or ()) if self._client else 0
+        s["invalid_symbols_dropped"] = len(self.invalid_symbols())
         return s
 
 

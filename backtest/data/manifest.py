@@ -26,6 +26,9 @@ CREATE TABLE IF NOT EXISTS coverage (
     fetched_mask INTEGER NOT NULL, bars_mask INTEGER NOT NULL,
     PRIMARY KEY (feed, timeframe, adjustment, win, symbol, month)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS invalid_symbols (
+    symbol TEXT NOT NULL PRIMARY KEY, first_seen TEXT NOT NULL, source TEXT NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS files (
     feed TEXT NOT NULL, timeframe TEXT NOT NULL, symbol TEXT NOT NULL, month TEXT NOT NULL,
     nrows INTEGER NOT NULL, nbytes INTEGER NOT NULL,
@@ -122,6 +125,33 @@ class Manifest:
                 "INSERT INTO files(feed,timeframe,symbol,month,nrows,nbytes) VALUES (?,?,?,?,?,?) "
                 "ON CONFLICT(feed,timeframe,symbol,month) DO UPDATE SET nrows=excluded.nrows, "
                 "nbytes=excluded.nbytes", list(rows))
+
+    # --------------------------------------------------- symbols the endpoint rejected
+    def record_invalid(self, symbols: Iterable[str], first_seen: str, source: str) -> int:
+        """Remember symbols the bars endpoint rejected as invalid (HTTP 400). Returns how many were new."""
+        rows = [(s, first_seen, source) for s in dict.fromkeys(symbols)]
+        if not rows:
+            return 0
+        before = self._db.execute("SELECT COUNT(*) FROM invalid_symbols").fetchone()[0]
+        with self._db:
+            self._db.executemany("INSERT OR IGNORE INTO invalid_symbols(symbol,first_seen,source) "
+                                 "VALUES (?,?,?)", rows)
+        return self._db.execute("SELECT COUNT(*) FROM invalid_symbols").fetchone()[0] - before
+
+    def invalid_symbols(self) -> list[str]:
+        return [r[0] for r in self._db.execute("SELECT symbol FROM invalid_symbols ORDER BY symbol")]
+
+    def symbols_with_bars(self, feed: str, timeframe: str, adjustment: str, win: str,
+                          symbols: Iterable[str]) -> set[str]:
+        """Which of `symbols` have at least one cached day WITH bars under this key."""
+        syms = list(dict.fromkeys(symbols))
+        out: set[str] = set()
+        for i in range(0, len(syms), _CHUNK):
+            chunk = syms[i:i + _CHUNK]
+            q = ("SELECT DISTINCT symbol FROM coverage WHERE feed=? AND timeframe=? AND adjustment=? "
+                 "AND win=? AND bars_mask != 0 AND symbol IN (%s)" % ",".join("?" * len(chunk)))
+            out.update(r[0] for r in self._db.execute(q, (feed, timeframe, adjustment, win, *chunk)))
+        return out
 
     # ----------------------------------------------------------------- stats
     def stats(self) -> dict:
