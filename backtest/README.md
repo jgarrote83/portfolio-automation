@@ -51,6 +51,12 @@ python -m backtest.iex_vs_sip --start 2024-01-02 --end 2025-12-31 `
 
 Tests need no keys and no network: `PYTHONPATH=src pytest -q tests/test_backtest_*.py`.
 
+### Verifying a run
+
+`python -m backtest.verify_run [--run reports/orb/phase2/<run-id>]` re-derives a random sample of primary trades from the raw
+cached bars with code separate from the engine, compares the ETFs-included trades with the Phase 1 report's independent
+top-20, and checks the early-close table against the volume collapse after 13:00. Offline cache only; it cannot change a result.
+
 ### Symbols the bars endpoint rejects
 
 The inactive-assets list carries placeholders (`0029900E0`, `046CVR015`, `*_DELISTED`, …) and the real

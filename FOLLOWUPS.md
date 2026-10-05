@@ -665,37 +665,33 @@ wiped them.
 
 ### 117. ORB Phase 2 — backtest engine (HIGH — program, the go/no-go gate; branch `feat/orb-phase2-backtest`, not merged)
 Built per `docs/specs/ORB_Engine_v1.0.md` Phase 2 and `docs/specs/ORB_Phase2_Preregistration.md` (rules, thresholds and
-the mechanical go/no-go written and committed **before any code or result**; locked). `src/orb/` = the strategy as pure
-Python (`config` / `universe` / `signals` / `sizing`; stdlib + `shared` only; inert — not registered in `function_app.py`);
-`backtest/` = `engine.py` (minute-by-minute, every variant), `selection.py`, `slippage.py`, `sessions.py`, `etf.py`,
-`reports.py`, `provenance.py`, `cli.py` (`python -m backtest.cli run`). The engine refuses any date on/after 2026-01-01 and
-has no override flag. Tested on synthetic price paths with known answers (+3R day, gaps through entry and stop,
-same-bar stop, never-triggered, doji, short mirror, cap vs risk sizing, integer rounding, loss limit, costs at 0/1/2/5¢,
-half-day close, the 2026 refusal, reproducibility) and cross-checked against the Phase 1 report's independent pandas
-implementation of the same universe / RVOL / top-20 on random data with gaps.
-**Open:** (1) **the real 2024–2025 run is PENDING** — no `.env` with Alpaca paper keys at the repo root; it needs hours on a
-cold cache; `.review/phase2-results.md` is PENDING until then and the verdict is mechanical (net Sharpe ≥ 1.0 AND positive
-net P&L in both 2024 and 2025, primary variant only); (2) merging this branch triggers a code deploy of inert modules
-(`src/**` path filter) — nothing imports `orb` at startup (pinned by test); (3) interpretations made in the pre-registration
-for Jorge to challenge BEFORE the first run (section 5, 18 items) — in particular: one entry per symbol per day, dojis not
-replaced by the 21st name, entry orders live through the bar stamped 15:45 (12:45 on a half-day), stop rounded to the cent away
-from the entry, R/sizing price = the trigger, slippage booked per fill rather than moved into the fill price (same net P&L),
-the six NYSE early closes hard-coded and cross-checked against SPY on the real run; (4) known limitations: the ETF list
-reflects securities listed on 2026-10-04 (an ETF delisted earlier is not flagged), short availability and borrow cost are not
-modeled, "Core roster excluded" means `CORE_ROSTER` only (the `LEGACY_EXITS` names AMZN/GOOGL/… are not excluded — a Phase 4
-live-trading question, since Core still holds them); (5) arithmetic worth knowing before the run: with stop = 0.1 × ATR the
-risk limit binds only when price ≤ 0.5 × ATR, so the sleeve/20 position cap will bind on essentially every trade and per-trade
-risk will be a small fraction of the 1% budget — the run reports how often each limit binds.
+the mechanical go/no-go written and committed **before any code or result**; locked, hash-checked in every run header).
+`src/orb/` = the strategy as pure Python (`config` / `universe` / `signals` / `sizing`; stdlib + `shared` only; inert — not
+registered in `function_app.py`); `backtest/` = `engine.py`, `selection.py`, `slippage.py`, `sessions.py`, `etf.py`,
+`reports.py`, `provenance.py`, `invalid.py`, `verify_run.py`, `cli.py`. The engine refuses any date on/after 2026-01-01 and has
+no override flag.
+**RESULT (2026-10-05, run `20261005T232055Z-4d1015c`, `.review/phase2-results.md`): mechanical verdict NO-GO.** Primary variant
+(ETFs excluded, shorts allowed, 2¢ a side): net Sharpe -10.41; net P&L -$16,238 (2024) and -$16,395 (2025); 7,862 trades, hit
+ratio 7.9%, -0.711R average net (-0.350R gross); 91.5% of trades exit by a stop, 55.0% in the entry minute; gross P&L was
+already negative before costs. All six variants (slippage 0/1/5¢, long-only, ETFs included) lose in both years. Verified
+against pipeline error: 80/80 random trades re-derived independently from the raw bars match; all 7,913 ETFs-included trades sit
+inside the Phase 1 report's independent top-20; the early-close table is confirmed by the volume collapse after 13:00 (the
+run's own "6 mismatches" came from an invalid check — SPY's last bar is 15:59 on every day because extended-hours bars
+exist — and was removed). By the pre-registered rules ORB does **not** earn a holdout run; any change to a rule is a NEW
+pre-registration with a fresh test period (2024-2025 is spent for the current rules). Nothing was tuned.
+**Open:** (1) Jorge's decision on what, if anything, follows a NO-GO (stop; or a new pre-registered variant); (2) merging
+this branch deploys inert code (`src/**` path filter); (3) `.env` now exists in the repo root (paper keys, created from Key
+Vault with Jorge's one-time permission) — delete it if it should not persist; (4) known limitations: ETF list is today's
+(an ETF delisted before 2026-10-04 is not flagged), short availability/borrow not modeled, "Core roster excluded" means
+`CORE_ROSTER` only (the `LEGACY_EXITS` names are not excluded), IEX has no opening bars on 2025-03-10 (Phase 1 only).
 
-### 116. ORB Phase 1 — backtest data layer (HIGH — program, unblocks Phase 2; MERGED to master `b76c4af` 2026-10-04; the IEX-vs-SIP real run is still PENDING)
+### 116. ORB Phase 1 — backtest data layer (HIGH — program, unblocks Phase 2; MERGED to master `b76c4af` 2026-10-04; IEX-vs-SIP real run DONE 2026-10-05 — the $99/month decision is still Jorge's)
 Built per `docs/specs/ORB_Engine_v1.0.md` Phase 1: `backtest/data/` (`get_bars`, parquet cache, SQLite
 manifest, 180 req/min limiter, holdout guard, offline mode, assets incl. inactive) + `backtest/iex_vs_sip.py`
 + 58 mocked-HTTP tests. Nothing under `src/`, `infra/`, `web/`; the only `.github/` change is CI's
-install line (adds `backtest/requirements.txt`). **Open:** (1) the IEX-vs-SIP report has NOT been run on
-real data — it needs Alpaca paper keys in a gitignored `.env` (`backtest/env.example`) and takes hours on a
-cold cache; `.review/phase1-iex-vs-sip.md` is PENDING until then; (2) the $99/month SIP question is
-Jorge's and the reviewer's, decided from that report; (3) optional `scripts/warm_cache.py` not built (the CLI
-prefills any range); (4) design notes worth knowing: trading days are derived from SPY daily bars (no trading-API
+install line (adds `backtest/requirements.txt`). **RESULT (2026-10-05, `.review/phase1-iex-vs-sip.md`):** 2024-2025, 502 days: mean top-20 overlap 9.10/20 (median 9.0), days >= 15/20 2.6%, days <= 10/20 67.9%, direction agreement 83.4%; 417 invalid placeholder symbols were rejected by the bars endpoint and dropped (none ever returned a bar or passed the filter); IEX has no opening bars on 2025-03-10 (disclosed). Numbers only — **Open:** (1) the $99/month SIP question is
+Jorge's and the reviewer's, decided from that report; (2) optional `scripts/warm_cache.py` not built (the CLI
+prefills any range); (3) design notes worth knowing: trading days are derived from SPY daily bars (no trading-API
 calendar), the assets list lives on the Trading API host (`GET /v2/assets` only), and the one-file-per-symbol-month
 layout means ~375k small daily-bar files for the full universe.
 
