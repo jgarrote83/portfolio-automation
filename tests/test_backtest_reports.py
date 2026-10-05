@@ -19,7 +19,7 @@ from backtest.etf import (  # noqa: E402
     load_etf_list,
     parse_etf_symbols,
 )
-from backtest.sessions import EARLY_CLOSE_DATES, check_early_closes, close_minute  # noqa: E402
+from backtest.sessions import EARLY_CLOSE_DATES, close_minute  # noqa: E402
 from orb.config import OrbConfig  # noqa: E402
 from orb.signals import LONG, SHORT  # noqa: E402
 
@@ -242,16 +242,6 @@ def test_the_nyse_early_closes_are_the_preregistered_six_and_everything_else_clo
                                  date(2025, 7, 3), date(2025, 11, 28), date(2025, 12, 24)}
     assert all(close_minute(d) == 13 * 60 for d in EARLY_CLOSE_DATES)
     assert close_minute(date(2024, 7, 5)) == 16 * 60 and close_minute(date(2025, 11, 26)) == 16 * 60
-
-
-def test_the_early_close_table_is_cross_checked_against_the_markets_own_bars():
-    days = [date(2024, 7, 2), date(2024, 7, 3), date(2024, 7, 5)]
-    last = {days[0]: 959, days[1]: 779, days[2]: 959}
-    assert check_early_closes(days, last.get) == []
-    last[days[1]] = 959                                                   # SPY traded to 15:59 on a "half day"
-    last[days[2]] = None                                                  # and has no bars at all on another day
-    bad = check_early_closes(days, last.get)
-    assert [(b["day"], b["last_bar_min"]) for b in bad] == [("2024-07-03", 959), ("2024-07-05", None)]
 
 
 # ================================================================================== provenance

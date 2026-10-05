@@ -36,7 +36,6 @@ from .etf import EtfListMissingError, load_etf_list
 from .iex_vs_sip import equity_symbols
 from .invalid import invalid_summary
 from .selection import FETCH_FROM, build_selection
-from .sessions import check_early_closes
 
 PREREG_START, PREREG_END = "2024-01-02", "2025-12-31"
 DEFAULT_OUT = REPO_ROOT / "reports" / "orb" / "phase2"
@@ -44,18 +43,6 @@ DEFAULT_OUT = REPO_ROOT / "reports" / "orb" / "phase2"
 
 def _log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", file=sys.stderr, flush=True)
-
-
-def _spy_last_minutes(layer, days: list[date], offline: bool) -> dict[date, int]:
-    """SPY's last regular-session one-minute bar per day (for the early-close cross-check)."""
-    if not days:
-        return {}
-    df = layer.get_bars(["SPY"], days[0], days[-1], "1Min", "sip", window=("09:30", "16:00"),
-                        offline=offline)
-    if df.empty:
-        return {}
-    mins = df["ts"].dt.hour * 60 + df["ts"].dt.minute
-    return mins.groupby(df["ts"].dt.date).max().to_dict()
 
 
 def validity(start: str, end: str, limit_symbols: int | None, cfg: OrbConfig, variants,
@@ -94,8 +81,6 @@ def cmd_run(args) -> int:
     selection = build_selection(layer, symbols, etf.symbols, cfg, args.start, args.end,
                                 fetch_from=FETCH_FROM, offline=args.offline, log=_log)
     run = run_backtest(layer, selection, cfg, ALL_VARIANTS, progress=_log)
-    spy_last = _spy_last_minutes(layer, selection.window_days, args.offline)
-    early = check_early_closes(selection.window_days, spy_last.get)
     metrics = reports.compute_all(run)
 
     prereg = provenance.prereg_info()
@@ -116,7 +101,7 @@ def cmd_run(args) -> int:
         "selection": selection.stats, "minute_data": run.minute_data_stats,
         "invalid_symbols": invalid_summary(layer.invalid_symbols(), symbols, selection.daily_symbols,
                                            selection.eligible_union),
-        "early_close_check": {"mismatches": early, "n_mismatches": len(early)},
+        "early_close_check": "not checked in-run; run `python -m backtest.verify_run` (volume collapse after 13:00)",
         "data_layer": layer.cache_stats(), "wall_time_s": round(time.time() - t0, 1),
         "holdout": "2026 was never read (the engine refuses any date on/after 2026-01-01)",
     }
@@ -150,8 +135,7 @@ def _review_md(header: dict, summary_md: str, out: Path) -> str:
         "have fewer than 20; "
         f"{sel.get('etf_picks_in_top_n_incl_etfs', 0):,} ETF picks entered the top 20 in the ETFs-included universe.",
         f"* Picks without any one-minute bar: {minute.get('picks_without_minute_bars', 0):,}.",
-        f"* Early-close table vs SPY's own bars: {header['early_close_check']['n_mismatches']} mismatching day(s)"
-        + (f" {header['early_close_check']['mismatches'][:5]}" if header["early_close_check"]["mismatches"] else "") + ".",
+        "* Early-close table: verified after the run by `python -m backtest.verify_run` (see verification.md).",
         f"* Data layer: {header['data_layer'].get('requests_made', 0):,} API requests, "
         f"{header['data_layer'].get('rows', 0):,} cached rows, "
         f"{header['data_layer'].get('disk_bytes', 0) / 1e9:.2f} GB; wall time {header['wall_time_s'] / 60:.1f} min.",
