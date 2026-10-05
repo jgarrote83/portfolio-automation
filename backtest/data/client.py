@@ -6,6 +6,7 @@ Keys are held privately, never appear in `repr()` or in any exception message.
 """
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable, Iterator
 
@@ -39,6 +40,19 @@ class AlpacaAuthError(AlpacaDataError):
     """401/403: bad keys, or a subscription that does not permit the query."""
 
 
+class AlpacaInvalidSymbolError(AlpacaDataError):
+    """HTTP 400 `invalid symbol: X`. The bars endpoint rejects a WHOLE multi-symbol request for one
+    symbol it does not recognise (the inactive-assets list carries CUSIP-like placeholders such as
+    `0029900E0`); `iter_bars` drops the named symbols and retries."""
+
+    def __init__(self, message: str, symbols: list[str]) -> None:
+        super().__init__(message)
+        self.symbols = symbols
+
+
+_INVALID_SYMBOL = re.compile(r"invalid symbols?\s*:?\s*(.+)", re.IGNORECASE)
+
+
 class AlpacaDataClient:
     def __init__(self, key: str, secret: str, *, session: requests.Session | None = None,
                  limiter: RateLimiter | None = None,
@@ -54,6 +68,7 @@ class AlpacaDataClient:
         self.assets_url = assets_url.rstrip("/")
         self.max_retries = max_retries
         self.requests_made = 0            # every HTTP attempt, retries included
+        self.invalid_symbols: set[str] = set()   # symbols the bars endpoint rejected as invalid
 
     @classmethod
     def from_env(cls, **kw) -> "AlpacaDataClient":
@@ -103,6 +118,12 @@ class AlpacaDataClient:
                 raise AlpacaAuthError(
                     f"HTTP {status} from {url.split('?')[0]} (check the keys and that the "
                     f"subscription permits this query). {detail}".strip())
+            if status == 400:
+                m = _INVALID_SYMBOL.search(detail)
+                if m:
+                    bad = [t.strip().upper() for t in re.split(r"[,\s]+", m.group(1)) if t.strip()]
+                    raise AlpacaInvalidSymbolError(
+                        f"HTTP 400 from {url.split('?')[0]}. {detail}".strip(), bad)
             raise AlpacaDataError(f"HTTP {status} from {url.split('?')[0]}. {detail}".strip())
 
     # ------------------------------------------------------------------ bars
@@ -110,14 +131,26 @@ class AlpacaDataClient:
                   *, adjustment: str = ADJUSTMENT, limit: int = PAGE_LIMIT) -> Iterator[tuple[str, dict]]:
         """Yield (symbol, bar) for every bar in [start, end], following `next_page_token`.
         `start`/`end` are RFC3339 strings. Bars are Alpaca's `{t,o,h,l,c,v,...}` dicts."""
-        params = {"symbols": ",".join(symbols), "timeframe": timeframe, "start": start, "end": end,
+        live = list(symbols)
+        params = {"symbols": ",".join(live), "timeframe": timeframe, "start": start, "end": end,
                   "limit": limit, "adjustment": adjustment, "feed": feed, "sort": "asc"}
         token = None
         while True:
             page_params = dict(params)
             if token:
                 page_params["page_token"] = token
-            body = self._get(f"{self.data_url}{BARS_PATH}", page_params)
+            try:
+                body = self._get(f"{self.data_url}{BARS_PATH}", page_params)
+            except AlpacaInvalidSymbolError as exc:
+                bad = set(exc.symbols) & set(live)
+                if token or not bad:
+                    raise                          # mid-pagination, or not one of ours: do not guess
+                self.invalid_symbols |= bad
+                live = [s for s in live if s not in bad]
+                if not live:
+                    return
+                params["symbols"] = ",".join(live)
+                continue
             bars = (body or {}).get("bars") or {}
             for sym, rows in bars.items():
                 for bar in rows or []:

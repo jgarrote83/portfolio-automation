@@ -350,6 +350,7 @@ class DataLayer:
         s = self.manifest.stats()
         s["disk_bytes"] = self.store.disk_bytes()
         s["requests_made"] = getattr(self._client, "requests_made", 0) if self._client else 0
+        s["invalid_symbols_dropped"] = len(getattr(self._client, "invalid_symbols", ()) or ()) if self._client else 0
         return s
 
 

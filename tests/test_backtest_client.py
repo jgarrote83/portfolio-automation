@@ -110,3 +110,75 @@ def test_environment_variables_win_and_parse_env_handles_quotes_and_comments(mon
     monkeypatch.setenv("ALPACA_API_SECRET", "s1")
     assert load_credentials() == ("k1", "s1")
     assert parse_env("# c\nexport A='x y'\nB=\"z\"\n\nC=1\n") == {"A": "x y", "B": "z", "C": "1"}
+
+
+# ------------------------------------------------------------------ invalid symbols (found live)
+class _RejectingSession(FakeSession):
+    """Mimics the real bars endpoint: ONE unknown symbol in a multi-symbol request fails the whole
+    request with HTTP 400 `invalid symbol: X` (naming only the first offender)."""
+
+    def __init__(self, market, bad, **kw):
+        super().__init__(market, **kw)
+        self.bad = set(bad)
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        if url == BARS_URL:
+            asked = [s for s in params["symbols"].split(",") if s]
+            offenders = [s for s in asked if s in self.bad]
+            if offenders:
+                from backtest_fakes import FakeResponse
+                self.calls.append({"url": url, "params": dict(params), "method": "GET"})
+                return FakeResponse(400, {"message": f"invalid symbol: {offenders[0]}"})
+        return super().get(url, params=params, headers=headers, timeout=timeout)
+
+
+def test_an_invalid_symbol_is_dropped_and_the_request_retried_for_the_rest():
+    sess = _RejectingSession(FakeMarket(), {"0029900E0", "046CVR015"})
+    cli = AlpacaDataClient(KEY, SECRET, session=sess, sleep=FakeClock().sleep, limiter=None)
+    rows = list(cli.iter_bars(["AAA", "0029900E0", "BBB", "046CVR015"], "1Day",
+                              "2024-01-02T05:00:00Z", "2024-01-02T23:59:59Z", "sip"))
+    assert {s for s, _ in rows} == {"AAA", "BBB"} and len(rows) == 2
+    assert cli.invalid_symbols == {"0029900E0", "046CVR015"}
+    assert [c["params"]["symbols"] for c in sess.bar_calls] == [
+        "AAA,0029900E0,BBB,046CVR015", "AAA,BBB,046CVR015", "AAA,BBB"]
+    assert cli.requests_made == 3
+
+
+def test_a_request_whose_every_symbol_is_invalid_yields_nothing_and_does_not_raise():
+    sess = _RejectingSession(FakeMarket(), {"X1", "X2"})
+    cli = AlpacaDataClient(KEY, SECRET, session=sess, sleep=FakeClock().sleep, limiter=None)
+    assert list(cli.iter_bars(["X1", "X2"], "1Day", "2024-01-02T05:00:00Z", "2024-01-02T23:59:59Z", "sip")) == []
+    assert cli.invalid_symbols == {"X1", "X2"}
+
+
+def test_other_400_errors_still_fail_loudly_and_a_symbol_we_did_not_send_is_not_guessed_at():
+    cli, _sess, _ = _client(script=[400])                     # FakeSession's scripted body: "scripted failure"
+    with pytest.raises(AlpacaDataError, match="HTTP 400"):
+        list(cli.iter_bars(["AAA"], "1Day", "2024-01-02T05:00:00Z", "2024-01-02T23:59:59Z", "sip"))
+    assert cli.invalid_symbols == set()
+
+    class NamesAStranger(FakeSession):
+        def get(self, url, params=None, headers=None, timeout=None):
+            from backtest_fakes import FakeResponse
+            return FakeResponse(400, {"message": "invalid symbol: SOMEONEELSE"})
+
+    cli = AlpacaDataClient(KEY, SECRET, session=NamesAStranger(FakeMarket()), sleep=FakeClock().sleep,
+                           limiter=None)
+    with pytest.raises(AlpacaDataError, match="invalid symbol"):       # not ours: surface it, do not loop
+        list(cli.iter_bars(["AAA"], "1Day", "2024-01-02T05:00:00Z", "2024-01-02T23:59:59Z", "sip"))
+    assert cli.invalid_symbols == set()
+
+
+def test_the_layer_records_a_rejected_symbol_as_covered_so_it_is_never_requested_twice(tmp_path):
+    from datetime import datetime, timezone
+
+    from backtest.data import DataLayer
+    sess = _RejectingSession(FakeMarket(), {"0029900E0"})
+    cli = AlpacaDataClient(KEY, SECRET, session=sess, sleep=FakeClock().sleep, limiter=None)
+    layer = DataLayer(tmp_path / "cache", client=cli, now=lambda: datetime(2025, 6, 1, tzinfo=timezone.utc))
+    df = layer.get_bars(["AAA", "0029900E0"], "2024-01-02", "2024-01-03", "1Day", "sip")
+    assert set(df["symbol"]) == {"AAA"}
+    n = cli.requests_made
+    again = layer.get_bars(["AAA", "0029900E0"], "2024-01-02", "2024-01-03", "1Day", "sip")
+    assert cli.requests_made == n and len(again) == len(df)
+    assert layer.cache_stats()["invalid_symbols_dropped"] == 1

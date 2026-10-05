@@ -247,7 +247,7 @@ Ten worst days (lowest overlap):
 
 ## Cache statistics for this run
 
-Requests made {cache.get('requests_made', 0):,} · parquet files {cache.get('parquet_files', 0):,} · rows {cache.get('rows', 0):,} · disk {mb:,.1f} MB · wall time {wall_s / 60:.1f} min.
+Requests made {cache.get('requests_made', 0):,} (symbols the API rejected as invalid and that were dropped: {cache.get('invalid_symbols_dropped', 0):,}) · parquet files {cache.get('parquet_files', 0):,} · rows {cache.get('rows', 0):,} · disk {mb:,.1f} MB · wall time {wall_s / 60:.1f} min.
 
 ## How to read this (numbers only — the $99/month question is NOT decided here)
 
