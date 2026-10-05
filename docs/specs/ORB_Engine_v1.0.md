@@ -120,6 +120,8 @@ Live trading needs no separate data store: the ORB engine builds its candidate l
 
 The go/no-go question is whether the edge survives realistic slippage in 2024–2025 and again on the 2026 holdout. Slippage is the threat: on a stock with a $2 ATR, R is $0.20, so 2 cents per side already costs 0.2R against the paper's 0.1–0.4R average edge.
 
+**Pre-registered rules, thresholds and go/no-go: `docs/specs/ORB_Phase2_Preregistration.md`. Where it is more specific than the rules below, it wins.**
+
 Engine rules, applied minute by minute after 9:35:
 
 1. Entry fills at the stop price, or at the bar's open if price gaps through it.
@@ -133,7 +135,7 @@ Reports per run: equity curve, Sharpe, max drawdown, hit ratio, average R, R dis
 
 - [ ] Build the engine and test it on synthetic price paths with known answers, such as a day built to return exactly +3R
 - [ ] Run it locally through the Phase 1 data layer
-- [ ] Write the go/no-go thresholds down before seeing results; a starting point is net Sharpe ≥ 1.0 at 2 cents per side and a positive result in each calendar year
+- [x] Write the go/no-go thresholds down before seeing results; a starting point is net Sharpe ≥ 1.0 at 2 cents per side and a positive result in each calendar year *(done before any code or result: `docs/specs/ORB_Phase2_Preregistration.md`, locked at its first commit)*
 - [ ] Tune only on 2024–2025, then run the 2026 holdout once; any change after the holdout needs a fresh test period
 
 ## Phase 3: Claude API analysis layer

@@ -688,6 +688,8 @@ on index-event days. Phase 2 must say whether the live universe includes, exclud
 treats them, then re-run the ranking on that universe — the IEX-vs-SIP overlap measured here is for the
 all-securities universe and is not automatically the answer for a stocks-only one.
 
+**Phase 2 pre-registration (2026-10-04, branch `feat/orb-phase2-backtest`):** both decisions above are made, before any result, in `docs/specs/ORB_Phase2_Preregistration.md` — simple-mean ATR (filter and stop) and ETFs **excluded** in the primary variant (Nasdaq Trader ETF flag; ETFs-included is a reported sensitivity only). The go/no-go there is mechanical and locked.
+
 ### 113. ORB program — Phase 0 (retire Flex and the DayTrade Lab) (HIGH — program, blocks ORB Phases 1-5)
 Opened 2026-10-04 (branch `feat/orb-phase0a-retirement-prep`). The Flex catalyst engine
 (`src/flex/`, `FLEX_ENABLED=true` live) and the DayTrade Lab (`src/daytrade/`,

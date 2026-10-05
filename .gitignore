@@ -66,4 +66,5 @@ scripts/.alfred_cache/
 # ORB program
 .review/
 data/cache/
+data/reference/
 reports/orb/
