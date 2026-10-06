@@ -663,6 +663,24 @@ wiped them.
 
 ## Open
 
+### 119. SPY close-flow backtest — pre-registered, run, NO-GO (HIGH — program, second day-trading candidate; branch `feat/closeflow-backtest`, not merged)
+Pre-registered first (`docs/specs/CloseFlow_SPY_Preregistration.md`, locked, 30 interpreted details) and built as
+`backtest/closeflow.py` + `closeflow_verify.py` (data only through `get_bars`; refuses 2026, no override flag; mutation-checked).
+**RESULT (2026-10-05, run `20261006T003336Z-8149489`, `.review/closeflow-results.md`): mechanical verdict NO-GO.** Primary variant
+(15:29 signal vs the previous close, entry at the 15:30 open + 1¢, exit at the SIP daily close, $25,000 sleeve): net Sharpe -1.39
+(t-stat -1.96); net P&L -$1,562 (2024) and -$1,113 (2025); 502 trades (no flat or skipped days), hit ratio 46.8%, -2.15 bps per
+trade net (gross -$2,308 before costs; long -$926, short -$1,749). Sensitivities (never decide the verdict): first-half-hour
+signal net +$5 (Sharpe 0.00); |r| >= 0.5% -$1,441 (237 trades); long-only -$926; slippage 0/2/5¢ -$2,459/-$2,891/-$3,538. Ex-dividend
+disclosure (seven listed days; the source has no Q4-2025 ex-date): removing them gives -$2,526, still NO-GO. IEX vs SIP, sign
+agreement of r: 99.80% (SIP previous close in both) / 99.20% (each feed's own previous close); mean abs diff 0.43 / 1.78 bps, max
+3.78 / 98.8 bps — the large B differences are the days after big closing-auction moves (2025-04-10, 2024-12-24), where IEX's own
+previous daily close differs from the official one; 4 days had no IEX signal bar. Largest single day: 2025-04-09 (SIP close 548.62
+vs the 15:59 bar 543.37, +96.6 bps; the long that day made +$375, without it the primary is -$3,050). Verified: 80/80 random days
+re-derived independently from raw bars match. By the pre-registered rule close-flow does **not** earn a holdout run; any change is
+a NEW pre-registration with a fresh test period. Nothing was tuned.
+**Open:** (1) Jorge's decision on what follows (stop, or a new pre-registered variant); (2) merging deploys nothing (no `src/`
+change on this branch); (3) the day-trading Alpaca account and Key Vault secrets in FOLLOWUPS #118 are still undefined.
+
 ### 118. Day trading runs in its OWN Alpaca account, independent of Core — supersedes the shared-account Phase 4 requirements (HIGH — program decision; docs only, no code changed)
 **Decision (Jorge, 2026-10-05):** day trading (ORB, the SPY close-flow candidate, and any later day-trading strategy) is fully
 independent of the Core portfolio: **its own Alpaca account — own capital, keys, ledgers and storage containers — and Core never sees

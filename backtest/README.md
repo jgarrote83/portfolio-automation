@@ -99,3 +99,22 @@ config, all variants, pre-registration unchanged) produces a go/no-go verdict. O
 `reports/orb/phase2/<run-id>/` (gitignored): `header.json` (config, code commit, pre-registration
 hash, data statistics), `summary.md`, and per variant `metrics.json` / `trades.csv` / `daily.csv`.
 The CLI reports; it does not tune.
+
+## SPY close-flow backtest
+
+A second candidate after ORB v1's NO-GO: if SPY has moved clearly up or down by 15:30, trade in that direction and exit at
+the close (one instrument, at most one trade a day, a 30-minute hold). The rules, the mechanical go/no-go and 30 interpreted
+details are pre-registered in `docs/specs/CloseFlow_SPY_Preregistration.md` (locked at its first commit; hash-checked in every
+run header). Day trading runs in its own Alpaca account, independent of Core (CLAUDE.md rule 4 as amended), so the Core-roster
+exclusion does not apply.
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m backtest.closeflow run --review-file .review/closeflow-results.md     # the pre-registered run (needs .env)
+python -m backtest.closeflow_verify                                              # independent re-derivation of a random sample of days
+```
+
+`backtest/closeflow.py` holds the pure logic (signal, direction, fills, P&L), the day loop, the metrics, the IEX-vs-SIP check
+and the CLI; data comes only through `backtest.data.get_bars` (SPY `1Day` and `1Min`, raw, SIP and IEX). The code refuses any
+date on or after 2026-01-01 and has no override flag; only the exact pre-registered invocation produces a verdict. Outputs go
+to `reports/closeflow/<run-id>/` (gitignored).
