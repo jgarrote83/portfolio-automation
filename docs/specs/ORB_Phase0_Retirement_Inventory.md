@@ -62,6 +62,8 @@ After Part A the branch is measured again in `.review/phase0a-summary.md`.
 
 ## 5. Phase 4 requirements recorded from review (NOT Part B; do not act on these now)
 
+> **Superseded 2026-10-05 by FOLLOWUPS #118:** day trading will run in its own Alpaca account, independent of Core, so the shared-account requirements below no longer apply.
+
 - **R2 — Core/ORB separation.** ORB's exclusion set = all Core pool members ∪ **every `LEGACY_EXITS` name (U1: INTC/MCK/PPA/EUAD are plain legacy exits)** ∪ symbols held or with open orders at pre-open ∪ symbols in today's `daily-trades` file. The collector labels any overnight ORB-ledger position an **ORB exception + alert**, never Core off-roster. ORB realized P&L becomes an explicit equity-bridge attribution line (this is also what protects `core_current` FIFO from ORB fills in a Core pool symbol).
 - **R3 — order ownership.** ORB-owned = `ORB-` prefix **or** order id in the ORB ledger's `order_ids` (bracket/OTO child legs carry broker UUIDs, not the prefix — CLAUDE.md, B2 §8.2). A Core trade on an ORB-owned symbol is **skipped** (status `orb_symbol_conflict`, ERROR log) and never cancels ORB orders. Same rule for the defensive sell filter.
 - **Port-adaptation list found during the module review (inputs to Phase 4):**

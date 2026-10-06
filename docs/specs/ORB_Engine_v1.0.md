@@ -35,7 +35,7 @@ Claude Code builds ORB inside the portfolio-automation repo one phase at a time 
 1. Work one phase at a time; a phase is done only when its checklist is ticked, `pytest` passes, `ruff` is clean and `FOLLOWUPS.md` records it.
 2. Read every strategy parameter from `src/orb/config.py`; any threshold change bumps `spec_version`.
 3. Follow repo doctrine: no market hours in cron, gate on Alpaca's clock and calendar, reconcile first, idempotent `ORB-` client order IDs.
-4. Keep `src/orb/` separate: import only `shared.*`, never trade a Core roster ticker, and reconcile or flatten only ORB's own ledger.
+4. Keep day-trading code separate: import only `shared.*`, run in its own Alpaca account, fully independent of Core (no shared positions, keys or ledgers), and reconcile or flatten only its own ledger. The Core-roster exclusion does not apply to day-trading strategies.
 5. Load keys from the gitignored `.env` locally and Key Vault in Azure; never commit, log or print them.
 6. Backtests get data only through `backtest.data.get_bars`; tune only on 2024–2025 and never run the 2026 holdout without your approval.
 7. Use the paper endpoint only; `ORB_ENABLED` ships `false` in Bicep and only you flip it.

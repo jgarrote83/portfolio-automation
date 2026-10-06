@@ -663,6 +663,32 @@ wiped them.
 
 ## Open
 
+### 118. Day trading runs in its OWN Alpaca account, independent of Core — supersedes the shared-account Phase 4 requirements (HIGH — program decision; docs only, no code changed)
+**Decision (Jorge, 2026-10-05):** day trading (ORB, the SPY close-flow candidate, and any later day-trading strategy) is fully
+independent of the Core portfolio: **its own Alpaca account — own capital, keys, ledgers and storage containers — and Core never sees
+it.** CLAUDE.md "ORB program" rule 4 and rule 4 of `docs/specs/ORB_Engine_v1.0.md` now read "Keep day-trading code separate: import
+only `shared.*`, run in its own Alpaca account, fully independent of Core (no shared positions, keys or ledgers), and reconcile or
+flatten only its own ledger. The Core-roster exclusion does not apply to day-trading strategies."
+**Superseded (all were Phase 4 requirements that existed only because ORB would share Core's Alpaca account; see
+`docs/specs/ORB_Phase0_Retirement_Inventory.md` §5 and decision rows U1/U5, which now carry a one-line pointer here and are otherwise
+unedited):** (1) **the ORB exclusion set** — Core pool members ∪ every `LEGACY_EXITS` name ∪ held/ordered symbols ∪ today's
+`daily-trades` symbols (R2, U1); (2) **the executor changes** — `_cancel_conflicting_orders` skipping ORB-owned orders and the
+defensive-sell guard counting ORB-held shares (R3 and the executor notes under (d)): with separate accounts Core's executor cannot see
+or cancel a day-trading order; (3) **the equity-bridge attribution line** that keeps ORB fills out of `core_current` FIFO and the
+`off_roster_flex` bucket (R2, U5): day-trading fills never appear in Core's Alpaca account, so Core's P&L decomposition, equity
+reconciliation and performance series need no day-trading awareness; (4) **`shared/separation.py`'s planned Phase 4 consumer** — U1
+moves `flex/separation.py` there verbatim in Part B (still unmerged) for the ORB exclusion set; that consumer no longer exists, so
+whether the module is kept, repurposed or deleted is a later decision.
+**Live work will need:** a dedicated Alpaca account (paper first, rule 7 unchanged) and **separate Key Vault secrets in
+`kv-pfauto-prod` (names TBD — not `AlpacaApiKey`/`AlpacaApiSecret`)**, separate blob containers and tables for ledgers/state, its own
+reconcile, kill switch and flat-at-close logic, and its own portal/API credentials; Core's collector, analyzer and executor stay
+untouched and keep a single, Core-only Alpaca account.
+**Left untouched on purpose (no code or text changes beyond the two rule-4 lines, the inventory pointer and this entry):** the
+spec's universe table ("excluding every Core roster ticker") and Phase 4 step 3 ("removing Core roster tickers") still describe the
+shared-account design; `src/orb/universe.py::core_roster()` and `OrbConfig`'s Core exclusion; and the locked Phase 2 pre-registration
+("Core roster excluded"), which is historical and must not change. They should be reconciled when live work starts. Backtests are
+unaffected (offline; no account).
+
 ### 117. ORB Phase 2 — backtest engine (HIGH — program, the go/no-go gate; branch `feat/orb-phase2-backtest`, not merged)
 Built per `docs/specs/ORB_Engine_v1.0.md` Phase 2 and `docs/specs/ORB_Phase2_Preregistration.md` (rules, thresholds and
 the mechanical go/no-go written and committed **before any code or result**; locked, hash-checked in every run header).
