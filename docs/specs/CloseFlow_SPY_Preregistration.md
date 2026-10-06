@@ -140,3 +140,9 @@ Window and holdout: `2024-01-02` to `2025-12-31`. The code refuses any date on o
 ## 8. What a run reports
 
 For every variant: net Sharpe, total and per-year net P&L, max drawdown, trades, hit ratio, average net return per trade (bps), the t-statistic of the mean daily return, and long vs. short; the days flat, skipped (with reasons) and traded; plus, for the primary, the mechanical verdict, the ex-dividend disclosure (section 4), the IEX vs. SIP check (section 5) and the sanity checks (item 28). The verdict is reported and the work stops: no tuning, no added variants, no 2026 data, however the numbers look.
+
+## Post-run clarification, no rule change
+
+*Added 2026-10-05, after the run `20261006T003336Z-8149489` and Jorge's review. Nothing above this heading has been edited.*
+
+Half-days take the signal from the bar stamped 12:29 and enter at the open of the bar stamped 12:30, the analogue of 15:29 and 15:30. This is what was implemented and intended (section 6, item 6 already states it; this note only confirms it).
