@@ -117,3 +117,74 @@ class BarStore:
                 except OSError:
                     pass
         return total
+
+
+# --------------------------------------------------------------------------------------- news
+NEWS_COLUMNS = ["id", "created_at", "updated_at", "headline", "symbols", "source"]
+
+
+def empty_news() -> pd.DataFrame:
+    return pd.DataFrame({
+        "id": pd.Series(dtype="int64"),
+        "created_at": pd.Series(dtype="datetime64[ns, UTC]"),
+        "updated_at": pd.Series(dtype="datetime64[ns, UTC]"),
+        "headline": pd.Series(dtype="object"),
+        "symbols": pd.Series(dtype="object"),
+        "source": pd.Series(dtype="object"),
+    })[NEWS_COLUMNS]
+
+
+def normalise_news(rows: list[dict]) -> pd.DataFrame:
+    """Alpaca article dicts -> the stored schema (only id, created_at, updated_at, headline, symbols, source)."""
+    if not rows:
+        return empty_news()
+    df = pd.DataFrame({
+        "id": [int(r["id"]) for r in rows],
+        "created_at": pd.to_datetime([r["created_at"] for r in rows], utc=True).as_unit("ns"),
+        "updated_at": pd.to_datetime([r.get("updated_at") or r["created_at"] for r in rows], utc=True).as_unit("ns"),
+        "headline": [str(r.get("headline") or "") for r in rows],
+        "symbols": [[str(s) for s in (r.get("symbols") or [])] for r in rows],
+        "source": [str(r.get("source") or "") for r in rows],
+    })
+    return df[NEWS_COLUMNS]
+
+
+class NewsStore:
+    """`{root}/news/{YYYY-MM}.parquet`, one file per ET month of `created_at`; writes are atomic and
+    merge-by-id (a re-fetched article replaces its earlier copy)."""
+
+    def __init__(self, root: str | Path | None = None) -> None:
+        self.root = Path(root) if root else DEFAULT_CACHE_DIR
+
+    def path(self, month: str) -> Path:
+        return self.root / "news" / f"{month}.parquet"
+
+    def write(self, month: str, new: pd.DataFrame) -> tuple[int, int]:
+        path = self.path(month)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        merged = new[NEWS_COLUMNS]
+        if path.is_file():
+            merged = pd.concat([pd.read_parquet(path), merged], ignore_index=True)
+        merged = (merged.drop_duplicates(subset="id", keep="last")
+                  .sort_values(["created_at", "id"]).reset_index(drop=True))
+        tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}")
+        try:
+            merged.to_parquet(tmp, engine="pyarrow", index=False)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
+        return len(merged), path.stat().st_size
+
+    def read(self, months: Iterable[str]) -> pd.DataFrame:
+        frames = [pd.read_parquet(self.path(m)) for m in dict.fromkeys(months) if self.path(m).is_file()]
+        if not frames:
+            return empty_news()
+        out = pd.concat(frames, ignore_index=True)
+        out["created_at"] = pd.to_datetime(out["created_at"], utc=True)
+        out["updated_at"] = pd.to_datetime(out["updated_at"], utc=True)
+        out["symbols"] = out["symbols"].map(list)                  # parquet hands back numpy arrays; consumers get lists
+        return out[NEWS_COLUMNS]

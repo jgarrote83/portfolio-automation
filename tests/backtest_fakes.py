@@ -152,3 +152,53 @@ class RejectingSession(FakeSession):
                 self.calls.append({"url": url, "params": dict(params), "method": "GET"})
                 return FakeResponse(400, {"message": f"invalid symbol: {offenders[0]}"})
         return super().get(url, params=params, headers=headers, timeout=timeout)
+
+
+NEWS_URL = "https://data.alpaca.markets/v1beta1/news"
+
+
+class FakeNews:
+    """A fixed list of news articles served like `GET /v1beta1/news`: filtered to [start, end], oldest first,
+    paged by `page_size` with an opaque `page_token` (the offset)."""
+
+    def __init__(self, articles: list[dict], page_size: int = 3) -> None:
+        self.articles = sorted(articles, key=lambda a: (a["created_at"], a["id"]))
+        self.page_size = page_size
+
+    def query(self, params: dict) -> dict:
+        start, end = _parse(params["start"]), _parse(params["end"])
+        rows = [a for a in self.articles if start <= _parse(a["created_at"]) <= end]
+        offset = int(params.get("page_token") or 0)
+        limit = min(self.page_size, int(params.get("limit", 50)))
+        page = rows[offset: offset + limit]
+        nxt = offset + len(page)
+        return {"news": page, "next_page_token": str(nxt) if nxt < len(rows) else None}
+
+
+def article(i: int, created_at: str, symbols=("AAA",), headline: str | None = None, updated_at: str | None = None,
+            source: str = "benzinga") -> dict:
+    return {"id": i, "headline": headline or f"headline {i}", "summary": "s", "author": "a", "url": "u",
+            "images": [], "content": "", "created_at": created_at, "updated_at": updated_at or created_at,
+            "symbols": list(symbols), "source": source}
+
+
+class NewsSession(FakeSession):
+    """FakeSession that also serves the news endpoint (bars and assets still work)."""
+
+    def __init__(self, market: FakeMarket, news: FakeNews, script: list | None = None) -> None:
+        super().__init__(market, script)
+        self.news = news
+
+    @property
+    def news_calls(self) -> list[dict]:
+        return [c for c in self.calls if c["url"] == NEWS_URL]
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        if url == NEWS_URL:
+            self.calls.append({"url": url, "params": dict(params or {}), "method": "GET"})
+            if self.script:
+                item = self.script.pop(0)
+                status, hdrs = item if isinstance(item, tuple) else (item, {})
+                return FakeResponse(status, {"message": "scripted failure"}, hdrs)
+            return FakeResponse(200, self.news.query(params))
+        return super().get(url, params=params, headers=headers, timeout=timeout)

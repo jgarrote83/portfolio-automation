@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS coverage (
 CREATE TABLE IF NOT EXISTS invalid_symbols (
     symbol TEXT NOT NULL PRIMARY KEY, first_seen TEXT NOT NULL, source TEXT NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS news_days (
+    day TEXT NOT NULL PRIMARY KEY, n_articles INTEGER NOT NULL, fetched_at TEXT NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS files (
     feed TEXT NOT NULL, timeframe TEXT NOT NULL, symbol TEXT NOT NULL, month TEXT NOT NULL,
     nrows INTEGER NOT NULL, nbytes INTEGER NOT NULL,
@@ -125,6 +128,29 @@ class Manifest:
                 "INSERT INTO files(feed,timeframe,symbol,month,nrows,nbytes) VALUES (?,?,?,?,?,?) "
                 "ON CONFLICT(feed,timeframe,symbol,month) DO UPDATE SET nrows=excluded.nrows, "
                 "nbytes=excluded.nbytes", list(rows))
+
+    # ------------------------------------------------------------------ news days
+    def news_missing(self, days: Iterable[date]) -> list[date]:
+        """The ET calendar days NOT yet fetched (a fetched day with zero articles counts as fetched)."""
+        want = sorted(set(days))
+        have: set[str] = set()
+        for i in range(0, len(want), _CHUNK):
+            chunk = [d.isoformat() for d in want[i:i + _CHUNK]]
+            q = "SELECT day FROM news_days WHERE day IN (%s)" % ",".join("?" * len(chunk))
+            have.update(r[0] for r in self._db.execute(q, chunk))
+        return [d for d in want if d.isoformat() not in have]
+
+    def record_news_days(self, rows: Iterable[tuple[date, int]], fetched_at: str) -> None:
+        """Record (day, n_articles) for days just fetched and written. Idempotent."""
+        data = [(d.isoformat(), int(n), fetched_at) for d, n in rows]
+        with self._db:
+            self._db.executemany(
+                "INSERT INTO news_days(day,n_articles,fetched_at) VALUES (?,?,?) ON CONFLICT(day) "
+                "DO UPDATE SET n_articles=excluded.n_articles, fetched_at=excluded.fetched_at", data)
+
+    def news_stats(self) -> dict:
+        days, n = self._db.execute("SELECT COUNT(*), COALESCE(SUM(n_articles),0) FROM news_days").fetchone()
+        return {"news_days": days, "news_articles": n}
 
     # --------------------------------------------------- symbols the endpoint rejected
     def record_invalid(self, symbols: Iterable[str], first_seen: str, source: str) -> int:

@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from collections.abc import Iterable
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -30,7 +30,7 @@ import pandas as pd
 from . import config as C
 from .client import AlpacaDataClient
 from .manifest import Manifest, month_key, window_key
-from .store import BarStore, empty_frame
+from .store import BarStore, NewsStore, empty_frame, empty_news, normalise_news
 
 _DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -152,6 +152,7 @@ class DataLayer:
                  now=None) -> None:
         self.cache_dir = Path(cache_dir) if cache_dir else C.DEFAULT_CACHE_DIR
         self.store = BarStore(self.cache_dir)
+        self.news_store = NewsStore(self.cache_dir)
         self.manifest = Manifest(manifest_path or self.cache_dir / "manifest.sqlite")
         self._client = client
         self._now = now or (lambda: datetime.now(timezone.utc))
@@ -353,6 +354,79 @@ class DataLayer:
         return {"candidates": len(cands), "newly_recorded": len(self.manifest.invalid_symbols()) - before,
                 "total_recorded": len(self.manifest.invalid_symbols())}
 
+    # ------------------------------------------------------------------------ news
+    def _fetch_news_day(self, day: date, until: pd.Timestamp | None = None) -> list[dict]:
+        """Every article created on ET calendar day `day`, oldest first (one paged request series)."""
+        start = _utc_str(_et(day, "00:00"))
+        end_ts = _et(day + timedelta(days=1), "00:00") - pd.Timedelta(seconds=1)
+        if until is not None and until < end_ts:
+            end_ts = until
+        if end_ts <= _et(day, "00:00"):
+            return []
+        return list(self.client.iter_news(start, _utc_str(end_ts)))
+
+    def _fetch_news_days(self, days: list[date], flush_days: int = 7) -> None:
+        """Fetch and store ET calendar days. Parquet FIRST, manifest SECOND, so a crash can only cause a refetch."""
+        pending: list[tuple[date, list[dict]]] = []
+
+        def flush() -> None:
+            if not pending:
+                return
+            df = normalise_news([a for _d, rows in pending for a in rows])
+            if not df.empty:
+                months = df["created_at"].dt.tz_convert(C.ET_NAME).dt.strftime("%Y-%m")
+                for month, g in df.groupby(months, sort=True):
+                    self.news_store.write(month, g)
+            self.manifest.record_news_days([(d, len(rows)) for d, rows in pending],
+                                           self._now().astimezone(timezone.utc).isoformat())
+            pending.clear()
+
+        for d in sorted(days):
+            pending.append((d, self._fetch_news_day(d)))
+            if len(pending) >= flush_days:
+                flush()
+        flush()
+
+    def get_news(self, start, end, *, offline: bool = False, allow_holdout: bool = False) -> pd.DataFrame:
+        """Articles created on ET calendar days start..end inclusive, as a frame with columns
+        id, created_at (UTC), updated_at (UTC), headline, symbols (list), source -- oldest first.
+
+        Same guards as `get_bars`: the 2026 holdout raises `HoldoutError` before any cache or network
+        work; `offline=True` raises `CacheMissError` for any day not yet fetched; today is fetched into
+        memory only (end-clamped to now-15min), never cached. Every calendar day is fetched, weekends and
+        holidays included, because an overnight window can span them."""
+        s_day, _ = _parse_bound(start)
+        e_day, _ = _parse_bound(end)
+        if e_day < s_day:
+            raise ValueError("end is before start")
+        self._guard_holdout(s_day, e_day, allow_holdout)               # BEFORE any cache or network work
+        days = [s_day + timedelta(days=i) for i in range((e_day - s_day).days + 1)]
+        today = self._today_et()
+        cacheable = [d for d in days if d < today]
+        fresh = [d for d in days if d >= today]
+        missing = self.manifest.news_missing(cacheable)
+        if missing:
+            if offline:
+                raise CacheMissError(f"offline=True but {len(missing)} news day(s) are not cached "
+                                     f"(e.g. {missing[0]}).")
+            self._fetch_news_days(missing)
+        frames = []
+        if cacheable:
+            frames.append(self.news_store.read(sorted({month_key(d) for d in cacheable})))
+        if fresh:
+            if offline:
+                raise CacheMissError(f"offline=True but {fresh[0]} is today (never cached).")
+            cutoff = pd.Timestamp(self._now()).tz_convert(C.ET) - pd.Timedelta(C.RECENT_GUARD)
+            rows = [a for d in fresh for a in self._fetch_news_day(d, until=cutoff)]
+            frames.append(normalise_news(rows))
+        frames = [f for f in frames if not f.empty]
+        if not frames:
+            return empty_news()
+        df = pd.concat(frames, ignore_index=True).drop_duplicates(subset="id", keep="last")
+        et_day = df["created_at"].dt.tz_convert(C.ET_NAME).dt.date
+        df = df[(et_day >= s_day) & (et_day <= e_day)]
+        return df.sort_values(["created_at", "id"]).reset_index(drop=True)
+
     # ---------------------------------------------------------------------- assets
     def get_assets(self, *, refresh: bool = False, offline: bool = False) -> pd.DataFrame:
         """Active AND inactive US equities (inactive names reduce survivorship gaps). Cached in
@@ -388,6 +462,7 @@ class DataLayer:
         s["disk_bytes"] = self.store.disk_bytes()
         s["requests_made"] = getattr(self._client, "requests_made", 0) if self._client else 0
         s["invalid_symbols_dropped"] = len(self.invalid_symbols())
+        s.update(self.manifest.news_stats())
         return s
 
 
@@ -420,3 +495,8 @@ def get_bars(symbols, start, end, timeframe: str = "1Min", feed: str = "sip", *,
     """See the module docstring. Thin wrapper over the process-wide `DataLayer`."""
     return default_layer().get_bars(symbols, start, end, timeframe, feed, window=window,
                                     offline=offline, allow_holdout=allow_holdout)
+
+
+def get_news(start, end, *, offline: bool = False, allow_holdout: bool = False) -> pd.DataFrame:
+    """See `DataLayer.get_news`. Thin wrapper over the process-wide `DataLayer`."""
+    return default_layer().get_news(start, end, offline=offline, allow_holdout=allow_holdout)

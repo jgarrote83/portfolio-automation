@@ -17,6 +17,10 @@ BARS_PATH = "/v2/stocks/bars"
 ASSETS_BASE_URL = "https://paper-api.alpaca.markets"
 ASSETS_PATH = "/v2/assets"
 
+# News (read-only GET on the market-data host; Alpaca's news is Benzinga's). The page maximum is 50 articles.
+NEWS_PATH = "/v1beta1/news"
+NEWS_PAGE_LIMIT = 50
+
 # --- supported request shapes --------------------------------------------------------------
 TIMEFRAMES = ("1Min", "5Min", "1Day")
 FEEDS = ("sip", "iex")

@@ -23,6 +23,8 @@ from .config import (
     HTTP_TIMEOUT_S,
     MAX_REQUESTS_PER_MINUTE,
     MAX_RETRIES,
+    NEWS_PAGE_LIMIT,
+    NEWS_PATH,
     PAGE_LIMIT,
     RATE_BURST,
 )
@@ -155,6 +157,24 @@ class AlpacaDataClient:
             for sym, rows in bars.items():
                 for bar in rows or []:
                     yield sym, bar
+            token = (body or {}).get("next_page_token")
+            if not token:
+                return
+
+    # ------------------------------------------------------------------ news
+    def iter_news(self, start: str, end: str, *, limit: int = NEWS_PAGE_LIMIT) -> Iterator[dict]:
+        """Yield every news article in [start, end] (RFC3339 strings), oldest first, following
+        `next_page_token`. `GET /v1beta1/news` with `sort=asc`, the maximum page `limit` and
+        `include_content=false`; no symbol filter. A 401/403 raises `AlpacaAuthError` (never worked around)."""
+        params = {"start": start, "end": end, "limit": limit, "sort": "asc", "include_content": "false"}
+        token = None
+        while True:
+            page_params = dict(params)
+            if token:
+                page_params["page_token"] = token
+            body = self._get(f"{self.data_url}{NEWS_PATH}", page_params)
+            for article in (body or {}).get("news") or []:
+                yield article
             token = (body or {}).get("next_page_token")
             if not token:
                 return
