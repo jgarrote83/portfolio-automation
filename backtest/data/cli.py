@@ -3,6 +3,7 @@
     python -m backtest.data.cli bars --symbols SPY,QQQ --start 2024-01-02 --end 2024-01-31 \
         --timeframe 1Day --feed sip [--window 09:30-09:35] [--offline]
     python -m backtest.data.cli assets [--refresh] [--offline]
+    python -m backtest.data.cli news --start 2023-12-29 --end 2025-12-31   # Alpaca news, cached by month
     python -m backtest.data.cli stats
     python -m backtest.data.cli probe-invalid    # recover the rejected-symbol list for an older cache
 
@@ -34,6 +35,10 @@ def main(argv: list[str] | None = None) -> int:
     a = sub.add_parser("assets")
     a.add_argument("--refresh", action="store_true")
     a.add_argument("--offline", action="store_true")
+    nw = sub.add_parser("news", help="fetch/cache Alpaca news by ET calendar day, one month at a time")
+    nw.add_argument("--start", required=True)
+    nw.add_argument("--end", required=True)
+    nw.add_argument("--offline", action="store_true")
     sub.add_parser("stats")
     sub.add_parser("probe-invalid", help="recover the list of symbols the bars endpoint rejects (read-only)")
     args = ap.parse_args(argv)
@@ -44,6 +49,24 @@ def main(argv: list[str] | None = None) -> int:
     except (CacheMissError, HoldoutError, MissingCredentialsError, AlpacaDataError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+
+
+def _news(args, layer: DataLayer) -> None:
+    """Fetch/cache news month by month (resumable: every day is committed once fetched) and print progress."""
+    import time
+    from datetime import date, timedelta
+    s_day, e_day = date.fromisoformat(args.start), date.fromisoformat(args.end)
+    cur, total = s_day, 0
+    t0 = time.time()
+    while cur <= e_day:
+        nxt = (cur.replace(day=28) + timedelta(days=4)).replace(day=1)          # first day of the next month
+        last = min(e_day, nxt - timedelta(days=1))
+        df = layer.get_news(cur, last, offline=args.offline)
+        total += len(df)
+        print(f"[{time.strftime('%H:%M:%S')}] news {cur}..{last}: {len(df):,} articles "
+              f"(running total {total:,}; {layer.cache_stats().get('requests_made', 0):,} requests; {time.time() - t0:.0f}s)",
+              flush=True)
+        cur = nxt
 
 
 def _dispatch(args, layer: DataLayer) -> int:
@@ -58,6 +81,8 @@ def _dispatch(args, layer: DataLayer) -> int:
         df = layer.get_assets(refresh=args.refresh, offline=args.offline)
         print(f"{len(df)} assets ({int((df['status'] == 'active').sum())} active, "
               f"{int((df['status'] == 'inactive').sum())} inactive)")
+    elif args.cmd == "news":
+        _news(args, layer)
     elif args.cmd == "probe-invalid":
         print(layer.probe_invalid())
     else:
