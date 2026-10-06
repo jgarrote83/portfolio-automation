@@ -293,3 +293,30 @@ def test_the_real_preregistration_has_not_been_edited_since_its_first_commit():
     if info["first_commit"] is None:
         pytest.skip("no git history available")
     assert info["unchanged"] is True, "the pre-registration is locked: a change needs a new pre-registration"
+
+
+@pytest.mark.skipif(GIT is None, reason="git not installed")
+def test_an_appended_post_run_clarification_is_not_an_edit_but_a_change_to_a_rule_still_is(tmp_path):
+    path = "docs/specs/Some_Preregistration.md"
+    _git(tmp_path, "init", "-q")
+    f = tmp_path / path
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"# prereg\nrule 1\nrule 2\n")
+    _git(tmp_path, "add", path)
+    _git(tmp_path, "commit", "-q", "-m", "prereg")
+    note = b"\n## Post-run clarification, no rule change\n\n*Added later.* A confirmation, not a rule.\n"
+    f.write_bytes(b"# prereg\nrule 1\nrule 2\n" + note)
+    info = provenance.prereg_info(tmp_path, path)
+    assert info["unchanged"] is True and info["has_post_run_note"] is True
+    assert info["sha256_now"] == info["sha256_at_first_commit"]
+    f.write_bytes(b"# prereg\r\nrule 1\r\nrule 2\r\n" + note.replace(b"\n", b"\r\n"))             # CRLF working copy
+    assert provenance.prereg_info(tmp_path, path)["unchanged"] is True
+    f.write_bytes(b"# prereg\nrule 1\nrule 2\n" + note + b"\nA second note line.\n")               # more text in the note
+    assert provenance.prereg_info(tmp_path, path)["unchanged"] is True
+    f.write_bytes(b"# prereg\nrule 1 (edited)\nrule 2\n" + note)                                     # a rule edited ABOVE the note
+    edited = provenance.prereg_info(tmp_path, path)
+    assert edited["unchanged"] is False and edited["has_post_run_note"] is True
+    f.write_bytes(b"# prereg\nrule 1\nrule 2 ## Post-run clarification inline, not a heading\nextra rule\n")
+    assert provenance.prereg_info(tmp_path, path)["unchanged"] is False                              # a heading must start its own line
+    f.write_bytes(b"# prereg\nrule 1\nrule 2\nextra rule\n")                                          # a rule ADDED, no note
+    assert provenance.prereg_info(tmp_path, path)["unchanged"] is False
