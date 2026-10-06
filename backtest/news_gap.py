@@ -191,8 +191,8 @@ class NewsIndex:
             return
         created = news["created_at"].dt.as_unit("ns").astype("int64").tolist()
         changed = (news["updated_at"] != news["created_at"]).tolist()
-        order = sorted(range(len(created)), key=lambda k: (created[k], int(news["id"].iat[k])))
         ids, heads, syms = news["id"].tolist(), news["headline"].tolist(), news["symbols"].tolist()
+        order = sorted(range(len(created)), key=lambda k: (created[k], int(ids[k])))
         for k in order:
             sl = list(syms[k])
             if not 0 < len(sl) <= cfg.max_news_symbols:

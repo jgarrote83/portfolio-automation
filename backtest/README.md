@@ -118,3 +118,24 @@ python -m backtest.closeflow_verify                                             
 and the CLI; data comes only through `backtest.data.get_bars` (SPY `1Day` and `1Min`, raw, SIP and IEX). The code refuses any
 date on or after 2026-01-01 and has no override flag; only the exact pre-registered invocation produces a verdict. Outputs go
 to `reports/closeflow/<run-id>/` (gitignored).
+
+## News event study
+
+Does a news-driven gap continue through the day? For large, liquid non-ETF stocks, a gap of at least 2% at the open that is
+accompanied by overnight company news (an Alpaca/Benzinga article naming the stock, with at most 2 symbols, created between
+16:00 ET the previous trading day and 09:30 ET) is traded in the gap's direction from the 10:00 open to the close: the top 5 by
+|g| a day, 5 slots of $5,000. The identical rule on gaps with **no** news is the control. Hypothesis, rules, diagnostics and
+the mechanical go/no-go are pre-registered in `docs/specs/News_Gap_Preregistration.md` (locked at its first commit; rule-text
+hash checked in every run header). **No LLM is used anywhere**: the news condition is a timestamp-and-symbol match and the event
+types are a fixed keyword list.
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m backtest.data.cli news --start 2023-12-29 --end 2025-12-31   # fill the news cache (about 13,000 requests, ~80 min, resumable)
+python -m backtest.news_gap run --review-file .review/news-gap-results.md
+python -m backtest.news_gap_verify                                     # re-derive 50 primary + 50 control trades with separate code
+```
+
+News comes only through `backtest.data.get_news(start, end)` (the same pattern as `get_bars`: cached in `data/cache/news/{YYYY-MM}.parquet`
+with a per-day manifest, offline-capable, refusing 2026; every ET calendar day is fetched, weekends included). A 401/403 from the
+news endpoint stops the work; it is never worked around. Outputs go to `reports/news_gap/<run-id>/` (gitignored).
