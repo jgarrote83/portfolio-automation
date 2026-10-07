@@ -30,6 +30,7 @@ NY = ZoneInfo("America/New_York")
 DATA_FROM, NEWS_FROM = "2023-12-01", "2023-12-29"
 EXCHANGES = ("NYSE", "NASDAQ", "AMEX", "ARCA", "BATS")
 SLOT, SLIP_C, COMM = 5000.0, 2.0, 0.0035
+G_TOL = 6e-9                                   # trades.csv records g to 8 decimals (rounding error <= 5e-9)
 
 
 def latest_run(root: Path | None = None) -> Path:
@@ -119,7 +120,7 @@ def _check_set(world: World, trades: pd.DataFrame, kind: str, n: int, rng: rando
         else:
             _s, g, o, c = match[0]
             side = "long" if g > 0 else "short"
-            if abs(g - float(t["g"])) > 1e-9:
+            if abs(g - float(t["g"])) > G_TOL:
                 bad.append("g")
             if side != t["side"]:
                 bad.append("side")

@@ -4,6 +4,7 @@ are constructed; nothing here is evidence about real markets."""
 import json
 import math
 import os
+import random
 import sys
 from datetime import date, datetime, timedelta, timezone
 
@@ -285,3 +286,27 @@ def test_the_cli_labels_a_non_preregistered_run_writes_the_files_and_refuses_202
     monkeypatch.setattr(NG, "DataLayer", NoLayer)
     assert NG.main(["run", "--start", "2025-12-01", "--end", "2026-01-05", "--out", str(out)]) == 2
     assert "holdout" in capsys.readouterr().err.lower()
+
+
+# ============================================================== verifier tolerance (found on the real run)
+class _StubWorld:
+    """Just enough of `V.World` for `_check_set`: one day's top-5 and its 10:00 open."""
+
+    def top5(self, day, kind):
+        return [("AAA", 1 / 3, 30.0, 31.0)]                              # g = 1/3: no terminating decimal expansion
+
+    def open_10(self, day, sym):
+        return 30.5
+
+
+def test_the_verifier_accepts_a_gap_as_trades_csv_records_it_rounded_to_8_decimals():
+    # trades.csv writes g with 8 decimals; the verifier once compared at 1e-9 and flagged ~86% of real trades on "g" alone
+    shares = math.floor(5000 / 30.5)
+    net = shares * (31.0 - 30.5) - shares * 0.02 - 2 * shares * 0.0035
+    row = {"day": "2024-01-22", "symbol": "AAA", "side": "long", "g": float(f"{1 / 3:.8f}"), "daily_open": 30.0,
+           "entry_open": 30.5, "exit_price": 31.0, "shares": shares, "net_pnl": net}
+    ok = V._check_set(_StubWorld(), pd.DataFrame([row]), "news", 1, random.Random(1))
+    assert ok == {"sampled": 1, "matched": 1, "differences": []}
+    row["g"] += 0.0001                                                   # a real gap difference is still caught
+    bad = V._check_set(_StubWorld(), pd.DataFrame([row]), "news", 1, random.Random(1))
+    assert bad["matched"] == 0 and bad["differences"][0]["fields"] == ["g"]
