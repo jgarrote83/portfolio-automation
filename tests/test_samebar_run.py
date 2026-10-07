@@ -155,7 +155,8 @@ def _render(passed=False, monkeypatch=None):
               "explicit_pre_registered_rule_equals_default": True, "changed_set_all_real_equals_default": True}
     if passed:
         monkeypatch.setattr(reports, "go_no_go", lambda m: {"verdict": "GO", "checks": {"a": True, "b": True, "c": True}})
-    return R.render(header, cands, changed, res, checks, raw, metrics, layer, seed=1), metrics
+    validation = {"n": 1, "outcomes": {S.REAL_STOP: 1}, "at_trigger": 0, "through_trigger": 1}
+    return R.render(header, cands, changed, res, checks, raw, metrics, layer, 1, validation), metrics
 
 
 def test_the_report_states_the_counts_the_three_results_the_codes_and_the_example_sequences():
@@ -168,6 +169,10 @@ def test_the_report_states_the_counts_the_three_results_the_codes_and_the_exampl
     assert "| `I` | Odd Lot Trade |" in text and "| `Z` | Sold (Out Of Sequence) |" in text
     assert "### Example 1" in text and "outcome: dip_first" in text and "first print at/through the trigger (the fill): 09:35:05.000000000 @ 101.05" in text
     assert "Identical: **yes**" in text and "equals the engine default (yes)" in text
+    assert "**Timestamp resolution.**" in text and "of 6 prints" in text and "In plain language." in text
+    assert "Only the order of events inside the entry minute was resolved." in text
+    assert "this run counts **2**" in text and "all 1 unambiguous entries (0 opened at the trigger, 1 opened through it)" in text
+    assert "1 real_stop, 0 tie_real_stop" in text
     assert metrics["reported"]["net_pnl"] != metrics["optimistic"]["net_pnl"]
 
 

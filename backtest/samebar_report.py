@@ -106,7 +106,7 @@ def results_table(metrics: dict, order: list[tuple[str, str]]) -> str:
     return "\n".join([head, rule, *rows])
 
 
-def render(header, cands, changed, res, checks, raw, metrics, layer, seed) -> str:
+def render(header, cands, changed, res, checks, raw, metrics, layer, seed, validation) -> str:
     n_ss = len(cands)
     amb = [c for c in cands if c.ambiguous]
     unamb = [c for c in cands if not c.ambiguous]
@@ -165,8 +165,18 @@ def render(header, cands, changed, res, checks, raw, metrics, layer, seed) -> st
     A(f"| ambiguous but unchanged by the optimistic rule (stopped later at the same level: gross R within {samebar.R_TOLERANCE} of -1.00) | {len(unchanged_amb):,} |")
     A(f"| **changed set** (ambiguous, and the optimistic R differs from -1.00 by more than {samebar.R_TOLERANCE}) | **{len(changed):,}** |")
     A("")
-    A(f"The brief's figure for the ambiguous trades is 4,207; this run counts {len(amb):,}. The changed set is judged "
-      "on gross R (cost-free), where the primary's is exactly -1.00.")
+    A(f"The brief's figure is 4,207 ambiguous trades; this run counts **{len(amb):,}**. The 4,207 is every `stop_same_bar` "
+      f"entry that was not a gap fill; **{validation['at_trigger']:,}** of those opened EXACTLY at the trigger, which fills on the "
+      "bar's opening print, so a later low is unambiguously after the entry (the stop is real) and they are not counted as "
+      "ambiguous here. The changed set is judged on gross R (cost-free), where the primary's is exactly -1.00.")
+    A("")
+    vo = validation["outcomes"]
+    A(f"**Check on that definition:** all {validation['n']:,} unambiguous entries ({validation['at_trigger']:,} opened at the "
+      f"trigger, {validation['through_trigger']:,} opened through it) were also replayed from their prints "
+      f"(they never feed the engine): " + ", ".join(f"{vo.get(k, 0):,} {k}" for k in
+                                                    (samebar.REAL_STOP, samebar.TIE_REAL_STOP, samebar.DIP_FIRST,
+                                                     samebar.STOP_NEVER_TOUCHED, samebar.NO_TRIGGER_PRINT, samebar.UNRESOLVED))
+      + ". Every one should be a real stop (or a same-timestamp tie); anything else would mean the definition is wrong.")
     A("")
     A("## Tick resolution of the changed set")
     A("")
@@ -223,6 +233,20 @@ def render(header, cands, changed, res, checks, raw, metrics, layer, seed) -> st
     A("")
     kept = sorted(c for c in carried if c not in samebar.EXCLUDED_CODES)
     A("Codes seen in these minutes that DO count: " + ", ".join(f"`{c}` ({table.get(c, '?')})" for c in kept) + ".")
+    A("")
+    n_all = n_256 = n_dup_minutes = 0
+    for df in raw.values():
+        vals = [t.value for t in df["ts"]]
+        n_all += len(vals)
+        n_256 += sum(1 for v in vals if v % 256 == 0)
+        n_dup_minutes += int(len(set(vals)) < len(vals))
+    A("**Timestamp resolution.** Alpaca delivers many trade timestamps with limited resolution: "
+      f"{n_256:,} of {n_all:,} prints ({n_256 / max(n_all, 1) * 100:.1f}%) in these minutes carry a timestamp that is an exact "
+      "multiple of 256 ns (0.4% if every nanosecond digit were real; the API response itself reads e.g. `.23596544Z`, and a fresh "
+      "raw response and the cache agree). Two prints can therefore share a timestamp without having traded at the same "
+      f"instant. {n_dup_minutes:,} of the {len(raw):,} replayed minutes contain at least one pair of prints with an identical "
+      "timestamp; a pair matters only when it is a trigger print and a stop print, which is the same-timestamp count in the "
+      "outcome table above (scored as a real stop, the conservative reading).")
     A("")
     A("**Check against Alpaca's own bars** (the tick-derived open/high/low/close vs the cached one-minute bar the engine used, "
       "over every changed trade's entry minute):")
@@ -289,6 +313,26 @@ def render(header, cands, changed, res, checks, raw, metrics, layer, seed) -> st
     A(f"Tick-resolved: net Sharpe {_n(tick['sharpe_net'], 2)}, net P&L {_usd(tick['by_year'].get('2024', {}).get('net_pnl'))} in 2024 and "
       f"{_usd(tick['by_year'].get('2025', {}).get('net_pnl'))} in 2025, against {_usd(rep['by_year'].get('2024', {}).get('net_pnl'))} and "
       f"{_usd(rep['by_year'].get('2025', {}).get('net_pnl'))} reported. ")
+    A("")
+    costs = tick["slippage_cost"] + tick["commission"]
+    moved = tick["net_pnl"] - rep["net_pnl"]
+    A("**In plain language.** " + (
+        f"Of the reported net loss of {_usd(-rep['net_pnl'])}, {_usd(moved)} ({moved / -rep['net_pnl'] * 100:.0f}%) came from the "
+        "entry-minute assumption: resolving it from the prints moves net P&L to "
+        f"{_usd(tick['net_pnl'])} and gross P&L from {_usd(rep['gross_pnl'])} to {_usd(tick['gross_pnl'])}. "
+        if rep["net_pnl"] < 0 and moved > 0 else
+        f"Resolving the entry-minute assumption from the prints moves net P&L from {_usd(rep['net_pnl'])} to {_usd(tick['net_pnl'])}. ")
+      + (f"What is left is a cost gap: at the pre-registered 2 cents a side and $0.0035 a share the costs are {_usd(costs)}, "
+         f"{costs / tick['gross_pnl']:.1f} times the tick-resolved gross, so " if 0 < tick["gross_pnl"] < costs else "")
+      + f"the tick-resolved net P&L is {_usd(tick['by_year'].get('2024', {}).get('net_pnl'))} in 2024 and "
+        f"{_usd(tick['by_year'].get('2025', {}).get('net_pnl'))} in 2025 and the net Sharpe is {_n(tick['sharpe_net'], 2)}, "
+        "against the pre-registered bar of 1.0. The Phase 2 number was mis-measured in size; "
+      + ("it was not mis-measured in verdict." if not passed else "and by the same yardstick the verdict would differ."))
+    A("")
+    A("What this diagnostic does not touch (all inherited from the Phase 2 engine, bar-level and unchanged): an entry fills at the "
+      "trigger price, not at the price of the print that triggered it; a stop fills at the stop level in the entry minute and, "
+      "in a later minute, at the stop level or at that bar's open if it opened beyond the stop; and costs are the flat "
+      "pre-registered 2 cents a side. Only the order of events inside the entry minute was resolved.")
     A("")
     A("**" + (SENTENCE_MISMEASURED if passed else SENTENCE_UNCHANGED) + "**")
     A("")

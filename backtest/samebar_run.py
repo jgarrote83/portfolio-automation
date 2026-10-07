@@ -140,6 +140,19 @@ def write_trades_csv(path: Path, results) -> None:
             w.writerow({k: (f"{v:.6f}" if isinstance(v, float) else v) for k, v in r.items()})
 
 
+def candidate_rows(cands, resolutions) -> list[dict]:
+    """One row per Phase 2 `stop_same_bar` trade, with the tick outcome where it was replayed."""
+    rows = []
+    for c in cands:
+        r = resolutions.get((c.day, c.symbol))
+        rows.append({"day": c.day.isoformat(), "symbol": c.symbol, "side": c.side, "trigger": c.trigger,
+                     "stop": c.stop, "entry_minute": c.entry_minute, "bar_open": c.bar[0], "bar_high": c.bar[1],
+                     "bar_low": c.bar[2], "bar_close": c.bar[3], "ambiguous": c.ambiguous,
+                     "r_gross_optimistic": c.r_gross_optimistic, "changed": c.changed,
+                     "tick_outcome": r.outcome if r else "", "tick_counted_prints": r.n_prints if r else ""})
+    return rows
+
+
 # ========================================================================================== the run
 def cmd_run(args) -> int:
     cfg = OrbConfig()
@@ -169,6 +182,13 @@ def cmd_run(args) -> int:
     sets = {"primary": samebar.PRIMARY_EXCLUDED, "minimal": samebar.MINIMAL_EXCLUDED, "none": frozenset()}
     layer.trade_conditions("A"), layer.trade_conditions("B"), layer.trade_conditions("C")
     res, checks, raw = fetch_and_resolve(layer, changed, sets)
+    # a check on the definition of "ambiguous": the entries that opened AT or THROUGH the trigger fill on the
+    # opening print, so ticks must show a real stop for every one of them (they never feed the engine)
+    unamb = [c for c in cands if not c.ambiguous]
+    val_res, _val_checks, _val_raw = fetch_and_resolve(layer, unamb, {"primary": samebar.PRIMARY_EXCLUDED})
+    validation = {"n": len(unamb), "outcomes": samebar.outcome_counts(val_res["primary"]),
+                  "at_trigger": sum(1 for c in unamb if c.bar[0] == c.trigger),
+                  "through_trigger": sum(1 for c in unamb if c.bar[0] != c.trigger)}
     n_requests = layer.client.requests_made if layer._client else 0
     decisions = {name: samebar.tick_decisions(res[name]) for name in sets}
 
@@ -202,23 +222,16 @@ def cmd_run(args) -> int:
         "reproduces_phase2": repro, "explicit_pre_registered_rule_equals_default": rule_equal,
         "changed_set_all_real_equals_default": all_real_equal_default,
         "excluded_codes": samebar.EXCLUDED_CODES, "minimal_excluded": sorted(samebar.MINIMAL_EXCLUDED),
-        "api_requests_this_run": n_requests, "wall_time_s": round(time.time() - t0, 1),
+        "api_requests_this_run": n_requests, "wall_time_s": round(time.time() - t0, 1), "unambiguous_check": validation,
         "selection": sel_stats, "holdout": "2026 was never read (the engine refuses any date on/after 2026-01-01)"}
     (out / "header.json").write_text(json.dumps(header, indent=1, default=str), encoding="utf-8")
-    text = samebar_report.render(header, cands, changed, res, checks, raw, metrics, layer, args.seed)
+    text = samebar_report.render(header, cands, changed, res, checks, raw, metrics, layer, args.seed, validation)
     (out / "report.md").write_text(text, encoding="utf-8")
     if args.review_file:
         review = Path(args.review_file)
         review.parent.mkdir(parents=True, exist_ok=True)
         review.write_text(text, encoding="utf-8")
-    cand_rows = []
-    for c in cands:
-        r = res["primary"].get((c.day, c.symbol))
-        cand_rows.append({"day": c.day.isoformat(), "symbol": c.symbol, "side": c.side, "trigger": c.trigger,
-                          "stop": c.stop, "entry_minute": c.entry_minute, "bar_open": c.bar[0], "bar_high": c.bar[1],
-                          "bar_low": c.bar[2], "bar_close": c.bar[3], "ambiguous": c.ambiguous,
-                          "r_gross_optimistic": c.r_gross_optimistic, "changed": c.changed,
-                          "tick_outcome": r.outcome if r else "", "tick_counted_prints": r.n_prints if r else ""})
+    cand_rows = candidate_rows(cands, res["primary"])
     with (out / "candidates.csv").open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(cand_rows[0]), lineterminator="\n")
         w.writeheader()

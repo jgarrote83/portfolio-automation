@@ -139,3 +139,23 @@ python -m backtest.news_gap_verify                                     # re-deri
 News comes only through `backtest.data.get_news(start, end)` (the same pattern as `get_bars`: cached in `data/cache/news/{YYYY-MM}.parquet`
 with a per-day manifest, offline-capable, refusing 2026; every ET calendar day is fetched, weekends included). A 401/403 from the
 news endpoint stops the work; it is never worked around. Outputs go to `reports/news_gap/<run-id>/` (gitignored).
+
+## ORB same-minute resolution (a diagnostic, not a verdict)
+
+The Phase 2 engine reads one-minute bars. When an entry bar opens short of the trigger, reaches the trigger and also reaches the
+stop, the bar cannot say which came first, and the pre-registration assumed the stop came after the entry (`stop_same_bar`, a -1R
+loss). `backtest.samebar_run` settles it: it re-runs the Phase 2 **primary** variant with the entry bar's stop not checked (the
+optimistic bound), then replays the SIP trade prints of the one symbol and one minute of every trade whose result changed and
+runs the engine once more with those per-trade answers. **ORB v1 stays NO-GO by its pre-registration**; nothing here changes
+`docs/specs/ORB_Phase2_Preregistration.md`, `src/orb/` or the Phase 2 results.
+
+```
+PYTHONPATH=src python -m backtest.samebar_run run --review-file .review/phase2-samebar-resolution.md
+```
+
+Ticks come only through `backtest.data.get_trades(symbol, start, end)` (one symbol, one exact ET window on one trading day;
+cached per exact window in `data/cache/trades/`, offline-capable, refusing 2026) and the trade-condition table through
+`DataLayer.trade_conditions(tape)`. A print counts only if none of its condition codes is in `backtest.samebar.EXCLUDED_CODES`
+(odd lots, derivatively priced, out-of-sequence, late-reported and similar); the filter is checked against Alpaca's own one-minute
+bars in the report. The engine's default (`entry_bar_stop=None`) is the pre-registered rule byte for byte, and the run reproduces
+every Phase 2 primary trade before reporting anything. Outputs go to `reports/orb/samebar/<run-id>/` (gitignored).

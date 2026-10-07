@@ -61,6 +61,10 @@ def test_a_stop_print_that_shares_the_trigger_prints_timestamp_is_scored_as_a_re
     t = 2.0
     stop_sorts_first = res([P(1, 100.90), P(t, 100.70, seq=0), P(t, 101.02, seq=1), P(3, 100.95)])
     assert stop_sorts_first.outcome == S.TIE_REAL_STOP and stop_sorts_first.tie_would_be_dip is True    # order says dip; scored real
+    assert stop_sorts_first.stop_before_ts is None                       # the same-timestamp stop print is NOT "before" the fill
+    assert (stop_sorts_first.stop_after_ts, stop_sorts_first.stop_after_price) == (P(t, 0)[0], 100.70)
+    arrives_swapped = res([P(1, 100.90), P(t, 101.02, seq=1), P(t, 100.70, seq=0)])       # Alpaca's seq, not arrival, orders ties
+    assert arrives_swapped.outcome == S.TIE_REAL_STOP and arrives_swapped.tie_would_be_dip is True
     stop_sorts_second = res([P(1, 100.90), P(t, 101.02, seq=0), P(t, 100.70, seq=1)])
     assert stop_sorts_second.outcome == S.TIE_REAL_STOP and stop_sorts_second.tie_would_be_dip is False
     # the same timestamp but a strictly LATER stop print is an ordinary real stop, not a tie
@@ -74,6 +78,12 @@ def test_the_replay_is_in_timestamp_order_whatever_order_the_prints_arrive_in():
     assert res(list(reversed(ordered))).outcome == res(ordered).outcome == S.DIP_FIRST
     ordered2 = [P(1, 100.90), P(2, 101.05), P(3, 100.70)]
     assert res(list(reversed(ordered2))).outcome == S.REAL_STOP
+    # two prints reach the trigger: the FIRST BY TIME fills, however the list is arranged (the stop print at t=3
+    # is after the t=2 fill: a real stop; taking the t=5 print as the fill would call it a dip)
+    shuffled = [P(5, 101.20), P(3, 100.70), P(2, 101.05)]
+    r = res(shuffled)
+    assert r.outcome == S.REAL_STOP and r.trigger_ts == P(2, 0)[0] and r.trigger_price == 101.05
+    assert res(sorted(shuffled)).outcome == S.REAL_STOP
 
 
 def test_no_trigger_print_no_stop_print_and_no_prints_at_all_are_distinguished():
