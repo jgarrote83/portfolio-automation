@@ -19,6 +19,7 @@ calendar is used), so holidays are never requested for every symbol.
 """
 from __future__ import annotations
 
+import json
 import re
 from collections import defaultdict
 from collections.abc import Iterable
@@ -30,7 +31,8 @@ import pandas as pd
 from . import config as C
 from .client import AlpacaDataClient
 from .manifest import Manifest, month_key, window_key
-from .store import BarStore, NewsStore, empty_frame, empty_news, normalise_news
+from .store import (BarStore, NewsStore, TradeStore, empty_frame, empty_news, empty_trades, normalise_news,
+                    normalise_trades)
 
 _DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -153,6 +155,7 @@ class DataLayer:
         self.cache_dir = Path(cache_dir) if cache_dir else C.DEFAULT_CACHE_DIR
         self.store = BarStore(self.cache_dir)
         self.news_store = NewsStore(self.cache_dir)
+        self.trade_store = TradeStore(self.cache_dir)
         self.manifest = Manifest(manifest_path or self.cache_dir / "manifest.sqlite")
         self._client = client
         self._now = now or (lambda: datetime.now(timezone.utc))
@@ -427,6 +430,62 @@ class DataLayer:
         df = df[(et_day >= s_day) & (et_day <= e_day)]
         return df.sort_values(["created_at", "id"]).reset_index(drop=True)
 
+    # ---------------------------------------------------------------------- trades
+    def get_trades(self, symbol: str, start, end, *, feed: str = "sip", offline: bool = False,
+                   allow_holdout: bool = False) -> pd.DataFrame:
+        """Every trade print of ONE symbol with `start <= timestamp < end`, for an exact ET window on a single
+        trading day (both bounds are timestamps, never dates). Columns: symbol, ts (US/Eastern, nanosecond),
+        price, size, exchange, conditions (list of codes), id, tape, seq (Alpaca's response order).
+
+        Same guards as `get_bars`: the 2026 holdout raises `HoldoutError` before any cache or network work;
+        `offline=True` raises `CacheMissError` for a window not yet fetched; today is fetched into memory
+        only, never cached. The cache key is the exact window, so the same request is never made twice."""
+        if feed not in C.FEEDS:
+            raise ValueError(f"feed must be one of {C.FEEDS}")
+        sym = str(symbol).strip().upper()
+        if not sym:
+            raise ValueError("symbol is required")
+        s_day, s_ts = _parse_bound(start)
+        e_day, e_ts = _parse_bound(end)
+        if s_ts is None or e_ts is None:
+            raise ValueError("get_trades needs an exact start and end timestamp, not whole days")
+        if s_day != e_day:
+            raise ValueError("get_trades serves one ET trading day per call")
+        if e_ts <= s_ts:
+            raise ValueError("end is not after start")
+        self._guard_holdout(s_day, e_day, allow_holdout)               # BEFORE any cache or network work
+        day, win = s_day.isoformat(), f"{s_ts.strftime('%H%M%S')}-{e_ts.strftime('%H%M%S')}"
+        cacheable = s_day < self._today_et()
+        if cacheable and self.trade_store.has(feed, sym, day, win):
+            df = self.trade_store.read(feed, sym, day, win)
+        else:
+            if offline:
+                raise CacheMissError(f"offline=True but trades for {sym} {day} {win} are not cached.")
+            rows = list(self.client.iter_trades(sym, _utc_str(s_ts), _utc_str(e_ts), feed))
+            df = normalise_trades(rows)
+            if cacheable:
+                self.trade_store.write(feed, sym, day, win, df)       # parquet only: the file IS the coverage record
+        if df.empty:
+            out = empty_trades()
+        else:
+            keep = (df["ts"] >= s_ts.tz_convert("UTC")) & (df["ts"] < e_ts.tz_convert("UTC"))
+            out = df[keep].sort_values(["ts", "seq"], kind="stable").reset_index(drop=True)
+        out.insert(0, "symbol", sym)
+        out["ts"] = pd.to_datetime(out["ts"], utc=True).dt.tz_convert(C.ET_NAME)
+        return out
+
+    def trade_conditions(self, tape: str = "A", *, refresh: bool = False, offline: bool = False) -> dict[str, str]:
+        """The trade-condition code table for one tape, cached in `{cache}/trades/conditions_{tape}.json`."""
+        path = self.cache_dir / "trades" / f"conditions_{tape}.json"
+        if path.is_file() and not refresh:
+            return json.loads(path.read_text(encoding="utf-8"))
+        if offline:
+            raise CacheMissError(f"offline=True but the tape {tape} condition table is not cached.")
+        table = self.client.trade_conditions(tape)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(table, indent=1, sort_keys=True), encoding="utf-8")
+        return table
+
     # ---------------------------------------------------------------------- assets
     def get_assets(self, *, refresh: bool = False, offline: bool = False) -> pd.DataFrame:
         """Active AND inactive US equities (inactive names reduce survivorship gaps). Cached in
@@ -500,3 +559,9 @@ def get_bars(symbols, start, end, timeframe: str = "1Min", feed: str = "sip", *,
 def get_news(start, end, *, offline: bool = False, allow_holdout: bool = False) -> pd.DataFrame:
     """See `DataLayer.get_news`. Thin wrapper over the process-wide `DataLayer`."""
     return default_layer().get_news(start, end, offline=offline, allow_holdout=allow_holdout)
+
+
+def get_trades(symbol: str, start, end, *, feed: str = "sip", offline: bool = False,
+               allow_holdout: bool = False) -> pd.DataFrame:
+    """See `DataLayer.get_trades`. Thin wrapper over the process-wide `DataLayer`."""
+    return default_layer().get_trades(symbol, start, end, feed=feed, offline=offline, allow_holdout=allow_holdout)

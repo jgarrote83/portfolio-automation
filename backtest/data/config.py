@@ -21,6 +21,12 @@ ASSETS_PATH = "/v2/assets"
 NEWS_PATH = "/v1beta1/news"
 NEWS_PAGE_LIMIT = 50
 
+# Historical trades (ticks) and the trade-condition code table (read-only GETs on the market-data host).
+# `get_trades` serves ONE symbol and ONE exact ET time window on one day (the same-minute diagnostic).
+TRADES_PATH = "/v2/stocks/trades"
+TRADE_PAGE_LIMIT = 10_000
+CONDITIONS_PATH = "/v2/stocks/meta/conditions/trade"
+
 # --- supported request shapes --------------------------------------------------------------
 TIMEFRAMES = ("1Min", "5Min", "1Day")
 FEEDS = ("sip", "iex")

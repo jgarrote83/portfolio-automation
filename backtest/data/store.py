@@ -188,3 +188,75 @@ class NewsStore:
         out["updated_at"] = pd.to_datetime(out["updated_at"], utc=True)
         out["symbols"] = out["symbols"].map(list)                  # parquet hands back numpy arrays; consumers get lists
         return out[NEWS_COLUMNS]
+
+
+# ------------------------------------------------------------------------------------- trades
+TRADE_COLUMNS = ["ts", "price", "size", "exchange", "conditions", "id", "tape", "seq"]
+
+
+def empty_trades() -> pd.DataFrame:
+    return pd.DataFrame({
+        "ts": pd.Series(dtype="datetime64[ns, UTC]"),
+        "price": pd.Series(dtype="float64"),
+        "size": pd.Series(dtype="int64"),
+        "exchange": pd.Series(dtype="object"),
+        "conditions": pd.Series(dtype="object"),
+        "id": pd.Series(dtype="int64"),
+        "tape": pd.Series(dtype="object"),
+        "seq": pd.Series(dtype="int64"),
+    })[TRADE_COLUMNS]
+
+
+def normalise_trades(rows: list[dict]) -> pd.DataFrame:
+    """Alpaca trade dicts (`t, x, p, s, c, i, z`) -> the stored schema. `seq` is the print's position in
+    Alpaca's own response order: for prints with an identical timestamp it is the only ordering there is,
+    and nothing downstream may treat it as the true order (see `backtest.samebar`)."""
+    if not rows:
+        return empty_trades()
+    df = pd.DataFrame({
+        "ts": pd.to_datetime([r["t"] for r in rows], utc=True).as_unit("ns"),
+        "price": [float(r["p"]) for r in rows],
+        "size": [int(r.get("s") or 0) for r in rows],
+        "exchange": [str(r.get("x") or "") for r in rows],
+        "conditions": [[str(c) for c in (r.get("c") or [])] for r in rows],
+        "id": [int(r.get("i") or 0) for r in rows],
+        "tape": [str(r.get("z") or "") for r in rows],
+        "seq": list(range(len(rows))),
+    })
+    return df[TRADE_COLUMNS]
+
+
+class TradeStore:
+    """`{root}/trades/{feed}/{SYMBOL}/{YYYY-MM-DD}/{HHMMSS}-{HHMMSS}.parquet`: one file per exact request
+    window (symbol, ET day, ET start, ET end). A window with no prints is stored as an EMPTY file, so
+    "nothing traded" is a recorded fact and not a cache miss. Writes are atomic."""
+
+    def __init__(self, root: str | Path | None = None) -> None:
+        self.root = Path(root) if root else DEFAULT_CACHE_DIR
+
+    def path(self, feed: str, symbol: str, day: str, win: str) -> Path:
+        return self.root / "trades" / feed / symbol_dir(symbol) / day / f"{win}.parquet"
+
+    def has(self, feed: str, symbol: str, day: str, win: str) -> bool:
+        return self.path(feed, symbol, day, win).is_file()
+
+    def write(self, feed: str, symbol: str, day: str, win: str, df: pd.DataFrame) -> int:
+        path = self.path(feed, symbol, day, win)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}")
+        try:
+            df[TRADE_COLUMNS].to_parquet(tmp, engine="pyarrow", index=False)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
+        return len(df)
+
+    def read(self, feed: str, symbol: str, day: str, win: str) -> pd.DataFrame:
+        out = pd.read_parquet(self.path(feed, symbol, day, win))
+        out["ts"] = pd.to_datetime(out["ts"], utc=True).dt.as_unit("ns")
+        out["conditions"] = out["conditions"].map(list)            # parquet hands back numpy arrays
+        return out[TRADE_COLUMNS]

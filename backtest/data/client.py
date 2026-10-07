@@ -1,7 +1,8 @@
 """Read-only Alpaca market-data client: historical bars and the assets list. Nothing else.
 
-No trading endpoint is reachable from here: the only URLs ever built are
-`{DATA_BASE_URL}/v2/stocks/bars` and `{ASSETS_BASE_URL}/v2/assets`, and only with GET.
+No trading endpoint is reachable from here: the only URLs ever built are the market-data
+`{DATA_BASE_URL}/v2/stocks/bars`, `/v1beta1/news`, `/v2/stocks/trades`, `/v2/stocks/meta/conditions/trade`
+and `{ASSETS_BASE_URL}/v2/assets`, and only with GET.
 Keys are held privately, never appear in `repr()` or in any exception message.
 """
 from __future__ import annotations
@@ -19,6 +20,7 @@ from .config import (
     BACKOFF_BASE_S,
     BACKOFF_CAP_S,
     BARS_PATH,
+    CONDITIONS_PATH,
     DATA_BASE_URL,
     HTTP_TIMEOUT_S,
     MAX_REQUESTS_PER_MINUTE,
@@ -27,6 +29,8 @@ from .config import (
     NEWS_PATH,
     PAGE_LIMIT,
     RATE_BURST,
+    TRADE_PAGE_LIMIT,
+    TRADES_PATH,
 )
 from .credentials import load_credentials
 from .ratelimit import RateLimiter
@@ -178,6 +182,32 @@ class AlpacaDataClient:
             token = (body or {}).get("next_page_token")
             if not token:
                 return
+
+    # ---------------------------------------------------------------- trades
+    def iter_trades(self, symbol: str, start: str, end: str, feed: str,
+                    *, limit: int = TRADE_PAGE_LIMIT) -> Iterator[dict]:
+        """Yield every trade print of ONE symbol in [start, end] (RFC3339 strings), oldest first,
+        following `next_page_token`. `GET /v2/stocks/trades` with `sort=asc` and the maximum page
+        `limit`. Trades are Alpaca's `{t, x, p, s, c, i, z}` dicts (`t` has nanosecond precision).
+        A 401/403 raises `AlpacaAuthError` (never worked around)."""
+        params = {"symbols": symbol, "start": start, "end": end, "limit": limit, "feed": feed, "sort": "asc"}
+        token = None
+        while True:
+            page_params = dict(params)
+            if token:
+                page_params["page_token"] = token
+            body = self._get(f"{self.data_url}{TRADES_PATH}", page_params)
+            trades = (body or {}).get("trades") or {}
+            for tr in (trades.get(symbol) if isinstance(trades, dict) else None) or []:
+                yield tr
+            token = (body or {}).get("next_page_token")
+            if not token:
+                return
+
+    def trade_conditions(self, tape: str) -> dict[str, str]:
+        """`GET /v2/stocks/meta/conditions/trade?tape=<A|B|C>`: the code -> description table."""
+        body = self._get(f"{self.data_url}{CONDITIONS_PATH}", {"tape": tape})
+        return {str(k): str(v) for k, v in body.items()} if isinstance(body, dict) else {}
 
     # ---------------------------------------------------------------- assets
     def list_assets(self, status: str) -> list[dict]:
