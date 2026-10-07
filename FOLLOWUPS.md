@@ -663,6 +663,34 @@ wiped them.
 
 ## Open
 
+### 120. News event study — pre-registered, run, NO-GO (HIGH — program, third day-trading candidate; branch `feat/news-event-study`, not merged)
+Question: does a stock that gaps at least 2% on overnight news continue in the gap direction through the day? Pre-registered first
+(`docs/specs/News_Gap_Preregistration.md`, locked at its first commit, 30 interpreted details) and built as `backtest/news_gap.py` +
+`news_gap_verify.py` on a new `backtest.data.get_news` (same cache/manifest/offline/2026-refusal pattern as `get_bars`; read-only GET of
+Alpaca `/v1beta1/news`, `created_at` only for matching, **no LLM anywhere in the study**). Rule: universe = open >= $10, 20-day avg dollar volume
+>= $50M, non-ETF; gap |g| >= 2% vs the prior close; event = >= 1 overnight article (16:00 ET D-1 to 09:30 ET D, <= 2 symbols); top 5 by |g|;
+direction = sign of g (shorts allowed); entry the 10:00 bar open + 2 cents, exit the daily close; $25,000 sleeve, 5 x $5,000.
+**RESULT (2026-10-06, run `20261006T114901Z-7ef4f51`, `.review/news-gap-results.md`): mechanical verdict NO-GO.** Primary: net Sharpe -0.12
+(t -0.17; needs >= 1.0); net P&L +$9,696 (2024) and -$11,943 (2025), -$2,246 in total; 2,464 trades over 502 days, hit ratio 49.2%, -1.45 bps per
+trade net (gross +$6,299, costs $8,546); long -$12,454 (-18.0 bps), short +$10,208 (+19.6 bps). **News vs no news (diagnostic a):** the identical rule
+on no-news gaps nets -$16,736 (-13.42 bps per trade, Sharpe -0.61); the difference in average net return per trade is **+11.97 bps, Welch t 0.67**,
+i.e. not distinguishable from zero (and its t is overstated: same-day trades share the market). Sensitivities (never decide the verdict):
+confirmation filter Sharpe 0.11, +$470 / +$975 (1,193 trades); long-only -$12,454; entry slippage 0/1/5 cents +$4,084 / +$919 / -$11,742 (even at 0 cents
+Sharpe 0.22 and 2025 -$8,563). Event types are reported only (earnings +30 bps on 1,323 trades, "other" -75 bps on 528, regulatory -119 bps on 115) and
+are one sample with several comparisons. Data: 510,715 articles in window; 64.3% have updated_at != created_at (63.9% of the overnight articles that
+matched an event); events/day mean 27.5, median 22. **Found after the run:** Alpaca's news `start`/`end` filter selects on `updated_at` (199 cached
+articles were created before the fetch start, all updated inside it), so an article created in the window but last edited after 2025-12-31 is absent
+(at most a few dozen: only 84 of 510,175 in-window articles were updated > 30 days after creation) and stored headlines/symbols are the latest
+version, not the version visible at creation (the pre-registered "edited news" limitation, now sized). Raw prices: 27 primary trades have |g| >= 50%
+(splits/reverse splits: CMG, NVDA, AVGO, SIRI, LCID among the ten largest), net -$3,062; no corporate-actions data was used. **Verified:** the post-run verifier
+re-derived 50/50 random primary and 50/50 random control trades from the raw cache; its first real-data run reported 7/50 and 10/50 because it compared
+`g` at 1e-9 while `trades.csv` records 8 decimals (verifier bug, every other field matched; fixed in `411201e` with a test that fails on the old
+tolerance; the study code and results are untouched). Suite 1830 -> 1897 measured (base `e7d7a88`, HEAD `411201e`), ruff clean. By the pre-registered rule the
+news-gap rule does **not** earn a holdout run; any change (corporate-action-adjusted gaps, a different window or threshold, event-type filters) is a NEW
+pre-registration with a fresh test period. Nothing was tuned; 2026 was never read.
+**Open:** (1) Jorge's decision on what follows (stop, or a new pre-registered variant); (2) merging deploys nothing (no `src/` change on this branch);
+(3) the day-trading Alpaca account and Key Vault secrets in FOLLOWUPS #118 are still undefined.
+
 ### 119. SPY close-flow backtest — pre-registered, run, NO-GO (HIGH — program, second day-trading candidate; branch `feat/closeflow-backtest`, not merged)
 Pre-registered first (`docs/specs/CloseFlow_SPY_Preregistration.md`, locked, 30 interpreted details) and built as
 `backtest/closeflow.py` + `closeflow_verify.py` (data only through `get_bars`; refuses 2026, no override flag; mutation-checked).
