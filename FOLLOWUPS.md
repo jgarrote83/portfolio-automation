@@ -663,6 +663,29 @@ wiped them.
 
 ## Open
 
+### 121. ORB v1 same-minute ambiguity resolved from SIP prints — a diagnostic; ORB v1 stays NO-GO (HIGH — program; branch `feat/orb-samebar-resolution`, not merged)
+The Phase 2 engine reads one-minute bars; 4,323 of the 7,862 primary trades were stopped in their entry minute (`stop_same_bar`) under the
+pre-registered assumption that the stop came AFTER the entry. This resolves it (a diagnostic, never a verdict; nothing touches
+`docs/specs/ORB_Phase2_Preregistration.md`, `src/orb/` or the Phase 2 results). New: `backtest.data.get_trades(symbol, start, end)` (one symbol,
+one exact ET window, exact-window cache, offline, refuses 2026) + the trade-condition table; `simulate_day(..., entry_bar_stop=...)` (None = the
+pre-registered rule byte for byte); `backtest/samebar*.py` (pure per-minute resolution, runner, report) and an independent verifier.
+**RESULT (2026-10-07, run `20261007T104328Z-021810d`, `.review/phase2-samebar-resolution.md`):** the default engine reproduces all 7,862 Phase 2
+primary trades. 4,129 of the 4,323 are ambiguous (the entry bar opened below/above the trigger; the brief's 4,207 includes 78 that opened exactly at the
+trigger, which fill on the opening print — replayed, all 194 unambiguous entries are real stops). Net P&L: **reported -$32,633 -> optimistic bound
+(entry-bar stop not checked) -$6,193 -> tick-resolved -$8,737** (2024 -$2,913, 2025 -$5,824; net Sharpe -10.41 -> -1.20 -> -1.98; gross P&L
+-$15,858 -> +$10,582 -> +$8,038 against $16,775 of costs). The optimistic rule changes 1,276 trades; replaying their SIP prints in timestamp order, **392 had the
+dip BEFORE the entry (no stop-out), 884 were real stops, 0 same-timestamp ties, 0 unresolved**. Print filter (odd lots, derivatively priced, out-of-sequence,
+late-reported, average-price, contingent...) reproduces Alpaca's own one-minute bars exactly in 100% of the 1,276 minutes (only {I, 4}: 99.0%; no filter: 9.4%); the
+answer moves for 1 trade under {I, 4} and for 128 with no filter. By the pre-committed yardstick (the three pre-registered checks on the tick-resolved result:
+Sharpe >= 1.0, net > 0 in 2024 and 2025: all FAIL) **the ambiguity does not change the conclusion**: the Phase 2 number was mis-measured in SIZE (73% of the
+reported loss came from the assumption), not in verdict; what is left is a cost gap (2.1x the tick-resolved gross at 2 cents a side). Not touched, still bar-level:
+fills at the trigger price not the print's price, later-bar stop fills, flat 2-cent slippage. **Verified:** independent verifier 40/40 tick outcomes, 40/40 resulting
+trades, 80/80 classifications; 21 injected bugs all caught after strengthening 3 tests; suite 1897 -> 1947 measured, ruff clean. Alpaca delivers 27.5% of these
+trade timestamps at 256 ns resolution (the API itself); no tie was affected. 2026 was never read.
+**Open:** (1) Jorge's decision on what follows — by the pre-registration ORB v1 earns no holdout; a v2 (different entry/exit rules, cost assumptions or
+tick-resolved entries) is a NEW pre-registration with a fresh test period; (2) merging deploys nothing (no `src/` change); (3) the day-trading Alpaca account and
+Key Vault secrets in FOLLOWUPS #118 are still undefined.
+
 ### 120. News event study — pre-registered, run, NO-GO (HIGH — program, third day-trading candidate; branch `feat/news-event-study`, not merged)
 Question: does a stock that gaps at least 2% on overnight news continue in the gap direction through the day? Pre-registered first
 (`docs/specs/News_Gap_Preregistration.md`, locked at its first commit, 30 interpreted details) and built as `backtest/news_gap.py` +
