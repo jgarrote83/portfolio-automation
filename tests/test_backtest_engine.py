@@ -323,3 +323,76 @@ def test_same_inputs_give_identical_outputs_whatever_the_dict_order():
     c = simulate_day(DayInput(DAY, 960, tuple(picks), paths), PRIMARY)
     assert a.trades == b.trades == c.trades and a.skips == c.skips
     assert replace(a).net_pnl == c.net_pnl
+
+
+# ============================================================ the same-minute diagnostic's entry-bar rule
+def _pre_registered_rule(_day, _sym, plan, b):
+    from orb.signals import stop_hit_in_entry_bar
+    return stop_hit_in_entry_bar(plan.side, b[1], b[2], plan.stop)
+
+
+def _never(_day, _sym, _plan, _b):
+    return False
+
+
+def test_the_default_entry_bar_rule_is_the_pre_registered_one_and_changes_nothing():
+    # ambiguous long (opens below the trigger, low reaches the stop), a gap long, an ambiguous short
+    paths = {"AAA": {t(9, 35): bar(100.90, 101.10, 100.70, 100.95), t(15, 59): bar(105.0, 105.0, 105.0, 105.0)},
+             "EEE": {t(9, 35): bar(101.50, 101.60, 100.70, 101.00)},
+             "BBB": {t(9, 35): bar(99.10, 99.30, 98.95, 99.0)}}
+    picks = [long_pick("AAA"), long_pick("EEE"), short_pick("BBB")]
+    d = DayInput(DAY, 960, tuple(picks), paths)
+    default = simulate_day(d, PRIMARY)
+    assert [(x.symbol, x.exit_reason, x.exit_fill) for x in default.trades] == [
+        ("AAA", "stop_same_bar", 100.80), ("BBB", "stop_same_bar", 99.20), ("EEE", "stop_same_bar", 100.80)]
+    assert default.trades == simulate_day(d, PRIMARY, entry_bar_stop=None).trades
+    assert default.trades == simulate_day(d, PRIMARY, entry_bar_stop=_pre_registered_rule).trades
+    assert default.skips == simulate_day(d, PRIMARY, entry_bar_stop=_pre_registered_rule).skips
+    # and over random days, for the primary and a free-of-costs config
+    rng = random.Random(11)
+    syms = [f"S{i:02d}" for i in range(10)]
+    pk = [Pick(s, 1.0 + i / 10, LONG if i % 2 else SHORT, 50.0, 50.6, 49.4, 50.3 if i % 2 else 49.6, 3.0)
+          for i, s in enumerate(syms)]
+    for cfg in (PRIMARY, FREE):
+        for _ in range(8):
+            ps = {s: {m: bar(*(lambda p: (p, p + 0.9, p - 0.9, p + rng.uniform(-0.6, 0.6)))(50 + rng.uniform(-1.2, 1.2)))
+                      for m in range(t(9, 35), t(15, 59) + 1, 5)} for s in syms}
+            dd = DayInput(DAY, 960, tuple(pk), ps)
+            assert simulate_day(dd, cfg).trades == simulate_day(dd, cfg, entry_bar_stop=None).trades \
+                == simulate_day(dd, cfg, entry_bar_stop=_pre_registered_rule).trades
+
+
+def test_a_rule_that_ignores_the_entry_bar_stop_checks_the_stop_from_the_next_bar_onward():
+    rally = {t(9, 35): bar(100.90, 101.10, 100.70, 100.95), t(15, 59): bar(101.40, 101.70, 101.40, 101.60)}
+    tr = only(simulate_day(DayInput(DAY, 960, (long_pick(),), {"AAA": rally}), FREE, entry_bar_stop=_never))
+    assert tr.exit_reason == "time" and tr.entry_fill == 101.00 and tr.exit_fill == 101.60
+    assert tr.r_gross == pytest.approx(3.0)
+    # the SAME entry bar, then a bar that reaches the stop: now a real stop in the next bar, at the stop level
+    later = {t(9, 35): bar(100.90, 101.10, 100.70, 100.95), t(9, 36): bar(100.95, 100.95, 100.80, 100.85)}
+    st = only(simulate_day(DayInput(DAY, 960, (long_pick(),), {"AAA": later}), FREE, entry_bar_stop=_never))
+    assert st.exit_reason == "stop" and st.exit_minute == t(9, 36) and st.exit_fill == 100.80
+    assert st.r_gross == pytest.approx(-1.0)
+    # a gap through the stop in the next bar still exits at that bar's open (worse than -1R)
+    gap = {t(9, 35): bar(100.90, 101.10, 100.70, 100.95), t(9, 36): bar(100.60, 100.65, 100.50, 100.55)}
+    gt = only(simulate_day(DayInput(DAY, 960, (long_pick(),), {"AAA": gap}), FREE, entry_bar_stop=_never))
+    assert gt.exit_reason == "stop" and gt.exit_fill == 100.60 and gt.r_gross == pytest.approx(-2.0)
+    # the short mirror
+    sp = {t(9, 35): bar(99.10, 99.30, 98.95, 99.0), t(15, 59): bar(98.40, 98.60, 98.40, 98.40)}
+    sr = only(simulate_day(DayInput(DAY, 960, (short_pick(),), {"BBB": sp}), FREE, entry_bar_stop=_never))
+    assert sr.exit_reason == "time" and sr.r_gross == pytest.approx(3.0)
+
+
+def test_the_rule_is_asked_once_per_entry_with_the_day_symbol_plan_and_entry_bar():
+    seen = []
+
+    def rule(day, sym, plan, b):
+        seen.append((day, sym, plan.side, plan.trigger, plan.stop, b))
+        return sym == "BBB"                                      # a per-trade decision: only BBB is stopped
+
+    paths = {"AAA": {t(9, 35): bar(100.90, 101.10, 100.70, 100.95), t(9, 36): bar(100.95, 101.0, 100.9, 100.9)},
+             "BBB": {t(9, 35): bar(99.10, 99.30, 98.95, 99.0)}}
+    res = simulate_day(DayInput(DAY, 960, (long_pick("AAA"), short_pick("BBB")), paths), FREE, entry_bar_stop=rule)
+    assert seen == [(DAY, "AAA", LONG, 101.00, 100.80, bar(100.90, 101.10, 100.70, 100.95)),
+                    (DAY, "BBB", SHORT, 99.00, 99.20, bar(99.10, 99.30, 98.95, 99.0))]
+    by = {x.symbol: x for x in res.trades}
+    assert by["BBB"].exit_reason == "stop_same_bar" and by["AAA"].exit_reason == "time"

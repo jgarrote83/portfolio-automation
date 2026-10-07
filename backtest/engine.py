@@ -11,6 +11,10 @@ after 2026-01-01 and has NO override flag in Phase 2 (the holdout needs Jorge's 
 Event order inside one minute (pre-registration section 5): stops on positions opened in EARLIER
 bars; then entries (an entry whose own bar also reaches the stop is stopped out in that bar); then
 the daily-loss-limit check on the bar's close; then, on the exit bar, the end-of-day flatten.
+
+`simulate_day(..., entry_bar_stop=...)` exists ONLY for the same-minute diagnostic
+(`backtest.samebar`): it replaces the "entry and stop in the same bar => stopped" rule with a caller's
+decision. Left as None (the default) the pre-registered rule applies, byte for byte.
 """
 from __future__ import annotations
 
@@ -30,6 +34,8 @@ from .sessions import close_minute
 from .slippage import side_costs
 
 MinuteBar = tuple[float, float, float, float, float]       # open, high, low, close, volume
+# (day, symbol, plan, entry bar) -> True when the position is stopped out in its OWN entry bar.
+EntryBarStopRule = Callable[[date, str, signals.EntryPlan, MinuteBar], bool]
 WINDOW_1MIN = ("09:30", "16:00")                           # regular session, one-minute bars
 
 
@@ -169,8 +175,13 @@ class _Position:
     last_close: float
 
 
-def simulate_day(day: DayInput, cfg: OrbConfig) -> DayResult:
-    """Replay one day for one config. Deterministic: same inputs give identical outputs."""
+def simulate_day(day: DayInput, cfg: OrbConfig, *,
+                 entry_bar_stop: EntryBarStopRule | None = None) -> DayResult:
+    """Replay one day for one config. Deterministic: same inputs give identical outputs.
+
+    `entry_bar_stop` is None for every pre-registered run: an entry whose own bar also reaches the stop is
+    stopped at the stop level (`signals.stop_hit_in_entry_bar`). The same-minute diagnostic passes a rule
+    that decides it instead (see the module docstring)."""
     assert_not_holdout(day.day)
     res = DayResult(day.day, len(day.picks))
     last_entry = cfg.last_entry_minute(day.close_minute)
@@ -261,7 +272,8 @@ def simulate_day(day: DayInput, cfg: OrbConfig) -> DayResult:
                 del pending[sym]
                 pos = _Position(pend.pick, pend.plan, pend.shares, pend.binding, fill, m,
                                 fill != pend.plan.trigger, c)
-                if signals.stop_hit_in_entry_bar(pend.plan.side, h, lo, pend.plan.stop):
+                if (signals.stop_hit_in_entry_bar(pend.plan.side, h, lo, pend.plan.stop)
+                        if entry_bar_stop is None else entry_bar_stop(day.day, sym, pend.plan, bar)):
                     close(pos, pend.plan.stop, m, "stop_same_bar")
                 else:
                     open_pos[sym] = pos
