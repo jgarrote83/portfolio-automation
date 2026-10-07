@@ -682,7 +682,8 @@ matched an event); events/day mean 27.5, median 22. **Found after the run:** Alp
 articles were created before the fetch start, all updated inside it), so an article created in the window but last edited after 2025-12-31 is absent
 (at most a few dozen: only 84 of 510,175 in-window articles were updated > 30 days after creation) and stored headlines/symbols are the latest
 version, not the version visible at creation (the pre-registered "edited news" limitation, now sized). Raw prices: 27 primary trades have |g| >= 50%
-(splits/reverse splits: CMG, NVDA, AVGO, SIRI, LCID among the ten largest), net -$3,062; no corporate-actions data was used. **Verified:** the post-run verifier
+(splits/reverse splits: CMG, NVDA, AVGO, SIRI, LCID among the ten largest), net -$3,062; no corporate-actions data was used. **Standing rule for any future gap study: exclude split and reverse-split
+days (raw prices made 27 fake |g| >= 50% gaps in this one).** **Verified:** the post-run verifier
 re-derived 50/50 random primary and 50/50 random control trades from the raw cache; its first real-data run reported 7/50 and 10/50 because it compared
 `g` at 1e-9 while `trades.csv` records 8 decimals (verifier bug, every other field matched; fixed in `411201e` with a test that fails on the old
 tolerance; the study code and results are untouched). Suite 1830 -> 1897 measured (base `e7d7a88`, HEAD `411201e`), ruff clean. By the pre-registered rule the
