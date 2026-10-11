@@ -116,6 +116,16 @@ def test_short_strike_is_the_whole_dollar_strike_with_delta_closest_to_the_targe
     assert sw.pick_short_strike(s, t, r, q, v, 1.0, -0.20) <= sw.pick_short_strike(s, t, r, q, v, 0.0, -0.20)
 
 
+def test_the_strike_scan_covers_every_whole_dollar_from_one_up_to_the_spot():
+    for s in (1.5, 2.0, 3.7, 10.0, 25.4):
+        t, r, q, v = 35 / 365, 0.02, 0.015, 20.0
+        brute = min(range(1, int(s) + 1), key=lambda j: (abs(sw.put_delta(s, float(j), t, r, q, sw.iv(v, s, float(j), 0.5)) + 0.20), j))
+        assert sw.pick_short_strike(s, t, r, q, v, 0.5, -0.20) == brute
+    assert sw.pick_short_strike(1.5, 35 / 365, 0.02, 0.015, 20.0, 0.5, -0.20) == 1       # only $1 is available
+    with pytest.raises(ValueError, match="no whole-dollar strike"):
+        sw.pick_short_strike(0.5, 35 / 365, 0.02, 0.015, 20.0, 0.5, -0.20)
+
+
 def test_an_exact_tie_between_two_strikes_goes_to_the_lower_strike(monkeypatch):
     table = {50: -0.125, 51: -0.375}                        # both exactly 0.125 from a target of -0.25
     monkeypatch.setattr(sw, "put_delta", lambda s, k, t, r, q, sigma: table.get(int(k), -0.9))
@@ -212,6 +222,27 @@ def test_net_pnl_follows_the_cost_arithmetic_and_the_equity_curve_reconciles_wit
     assert sum(p for _, _, p in run.daily) == pytest.approx(sum(p.net_pnl for p in run.positions), abs=1e-6)
 
 
+def test_every_daily_mark_uses_that_days_spot_volatility_rate_and_dividend_yield():
+    rng = random.Random(8)
+    s, closes = 100.0, {}
+    for d in DAYS:
+        s *= math.exp(rng.gauss(0.0, 0.012))
+        closes[d] = s
+    vix = lambda d: 14 + 8 * math.sin(d.toordinal() / 17.0)                    # noqa: E731
+    rate = lambda d: 1.0 + 3.0 * (d.toordinal() % 400) / 400.0                  # noqa: E731  a rate that moves every day
+    qy = lambda d: 0.010 + 0.010 * (d.toordinal() % 90) / 90.0                  # noqa: E731
+    inp = make_inputs(DAYS, close=lambda d: closes[d], vix=vix, rate=rate, q=qy)
+    run = sw.simulate(SMALL, inp)
+    assert len(run.positions) >= 15
+    for p in run.positions:
+        assert len(p.marks) >= 2
+        for d, mark in p.marks:
+            t_ = (p.expiry - d).days / 365
+            want = sw.spread_mark(closes[d], float(p.k_short), float(p.k_long), t_, rate(d) / 100, qy(d), vix(d), 0.5)
+            assert mark == pytest.approx(want, abs=1e-12), (p.entry_day, d)
+        assert p.marks[-1][0] == p.exit_day and p.mark_exit == p.marks[-1][1]
+
+
 def test_with_no_haircut_and_no_fees_the_pnl_is_the_pure_model_pnl():
     cfg = SMALL.replace(haircut_per_share_per_leg=0.0, fee_per_contract=0.0)
     run = sw.simulate(cfg, make_inputs(DAYS, vix=lambda d: 15 + 5 * math.sin(d.toordinal() / 31.0)))
@@ -280,6 +311,16 @@ def test_cycles_outside_the_window_are_classified_not_entered():
     # an expiry month beyond the last day with data is an error, never a 'holiday' that slides back to the last day
     with pytest.raises(ValueError, match="after the last trading day"):
         sw.monthly_expiries(weekdays(date(2004, 1, 1), date(2005, 2, 15)), (2005, 2), (2005, 3))
+
+
+def test_a_cycle_is_in_the_window_when_its_entry_day_is_the_window_start_and_its_exit_day_is_the_window_end():
+    days = weekdays(date(2004, 1, 1), date(2005, 3, 31))
+    def status(start, end):
+        cfg = sw.WheelConfig().replace(window_start=start, window_end=end)
+        return {c.expiry: c.status for c in sw.build_cycles(days, cfg)}[date(2005, 2, 18)]      # entry 2005-01-14, exit 2005-02-11
+    assert status("2005-01-14", "2005-02-11") == "in_window"            # both boundaries inclusive
+    assert status("2005-01-15", "2005-02-11") == "before_window"        # the entry day is one day before the start
+    assert status("2005-01-14", "2005-02-10") == "after_window"         # the exit day is one day after the end
 
 
 # ================================================================================================ exits
@@ -441,6 +482,17 @@ def test_a_crash_after_entry_trips_the_kill_switch_skips_three_months_of_cycles_
     assert later and later[0].entry_day == date(2005, 5, 13)
 
 
+def test_a_cycle_whose_entry_day_is_the_activation_day_is_skipped_and_listed_with_that_activation():
+    # the crash lands on 2005-02-11, the first position's exit day AND the entry day of the March cycle (profit-take off, so the
+    # position is still open that day instead of having decayed to its target earlier)
+    cfg = SMALL.replace(risk_budget_pct_of_sleeve=30.0, profit_take_enabled=False)
+    run = sw.simulate(cfg, make_inputs(DAYS, close=lambda d: 100.0 if d < date(2005, 2, 11) else 80.0))
+    ev = run.kill_switch[0]
+    assert ev["activated"] == date(2005, 2, 11) == first_position(run).exit_day
+    assert {"cycle_expiry": date(2005, 3, 18), "entry_day": date(2005, 2, 11), "reason": "kill_switch"} in run.skips
+    assert ev["cycles_skipped"][0] == date(2005, 3, 18)
+
+
 def test_without_the_kill_switch_the_same_crash_does_not_pause_trading():
     cfg = SMALL.replace(risk_budget_pct_of_sleeve=30.0, kill_switch_enabled=False)
     run = sw.simulate(cfg, _crash_inputs())
@@ -497,6 +549,47 @@ def test_calendar_year_pnl_is_the_sum_of_the_daily_changes_and_positive_means_st
     assert (m["worst_year"], m["best_year"]) == (2007, 2006)
 
 
+def test_position_statistics_are_computed_from_the_positions():
+    rng = random.Random(21)
+    s, closes = 100.0, {}
+    for d in DAYS:
+        s *= math.exp(rng.gauss(0.0, 0.014))
+        closes[d] = s
+    run = sw.simulate(SMALL, make_inputs(DAYS, close=lambda d: closes[d], vix=lambda d: 13 + 9 * math.sin(d.toordinal() / 23.0)))
+    m = sw.compute_metrics(run)
+    ps = run.positions
+    assert m["positions"] == len(ps) >= 15
+    wins = [p for p in ps if p.net_pnl > 0]
+    assert 0 < len(wins) < len(ps)                                           # a market with winners and losers
+    assert m["win_rate"] == pytest.approx(len(wins) / len(ps))
+    assert m["avg_credit_per_contract"] == pytest.approx(sum(p.credit for p in ps) / len(ps) * 100)
+    assert m["avg_max_loss_per_contract"] == pytest.approx(sum((p.width - p.credit) * 100 for p in ps) / len(ps))
+    assert m["avg_contracts"] == pytest.approx(sum(p.contracts for p in ps) / len(ps))
+    assert m["avg_hold_days"] == pytest.approx(sum((p.exit_day - p.entry_day).days for p in ps) / len(ps))
+    assert m["avg_net_pnl"] == pytest.approx(sum(p.net_pnl for p in ps) / len(ps))
+    assert m["worst_position_pnl"] == min(p.net_pnl for p in ps) and m["best_position_pnl"] == max(p.net_pnl for p in ps)
+    assert m["total_fees"] == pytest.approx(sum(4 * 0.65 * p.contracts for p in ps))
+    reasons = {r: sum(1 for p in ps if p.exit_reason == r) for r in {p.exit_reason for p in ps}}
+    assert m["exit_reasons"] == reasons and sum(reasons.values()) == len(ps)
+    assert m["total_net_pnl"] == pytest.approx(sum(p.net_pnl for p in ps))
+    assert m["cycles_in_window"] == len(ps) + sum(m["skips"].values())       # every cycle is either entered or skipped for a stated reason
+    assert sum(m["skips"].values()) == len(run.skips)
+
+
+def _fake_position(net_pnl, entry=date(2005, 2, 11), exit_=date(2005, 3, 11)):
+    return sw.Position(entry, date(2005, 3, 18), date(2005, 3, 18), False, exit_, 100.0, 20.0, 0.02, 0.015, 35 / 365, 93, 91, 2, 0.5, 0.2, 0.3, 0.24,
+                       10, worst_unreal=-5.0, exit_day=exit_, exit_reason="time_exit", mark_exit=0.1, debit_exit=0.16, net_pnl=net_pnl, fees=26.0)
+
+
+def test_a_win_is_strictly_positive_net_pnl_and_a_zero_is_not_a_win():
+    daily = [(date(2005, 3, 10), 25000.0, 0.0), (date(2005, 3, 11), 25010.0, 10.0)]
+    run = sw.WheelRun(SMALL, [_fake_position(10.0), _fake_position(0.0), _fake_position(-10.0)], [], [], daily, [], 2)
+    m = sw.compute_metrics(run)
+    assert m["win_rate"] == pytest.approx(1 / 3)
+    assert m["avg_credit_per_contract"] == pytest.approx(24.0) and m["avg_max_loss_per_contract"] == pytest.approx((2 - 0.24) * 100)
+    assert m["worst_position_pnl"] == -10.0 and m["best_position_pnl"] == 10.0 and m["avg_hold_days"] == 28.0
+
+
 def test_cagr_is_the_annualised_ending_equity_over_the_sleeve():
     days = [date(2005, 1, 3), date(2007, 1, 3)]
     daily = [(days[0], 25000.0, 0.0), (days[1], 30250.0, 5250.0)]
@@ -548,6 +641,16 @@ def test_put_calibration_period_return_is_interest_plus_premium_less_payoff_over
     assert p["put_return"] == pytest.approx(990.0 / 1000.0 - 1.0)
     assert cal["n_periods"] == 3 and [y["year"] for y in cal["years"]] == [2007] and cal["years"][0]["periods"] == 3
     assert cal["years"][0]["model"] == pytest.approx(math.prod(1 + r["model_return"] for r in cal["periods"]) - 1)
+
+
+def test_put_calibration_strike_is_the_close_rounded_half_up_to_the_whole_dollar():
+    days = weekdays(date(2006, 1, 2), date(2007, 6, 29))
+    exp = sw.monthly_expiries(days, (2007, 1), (2007, 3))
+    put = {e.expiry: 1000.0 for e in exp}
+    for close, strike in ((100.6, 101), (100.5, 101), (100.49, 100), (99.4, 99)):
+        cal = sw.calibrate_put(make_inputs(days, close=close, q=0.0), put, sw.WheelConfig().replace(window_end="2007-12-31"), exp)
+        assert cal["periods"][0]["strike"] == strike, close
+        assert cal["periods"][0]["payoff"] == max(strike - close, 0.0)
 
 
 def test_put_calibration_skips_periods_before_the_first_daily_row_after_the_window_and_without_a_put_value():
@@ -841,6 +944,15 @@ def test_the_cli_writes_outputs_labels_a_non_preregistered_window_and_the_verifi
     pos.to_csv(run / "primary" / "positions.csv", index=False)
     bad = V.check(run, n=len(pos))
     assert not bad["pass"] and any("credit" in m for f in bad["failures"] for m in f["mismatches"])
+
+
+def test_the_verifiers_strike_scan_breaks_an_exact_tie_toward_the_lower_strike(monkeypatch):
+    days = weekdays(date(2004, 1, 1), date(2005, 6, 30))
+    table = {50: -0.125, 51: -0.375}                                 # both exactly 0.125 from a target of -0.25
+    monkeypatch.setattr(V, "put_slope", lambda s, k, y, r, q, vix: table.get(int(k), -0.9))
+    monkeypatch.setattr(V, "DELTA_TARGET", -0.25)
+    d = V.derive(date(2005, 3, 18), days, {x: 51.5 for x in days}, [], [(date(2004, 1, 1), 20.0)], [(date(2004, 1, 1), 2.0)])
+    assert d["k_short"] == 50 and d["k_long"] == 49 and d["entry_day"] == date(2005, 2, 11)
 
 
 def test_the_verifier_catches_a_wrong_strike_and_a_wrong_exit_and_a_wrong_pnl(patched, monkeypatch):

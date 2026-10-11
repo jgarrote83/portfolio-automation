@@ -421,17 +421,17 @@ def simulate(cfg: WheelConfig, inputs: WheelInputs) -> WheelRun:
             unreal = (pos.credit - mark) * mult * pos.contracts
             pos.worst_unreal = min(pos.worst_unreal, unreal)
             pos.marks.append((d, mark))
-            if d > pos.entry_day:
-                take = cfg.profit_take_enabled and profit_take_hit(mark, pos.credit, cfg.profit_take_fraction)
-                if take or d >= pos.sched_exit_day:
-                    debit = mark + 2.0 * h
-                    n = pos.contracts
-                    realized += (pos.credit - debit) * mult * n - 2.0 * fee * n
-                    pos.exit_day, pos.exit_reason = d, "profit_take" if take else "time_exit"
-                    pos.mark_exit, pos.debit_exit, pos.fees = mark, debit, 4.0 * fee * n
-                    pos.net_pnl = (pos.credit - debit) * mult * n - 4.0 * fee * n
-                    positions.append(pos)
-                    pos, unreal = None, 0.0
+            # a position is opened in step (4) of its entry day, so this mark is always on a later day: no exit on the entry day
+            take = cfg.profit_take_enabled and profit_take_hit(mark, pos.credit, cfg.profit_take_fraction)
+            if take or d >= pos.sched_exit_day:
+                debit = mark + 2.0 * h
+                n = pos.contracts
+                realized += (pos.credit - debit) * mult * n - 2.0 * fee * n
+                pos.exit_day, pos.exit_reason = d, "profit_take" if take else "time_exit"
+                pos.mark_exit, pos.debit_exit, pos.fees = mark, debit, 4.0 * fee * n
+                pos.net_pnl = (pos.credit - debit) * mult * n - 4.0 * fee * n
+                positions.append(pos)
+                pos, unreal = None, 0.0
         # (3) equity, running peak and kill switch (steps 1-2 only; today's entry costs come after)
         ks.update(d, cap + realized + unreal)
         # (4) the entry decision
