@@ -514,3 +514,29 @@ def test_2026_is_refused_by_the_analysis_and_the_assertion():
     L.assert_not_holdout(date(2025, 12, 31))
     with pytest.raises(HoldoutError):
         L.analyse({}, {}, {}, CFG, [date(2026, 1, 2)])
+
+
+# ============================================================ the exact boundaries of the pre-registered data rules
+def test_the_agreement_tolerance_is_inclusive_at_exactly_one_tenth_of_a_percent_and_relative_to_the_second_source():
+    assert L.fields_agree(1001.0, 1000.0, 0.001) is True                      # exactly 0.1% off: agrees
+    assert L.fields_agree(1001.1, 1000.0, 0.001) is False
+    assert L.fields_agree(999.0, 1000.0, 0.001) is True                       # 1 / 1000 (Stooq): agrees; 1 / 999 (Yahoo) would not
+    assert L.fields_agree(1000.0, 999.0, 0.001) is False                      # 1 / 999 = 0.1001%: does not
+    assert L.fields_agree(100.0, 0.0, 0.001) is False and L.fields_agree(float("nan"), 100.0, 0.001) is False
+
+
+def test_exactly_five_percent_stale_opens_stays_in_and_more_than_five_percent_is_excluded():
+    def series(n_rows, stale_at):
+        rows = [(date(2024, 1, 1) + __import__("datetime").timedelta(days=0), 100.0, 100.0)]
+        for i in range(1, n_rows):
+            prev_close = rows[-1][2]
+            o = prev_close if i in stale_at else prev_close + 0.5
+            rows.append((date(2024, 1, 1) + __import__("datetime").timedelta(days=i), o, o + 0.5))
+        return member("^FTSE", rows, tz="Europe/London")
+    days = [date(2024, 1, 1) + __import__("datetime").timedelta(days=i) for i in range(21)]
+    exactly = series(21, {7})                                                  # 20 rows with a previous row, 1 stale: 5.0%
+    s = L.stale_open_share(exactly, date(2024, 1, 1), date(2025, 12, 31))
+    assert s == {"rows": 20, "stale": 1, "share": 0.05}
+    assert L.member_quality(exactly, L.EUROPE, None, days, CFG)["excluded"] is None
+    over = series(21, {7, 8})                                                  # 10%
+    assert L.member_quality(over, L.EUROPE, None, days, CFG)["excluded"] == "stale_open"
