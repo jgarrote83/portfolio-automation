@@ -302,3 +302,69 @@ def test_a_403_on_every_endpoint_is_reported_not_worked_around():
     assert res["contracts"]["QQQ"]["inactive"]["earliest"] is None and res["contracts"]["QQQ"]["inactive"]["first_status"] == 403
     assert res["coverage"]["QQQ"]["table"]["all"]["contracts"] == 0 and len(res["access_errors"]) == res["requests"]
     assert "403" in P.render_findings(res, p, [D1])
+
+
+# =============================================================================== the continuity supplement
+def _weekdays(a, b):
+    out, d = [], a
+    while d <= b:
+        if d.weekday() < 5:
+            out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
+def test_bars_range_collects_each_symbols_bar_dates_across_chunks_and_pages():
+    syms = [occ("QQQ", date(2024, 7, 1), "P", 300 + i) for i in range(150)]
+    bars = {syms[0]: [bar("2024-06-04"), bar("2024-06-05")], syms[120]: [bar("2024-06-10")], syms[1]: [bar("2024-05-01")]}     # the last is outside
+    fake = FakeAlpaca(bars=bars)
+    got, statuses = P.bars_range(probe(fake), syms, date(2024, 6, 4), date(2024, 6, 28))
+    assert got == {syms[0]: {"2024-06-04", "2024-06-05"}, syms[120]: {"2024-06-10"}} and statuses == [200, 200] and len(fake.calls) == 2
+    assert fake.calls[0][1]["sort"] == "asc" and fake.calls[0][1]["start"] == "2024-06-04T00:00:00Z" and fake.calls[0][1]["end"] == "2024-06-28T23:59:59Z"
+    assert P.bars_range(probe(FakeAlpaca(script=[403])), syms[:3], date(2024, 6, 4), date(2024, 6, 5)) == ({}, [403])
+
+
+def test_continuity_counts_later_days_up_to_each_contracts_own_expiry_and_samples_trade_prints():
+    d = date(2024, 6, 3)                                                                                # a Monday; the 20th later trading day is 2024-07-01
+    later = _weekdays(date(2024, 6, 4), date(2024, 7, 12))
+    assert later[19] == date(2024, 7, 1)
+    full = [c for c in later if c <= date(2024, 6, 28)]                                                # 19 days up to a 2024-06-28 expiry
+    half = [x for x in later[:20]][:10]                                                                # bars on the first 10 later days only
+    cons = [contract("QQQ", date(2024, 6, 28), 400.0), contract("QQQ", date(2024, 7, 1), 401.0), contract("QQQ", date(2024, 7, 1), 402.0)]
+    a, b, c = (x["symbol"] for x in cons)
+    bars = {a: [bar(d.isoformat())] + [bar(x.isoformat()) for x in full], b: [bar(d.isoformat())] + [bar(x.isoformat()) for x in half], c: [bar(d.isoformat())]}
+    trades = {s: [{"t": f"{d}T15:00:00Z", "x": "C", "p": 1.0, "s": 2, "c": "I"}, {"t": f"{d}T15:01:00Z", "x": "X", "p": 1.1, "s": 1, "c": " "}] for s in (a, b, c)}
+    fake = FakeAlpaca(contracts=cons, bars=bars, trades=trades)
+    r = P.continuity_sample(probe(fake), "QQQ", d, 440.0, [d, *later])
+    assert (r["contracts"], r["traded_on_day"], r["after_days"]) == (3, 3, 20)
+    assert r["next_day_share"] == pytest.approx(2 / 3)                                                 # a and b printed on 2024-06-04; c never again
+    assert r["median_share_of_days_with_a_bar"] == pytest.approx(0.5) and r["mean_share_of_days_with_a_bar"] == pytest.approx((1.0 + 0.5 + 0.0) / 3)
+    assert r["share_with_bars_on_half_the_days"] == pytest.approx(2 / 3) and r["share_never_again"] == pytest.approx(1 / 3)
+    ts = r["trades_sample"]
+    assert len(ts) == 3 and all(t_["status"] == 200 and t_["rows"] == 2 and t_["exchanges"] == ["C", "X"] and t_["conditions"] == [" ", "I"] for t_ in ts)
+    assert ts[0]["fields"] == ["c", "p", "s", "t", "x"]
+
+
+def test_continuity_handles_a_day_nobody_traded_and_a_missing_later_calendar():
+    d = date(2024, 6, 3)
+    cons = [contract("QQQ", date(2024, 7, 1), 400.0)]
+    r = P.continuity_sample(probe(FakeAlpaca(contracts=cons, bars={})), "QQQ", d, 440.0, [d, date(2024, 6, 4)])
+    assert r["traded_on_day"] == 0 and "no contract traded" in r["note"] and "next_day_share" not in r
+    cons2 = [contract("QQQ", date(2024, 7, 1), 400.0)]
+    r2 = P.continuity_sample(probe(FakeAlpaca(contracts=cons2, bars={cons2[0]["symbol"]: [bar(d.isoformat())]})), "QQQ", d, 440.0, [d])
+    assert r2["traded_on_day"] == 1 and "no contract traded that day or no later day" in r2["note"]
+
+
+def test_run_probe_runs_the_supplement_only_when_given_the_trading_calendar_and_renders_it():
+    cons, bars = _world()
+    spots = {"QQQ": {D1: 440.0}, "SPY": {D1: 512.0}}
+    without = P.run_probe(probe(FakeAlpaca(contracts=cons, bars=bars)), spots, [D1])
+    assert without["continuity"] == []
+    fake = FakeAlpaca(contracts=cons, bars=bars)
+    p = probe(fake)
+    res = P.run_probe(p, spots, [D1], all_days=_weekdays(date(2024, 3, 1), date(2024, 5, 31)))
+    assert [c["selected_as"] for c in res["continuity"]] == ["best coverage date", "median coverage date"] * 2 and {c["underlying"] for c in res["continuity"]} == {"QQQ", "SPY"}
+    assert all(c["day"] == str(D1) and c["traded_on_day"] > 0 for c in res["continuity"])
+    text = P.render_findings(res, p, [D1])
+    assert "### 3b. Supplement" in text and "Never printed again" in text and "Trade prints for three contracts that did trade" in text
+    assert "2026" not in json.dumps([c[1] for c in fake.calls])

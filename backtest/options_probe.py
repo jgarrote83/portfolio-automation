@@ -264,11 +264,76 @@ def first_bar_date(p: Probe, symbols: Sequence[str], lo: date, hi: date, **extra
     return (date.fromisoformat(min(ts)) if ts else None), st
 
 
+def bars_range(p: Probe, symbols: Sequence[str], lo: date, hi: date) -> tuple[dict[str, set[str]], list[int]]:
+    """Dates (ISO, from the bar's own timestamp) on which each symbol has a daily bar between lo and hi inclusive. -> ({symbol: {dates}}, statuses)."""
+    out: dict[str, set[str]] = {}
+    statuses: list[int] = []
+    for chunk in chunks(list(symbols), BARS_CHUNK):
+        token = None
+        while True:
+            params = {"symbols": ",".join(chunk), "timeframe": "1Day", "start": f"{lo.isoformat()}T00:00:00Z", "end": f"{hi.isoformat()}T23:59:59Z",
+                      "limit": 10000, "sort": "asc"}
+            if token:
+                params["page_token"] = token
+            st, body = p.get(DATA_URL, BARS_PATH, params)
+            statuses.append(st)
+            if st != 200 or not isinstance(body, dict):
+                break
+            for sym, rows in (body.get("bars") or {}).items():
+                out.setdefault(sym, set()).update(r["t"][:10] for r in (rows or []) if r.get("t"))
+            token = body.get("next_page_token")
+            if not token:
+                break
+    return out, statuses
+
+
+def continuity_sample(p: Probe, underlying: str, day: date, spot: float, after_days: Sequence[date]) -> dict:
+    """SUPPLEMENT (not one of the instruction's four questions). Of the put contracts in the coverage set that DID have a bar on `day`, how
+    continuously do they print on the following trading days up to their own expiry? A defined-risk position held toward expiry needs a mark
+    most days, and this is the best case (it conditions on the contract having traded on the entry date). It also asks the trades endpoint for
+    three of those contracts, to see what a trade print carries (exchange and condition codes)."""
+    lo, hi = expiry_window(day)
+    hi = min(hi, PROBE_END)
+    k_lo, k_hi = strike_bounds(spot)
+    _st, cons = list_contracts(p, underlying, status="inactive", type="put", expiration_date_gte=lo.isoformat(), expiration_date_lte=hi.isoformat(),
+                               strike_price_gte=k_lo, strike_price_lte=k_hi)
+    syms = [c["symbol"] for c in cons if c.get("symbol")]
+    got, _ = bars_for_day(p, syms, day)
+    traded = [s for s in syms if got.get(s)]
+    after = [d for d in after_days if d > day][:20]
+    out = {"underlying": underlying, "day": day.isoformat(), "spot": spot, "contracts": len(syms), "traded_on_day": len(traded), "after_days": len(after)}
+    if not traded or not after:
+        return {**out, "note": "no contract traded that day or no later day in range"}
+    rng, _sts = bars_range(p, traded, after[0], after[-1])
+    shares, next_day, ge_half, zero = [], 0, 0, 0
+    for s in traded:
+        meta = occ_parse(s)
+        possible = [d for d in after if d <= meta["expiration"]] if meta else after
+        have = [d for d in possible if d.isoformat() in rng.get(s, set())]
+        shares.append(len(have) / len(possible) if possible else 0.0)
+        next_day += int(after[0].isoformat() in rng.get(s, set()))
+        ge_half += int(bool(possible) and len(have) >= len(possible) / 2)
+        zero += int(not have)
+    out.update({"next_day_share": next_day / len(traded), "median_share_of_days_with_a_bar": float(np.median(shares)),
+                "mean_share_of_days_with_a_bar": float(np.mean(shares)), "share_with_bars_on_half_the_days": ge_half / len(traded),
+                "share_never_again": zero / len(traded)})
+    sample = []
+    for s in traded[:3]:
+        start, end = day_bounds_utc(day)
+        st, body = p.get(DATA_URL, TRADES_PATH, {"symbols": s, "start": start, "end": end, "limit": 1000})
+        rows = (body.get("trades") or {}).get(s, []) if st == 200 and isinstance(body, dict) else []
+        sample.append({"symbol": s, "status": st, "rows": len(rows), "fields": sorted(rows[0].keys()) if rows else [],
+                       "exchanges": sorted({r.get("x") for r in rows if r.get("x")}), "conditions": sorted({c for r in rows for c in (r.get("c") or "")})})
+    out["trades_sample"] = sample
+    return out
+
+
 # ===================================================================================== the probe
-def run_probe(p: Probe, spots: dict[str, dict[date, float]], days: Sequence[date], *, log: Callable[[str], None] = lambda m: None) -> dict:
+def run_probe(p: Probe, spots: dict[str, dict[date, float]], days: Sequence[date], *, all_days: Sequence[date] | None = None,
+              log: Callable[[str], None] = lambda m: None) -> dict:
     """Everything the report needs. `spots[underlying][day]` is the US close that day (from SIP daily bars). No 2026 date is ever used."""
     assert all(d < HOLDOUT_START for d in days), "the probe never queries 2026"
-    res: dict = {"contracts": {}, "coverage": {}, "quotes": {}, "trades": {}, "depth": {}, "feeds": {}}
+    res: dict = {"contracts": {}, "coverage": {}, "quotes": {}, "trades": {}, "depth": {}, "feeds": {}, "continuity": []}
 
     # ---- 1) contracts: can expired contracts be listed, and how far back? --------------------------------------------
     for u in UNDERLYINGS:
@@ -318,6 +383,19 @@ def run_probe(p: Probe, spots: dict[str, dict[date, float]], days: Sequence[date
                                        "message": (qb.get("message") if isinstance(qb, dict) else None)}
         res["trades"][f"{sym} {d}"] = {"status": ts, "rows": sum(len(v or []) for v in (tb.get("trades") or {}).values()) if isinstance(tb, dict) else 0,
                                        "message": (tb.get("message") if isinstance(tb, dict) else None)}
+
+    # ---- 3b) supplement: continuity of marks for contracts that traded on the entry date (best case), on the best and the median coverage date ----
+    if all_days:
+        for u in UNDERLYINGS:
+            usable = [r for r in res["coverage"][u]["per_date"] if not r.get("skipped") and r["contracts"] and r["day"] >= "2024-02-01"]
+            ranked = sorted(usable, key=lambda r: (r["with_bar"] / r["contracts"], r["day"]))
+            picks = (("best coverage date", ranked[-1]), ("median coverage date", ranked[len(ranked) // 2])) if ranked else ()
+            for label, r in picks:
+                d = date.fromisoformat(r["day"])
+                cs = continuity_sample(p, u, d, spots[u][d], all_days)
+                cs["selected_as"] = label
+                res["continuity"].append(cs)
+                log(f"{u} {d} ({label}): {cs.get('traded_on_day')} traded that day; median share of later days with a bar {cs.get('median_share_of_days_with_a_bar')}")
 
     # ---- 4) depth: the earliest date with any historical options bars ---------------------------------------------------------
     # For the March and September monthly expiry (the third Friday) of every year from 2016, take the 100 contracts with the highest open
@@ -391,6 +469,25 @@ def render_findings(res: dict, p: Probe, days: Sequence[date]) -> str:
     for k in res["quotes"]:
         q, t = res["quotes"][k], res["trades"][k]
         out.append(f"| {k} | {q['status']} | {q['rows']} | {q['message'] or ''} | {t['status']} | {t['rows']} |")
+    if res.get("continuity"):
+        out += ["", "### 3b. Supplement: do the contracts that traded on the entry date keep printing? (best case, not one of the four questions)", "",
+                "For the dates with the best and the median daily-bar coverage (from 2024-02-01, after the data starts), the put contracts in the coverage set that HAD a bar "
+                "on the entry date, followed over the next 20 trading days up to each contract's own expiry. This conditions on the contract having traded on the entry date, "
+                "so it is a best case for a position opened on a printed price.", "",
+                "| Underlying | Entry date | Selected as | Contracts | Traded on the entry date | Bar on the next trading day | Median share of later days with a bar | Mean | "
+                "Bars on at least half the later days | Never printed again |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+        for c in res["continuity"]:
+            if "next_day_share" not in c:
+                out.append(f"| {c['underlying']} | {c['day']} | {c['selected_as']} | {c['contracts']:,} | {c['traded_on_day']:,} | {c.get('note', '')} | | | | |")
+                continue
+            out.append(f"| {c['underlying']} | {c['day']} | {c['selected_as']} | {c['contracts']:,} | {c['traded_on_day']:,} | {_pct(c['next_day_share'])} | "
+                       f"{_pct(c['median_share_of_days_with_a_bar'])} | {_pct(c['mean_share_of_days_with_a_bar'])} | {_pct(c['share_with_bars_on_half_the_days'])} | "
+                       f"{_pct(c['share_never_again'])} |")
+        out += ["", "Trade prints for three contracts that did trade (`/v1beta1/options/trades`, the entry date):", "",
+                "| Contract | HTTP | Rows | Fields | Exchange codes | Condition codes |", "| --- | --- | --- | --- | --- | --- |"]
+        for c in res["continuity"]:
+            for t_ in c.get("trades_sample", []):
+                out.append(f"| {t_['symbol']} | {t_['status']} | {t_['rows']} | {', '.join(t_['fields'])} | {', '.join(t_['exchanges'])} | {', '.join(t_['conditions'])} |")
     out += ["", "## 4. Depth: the earliest historical options bar", "", "| Underlying | Earliest bar seen | Found from contracts expiring | HTTP |", "| --- | --- | --- | --- |"]
     for u, d in res["depth"].items():
         out.append(f"| {u} | {d.get('first_bar_seen')} | {d.get('from_contracts_expiring', '')} | {d.get('status', '')} |")
@@ -428,13 +525,14 @@ def cmd_run(args) -> int:
         spots[u] = {ts.date(): float(c) for ts, c in zip(df["ts"], df["close"])}
     key, secret = load_credentials()
     p = Probe(key, secret)
-    res = run_probe(p, spots, days, log=_log)
+    res = run_probe(p, spots, days, all_days=days_all, log=_log)
     text = render_findings(res, p, days)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     (out / f"{stamp}-findings.md").write_text(text, encoding="utf-8", newline="\n")
     (out / f"{stamp}-requests.json").write_text(__import__("json").dumps(p.log, indent=1, default=str), encoding="utf-8")
+    (out / f"{stamp}-results.json").write_text(__import__("json").dumps(res, indent=1, default=str), encoding="utf-8")
     if args.review_file:
         review = Path(args.review_file)
         review.parent.mkdir(parents=True, exist_ok=True)
