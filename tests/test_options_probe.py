@@ -144,6 +144,11 @@ def test_coverage_table_counts_overall_and_by_bucket_with_shares():
     assert t[P.BUCKETS[0]]["contracts"] == 2 and t[P.BUCKETS[0]]["bar_share"] == 0.5 and t[P.BUCKETS[1]]["with_bar"] == 1
     assert t[P.BUCKETS[2]]["contracts"] == 1 and t[P.BUCKETS[2]]["bar_share"] == 0.0
     assert P.coverage_table([])["all"]["bar_share"] is None
+    assert t[P.WHOLE]["contracts"] == 4 and t[P.FRACTIONAL]["contracts"] == 0 and t[P.FRACTIONAL]["bar_share"] is None
+    mixed = P.coverage_table([{"spot": 100, "strike": 98.0, "has_bar": True}, {"spot": 100, "strike": 97.78, "has_bar": False},
+                              {"spot": 100, "strike": 96.5, "has_bar": False}, {"spot": 100, "strike": 95.0000000001, "has_bar": True}])
+    assert mixed[P.WHOLE] | {} == {"contracts": 2, "with_bar": 2, "with_quote": 0, "bar_share": 1.0, "quote_share": 0.0}
+    assert mixed[P.FRACTIONAL]["contracts"] == 2 and mixed[P.FRACTIONAL]["with_bar"] == 0 and mixed["all"]["contracts"] == 4
 
 
 # ======================================================================================== the client

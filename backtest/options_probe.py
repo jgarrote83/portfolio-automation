@@ -46,6 +46,7 @@ BELOW_SPOT = 0.15
 BARS_CHUNK = 100
 OCC = re.compile(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$")
 BUCKETS = ("0-5% below spot", "5-10% below spot", "10-15% below spot")
+WHOLE, FRACTIONAL = "whole-dollar strikes", "fractional strikes (e.g. 386.78)"
 _RETRYABLE = {429, 500, 502, 503, 504}
 
 
@@ -113,9 +114,11 @@ def day_bounds_utc(day: date) -> tuple[str, str]:
 
 def coverage_table(rows: Sequence[dict]) -> dict:
     """rows: {symbol, spot, strike, has_bar, has_quote (optional)} -> counts and shares overall and by distance-below-spot bucket."""
-    out = {"all": {"contracts": 0, "with_bar": 0, "with_quote": 0}, **{b: {"contracts": 0, "with_bar": 0, "with_quote": 0} for b in BUCKETS}}
+    out = {"all": {"contracts": 0, "with_bar": 0, "with_quote": 0}, **{b: {"contracts": 0, "with_bar": 0, "with_quote": 0} for b in BUCKETS},
+           WHOLE: {"contracts": 0, "with_bar": 0, "with_quote": 0}, FRACTIONAL: {"contracts": 0, "with_bar": 0, "with_quote": 0}}
     for r in rows:
-        for key in ("all", bucket_of(r["spot"], r["strike"])):
+        whole = abs(r["strike"] - round(r["strike"])) < 1e-9
+        for key in ("all", bucket_of(r["spot"], r["strike"]), WHOLE if whole else FRACTIONAL):
             out[key]["contracts"] += 1
             out[key]["with_bar"] += int(bool(r.get("has_bar")))
             out[key]["with_quote"] += int(bool(r.get("has_quote")))
@@ -455,7 +458,7 @@ def render_findings(res: dict, p: Probe, days: Sequence[date]) -> str:
             "close) up to the spot, then the daily bar dated D for each (`/v1beta1/options/bars`, `timeframe=1Day`). A contract with no bar had no trade that day; the endpoint "
             "builds bars from trades, so a missing bar is a missing print, not a data outage. Puts only, because the study is a put-spread wheel.", ""]
     for u, c in res["coverage"].items():
-        out += [f"### {u}", "", "| Distance below spot | Contracts | With a daily bar | Share | With a quote | Share |", "| --- | --- | --- | --- | --- | --- |"]
+        out += [f"### {u}", "", "| Group | Contracts | With a daily bar | Share | With a quote | Share |", "| --- | --- | --- | --- | --- | --- |"]
         for k, v in c["table"].items():
             out.append(f"| {'**all**' if k == 'all' else k} | {v['contracts']:,} | {v['with_bar']:,} | {_pct(v['bar_share'])} | {v['with_quote']:,} | {_pct(v['quote_share'])} |")
         out += ["", "| Date | Spot | Contracts | With a bar | Share | Distinct expiries |", "| --- | --- | --- | --- | --- | --- |"]
