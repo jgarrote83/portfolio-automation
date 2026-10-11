@@ -180,3 +180,25 @@ Foreign data comes only from the Yahoo cache; US data only through `backtest.dat
 with no override. The second-source check reads Stooq CSVs placed by hand in `data/reference/foreign/stooq/<Yahoo symbol>.csv` and fetches nothing:
 Stooq's CSV endpoint never returned CSV (a 404 to a plain client, a JavaScript proof-of-work page to a browser-style one), which is not worked around. A member with no such file is reported as unchecked, and a
 GO on unchecked data would read "GO, UNVERIFIED DATA". Outputs go to `reports/global_leadlag/<run-id>/` (gitignored).
+
+## ORB on QQQ
+
+The Phase 2 strategy on one liquid, high-priced ETF: QQQ only, no universe filter or Relative Volume ranking, the opening five-minute bar aggregated from the
+09:30-09:34 one-minute SIP bars, the stop at 10% of the 14-day ATR, a $25,000 sleeve whose whole size is the position cap, and 1 cent of slippage per side. Rules,
+sensitivities (slippage 0/2/5 cents, long-only, and a same-bar-optimistic bound that ignores the entry bar's stop) and the go/no-go are in
+`docs/specs/ORB_QQQ_Preregistration.md` (locked at its first commit; everything not restated there is inherited from the Phase 2 pre-registration). The verified engine
+(`backtest.engine.simulate_day`, `orb.*`) is reused, not rewritten.
+
+```
+PYTHONPATH=src python -m backtest.orb_qqq run --review-file .review/orb-qqq-results.md
+PYTHONPATH=src python -m backtest.orb_qqq_verify                      # re-derive 50 random trades with separate code, offline
+```
+
+Data comes only through `get_bars` (QQQ 1Day and 1Min on SIP, IEX 1Min for the opening-bar check, one SIP 5Min query for a consistency check); 2026 is refused with no
+override. Outputs go to `reports/orb_qqq/<run-id>/` (gitignored).
+
+## Options-data probe (report only)
+
+`PYTHONPATH=src python -m backtest.options_probe run --review-file .review/options-data-probe.md` is a read-only GET probe of Alpaca's historical options data
+(contracts list including expired series, daily bars, trades, and whether a historical quotes endpoint exists), run to decide whether free data can back a put-spread
+backtest. It contains no strategy code, never touches an order or account endpoint, and never queries 2026. Outputs go to `reports/options_probe/` (gitignored).

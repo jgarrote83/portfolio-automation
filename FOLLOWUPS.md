@@ -663,6 +663,32 @@ wiped them.
 
 ## Open
 
+### 123. ORB on QQQ — pre-registered, run, NO-GO; plus the options-data probe for the wheel study (HIGH — program, fifth day-trading candidate; branch `feat/orb-qqq`, not merged)
+**ORB on QQQ.** Pre-registered first (`docs/specs/ORB_QQQ_Preregistration.md`, locked, 19 interpreted details; everything not restated is inherited from the Phase 2
+pre-registration) and run on the verified engine (`backtest.engine.simulate_day`, `orb.signals`/`sizing`/`universe`; no new engine) as `backtest/orb_qqq.py` +
+`orb_qqq_verify.py`: one instrument, QQQ, no universe filter or Relative Volume, opening bar aggregated from the 09:30-09:34 one-minute SIP bars, stop 10% of the 14-day ATR,
+$25,000 sleeve with the whole sleeve as the position cap, 1 cent per side. **RESULT (2026-10-11, run `20261011T181638Z-793721b`, `.review/orb-qqq-results.md`): mechanical
+verdict NO-GO on the Sharpe alone**: net Sharpe 0.457 (t-stat 0.65, bar 1.0); net P&L +$1,116 (2024) and +$362 (2025), $1,478 in total (5.9% of the sleeve over two years),
+max drawdown $1,415; 469 trades, hit ratio 20.0%, average net R 0.113. **The two problems named in the brief are largely gone and it did not rescue the result:** only 31 trades
+(6.6%) were stopped in the entry minute, against 55% in ORB v1; costs are 3.4% of total risk (about 0.04R per trade, against about 0.36R in ORB v1). Sensitivities (never decide the
+verdict): slippage 0 / 2 / 5 cents Sharpe 0.60 / 0.31 / -0.12; long-only 0.36 (2025 -$257); same-bar optimistic bound 0.71 (t 1.00, $2,367): all below 1.0, so neither costs nor the
+same-minute ambiguity explains the shortfall; the gross edge is about 1.8 bps per trade (1.3 net). As stated before the run, the $25,000 cap bound on all 469 trades (mean 49.4 shares,
+mean stop $0.79), so risk per trade was about 0.16% of the sleeve, not 1%. IEX vs SIP for the 09:30 bar: the same direction on 95.2% of days (477 of 501); IEX high 7.5 cents lower and
+low 7.8 cents higher on average (99th percentile about 35 cents); this does not say what ORB would earn on IEX data. **Verified:** independent verifier 50/50 trades; the one-minute
+aggregate equals Alpaca's five-minute bar on all 502 days; 36 injected bugs all caught (6 survived at first and exposed a market that hid stop rounding and the ATR window; fixed);
+suite 2011 -> 2057 measured, ruff clean. By the pre-registered rule it earns no holdout run; any change (a different stop fraction, window, sizing or instrument) is a NEW
+pre-registration with a fresh test period.
+**Options-data probe (`backtest/options_probe.py`, `.review/options-data-probe.md`; read-only GETs, no strategy code).** Verdict: **free Alpaca options data is not good enough, on its own,
+for a defensible put-credit-spread backtest; a rough exploratory pass is possible; a defensible one needs a paid source with historical bid/ask.** Evidence: (1) the historical quotes
+endpoint answered 404 (a missing route, not a permission error; no 401/403 anywhere), so there is no bid/ask and the fill assumption cannot be tested; (2) on 20 dates only 13.0% (QQQ) and 18.2% (SPY)
+of the puts expiring 25-35 days out with strikes up to 15% below the spot had a daily bar that day (whole-dollar strikes, 98% of the contracts, 11.8% / 17.8%: not an artifact of odd series), falling with
+distance from the spot; (3) contracts that did trade on the entry date kept printing (bar on the next day 88-100%, median 94-100% of later days; a best case); (4) history starts January 2024 (earliest expiry
+2024-01-03/04, earliest bar 2024-01-18; 2016-2023 returned nothing), about two years; (5) the contract records carry one close price and one open-interest snapshot each, no implied volatility or greeks; (6) the bars endpoint
+rejects a `feed` parameter, so OPRA vs indicative could not be determined from the API (the trade prints carry many exchange codes, which is what consolidated prints look like; an inference, not a statement from Alpaca).
+Candidate paid sources are listed without prices and none was verified (Databento, Polygon/Massive, ThetaData, ORATS, Cboe DataShop, OptionMetrics, Alpaca's own paid tier).
+**Open:** (1) Jorge's decision on what follows for ORB (stop, or a new pre-registered variant); (2) whether to buy options data before designing the wheel study; (3) merging deploys nothing (no `src/` change);
+(4) the day-trading Alpaca account and Key Vault secrets in FOLLOWUPS #118 are still undefined.
+
 ### 122. Global lead-lag study — pre-registered, run, NO-GO in all four groups (HIGH — program, fourth day-trading candidate; branch `feat/global-leadlag`, not merged)
 Question: do Asia, Europe and the UK predict the US day? Pre-registered first (`docs/specs/Global_LeadLag_Preregistration.md`, locked, 23 interpreted details) and
 built as `backtest/foreign.py` (Yahoo `yfinance` -> parquet cache, split events, 2026 refused), `leadlag.py` (pure logic), `leadlag_run/report/verify.py`. Rule per group
