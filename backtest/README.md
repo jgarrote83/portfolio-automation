@@ -178,5 +178,5 @@ PYTHONPATH=src python -m backtest.leadlag_verify                      # re-deriv
 
 Foreign data comes only from the Yahoo cache; US data only through `backtest.data.get_bars`. Every date on or after 2026-01-01 is refused for both,
 with no override. The second-source check reads Stooq CSVs placed by hand in `data/reference/foreign/stooq/<Yahoo symbol>.csv` and fetches nothing:
-Stooq's CSV endpoint answers with a JavaScript anti-bot page, which is not worked around. A member with no such file is reported as unchecked, and a
+Stooq's CSV endpoint never returned CSV (a 404 to a plain client, a JavaScript proof-of-work page to a browser-style one), which is not worked around. A member with no such file is reported as unchecked, and a
 GO on unchecked data would read "GO, UNVERIFIED DATA". Outputs go to `reports/global_leadlag/<run-id>/` (gitignored).

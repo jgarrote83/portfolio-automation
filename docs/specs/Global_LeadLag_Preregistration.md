@@ -124,3 +124,9 @@ The instruction does not settle every detail; these are the readings made before
 ## 9. What a run reports
 
 The verdict per group (with its data-verification status); the correlation tables (4a); the regression (4b); the primary strategy table and the three sensitivities per group (4c); the session-timing table; the data-quality results (two-source agreement or "unchecked", stale-open shares, split events and exclusions, holiday and unavailability counts by reason); and a short plain-language summary. Full outputs go to `reports/global_leadlag/<run-id>/` (gitignored), with the code commit SHA and the pre-registration hash in the header.
+
+## Post-run clarification, no rule change
+
+*Added 2026-10-11, after the first and only run (`20261011T142835Z-a435196`). No rule above is changed; this corrects a factual description in item 15 only.*
+
+Item 15 says Stooq's CSV endpoint "answers every request, including for a known-good symbol such as `aapl.us`, with an HTTP 200 page that says 'This site requires JavaScript to verify your browser'". The probe log is more specific, and the correct statement is: requests made with the Python `requests` default client (29 symbol requests for the 22 members, and one bare `aapl.us` request) received HTTP 404 with a "The page you requested does not exist" body; the three requests that carried a browser-style `User-Agent` (`aapl.us`, `^spx` on stooq.com, `aapl.us` on stooq.pl) received HTTP 200 with the JavaScript proof-of-work page. **No request received CSV data.** The conclusion and the rule are unchanged: nothing was solved or worked around, no Stooq file exists under `data/reference/foreign/stooq/`, all 22 members are unchecked, and any GO would have been reported as "GO, UNVERIFIED DATA".
