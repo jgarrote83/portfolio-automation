@@ -1,8 +1,11 @@
 """ORB on QQQ on a constructed market with known answers (no network, no data layer).
 
-Daily bars are 400 / 403 / 397 / 400 every day, so the 14-day ATR is 6.00 and the stop distance 0.60. Opening bar (up):
-O 400.00 / H 401.00 / L 399.50 / C 400.80 -> long trigger 401.00, stop 400.40, 62 shares (the $25,000 cap: 25,000 / 401 = 62.3;
-the 1% risk limit would allow 416). Opening bar (down): O 400.00 / H 400.50 / L 399.00 / C 399.20 -> short trigger 399.00, stop 399.60.
+Daily bars are 400 / 403 / 397 / 400 every day (true range 6.00), except 2023-12-13, whose range is 6.70. That bar is the OLDEST of the
+14 prior days of 2024-01-02 only, so the ATR is (6.70 + 13 x 6.00) / 14 = 6.05 on 01-02 (stop distance 0.605 -> the stop rounds AWAY from
+the entry to a distance of 0.61) and exactly 6.00 on 01-03. The 2024-01-03 daily bar has a range of 20 (it is the NEWEST prior bar of every later day's window), so the ATR is
+(20 + 13 x 6.00) / 14 = 7.00 from 01-04 on (stop distance 0.70). Opening bar (up): O 400.00 / H 401.00 / L 399.50 /
+C 400.80 -> long trigger 401.00, stop 400.39 on 01-02 and 400.40 later, 62 shares (the $25,000 cap: 25,000 / 401 = 62.3; the 1% risk limit
+would allow 410-416). Opening bar (down): O 400.00 / H 400.50 / L 399.00 / C 399.20 -> short trigger 399.00, stop 399.60.
 
 Days: 01-02 clean long (+1.00); 01-03 ambiguous entry minute (reaches trigger and stop); 01-04 short; 01-05 doji; 01-08 incomplete
 opening bar (09:32 missing); 01-09 never triggers; 01-10 no minute bars; 01-11 gap entry at 401.50.
@@ -48,6 +51,8 @@ def weekdays(a, b):
 
 CAL = weekdays(date(2023, 12, 1), date(2024, 1, 11))
 DAILY = {d: (400.0, 403.0, 397.0, 400.0) for d in CAL}
+DAILY[date(2023, 12, 13)] = (400.0, 403.7, 397.0, 400.0)                                      # true range 6.70: the oldest bar of 01-02's window
+DAILY[date(2024, 1, 3)] = (400.0, 410.0, 390.0, 400.0)                                         # true range 20: the newest prior bar for every window day from 01-04
 
 UP = {570: (400.00, 400.50, 399.50, 400.40, 1000), 571: (400.40, 401.00, 400.30, 400.90, 1000), 572: (400.90, 400.95, 400.60, 400.70, 1000),
       573: (400.70, 400.90, 400.50, 400.80, 1000), 574: (400.80, 400.85, 400.60, 400.80, 1000)}
@@ -216,7 +221,9 @@ def test_build_pick_gives_the_reason_for_every_day_without_a_pick():
     inp = _inputs()
     pos = {d: i for i, d in enumerate(inp.cal)}
     picks = {k: Q.build_pick(pos[D[k]], inp.cal, inp.daily, inp.minute.get(D[k], {}), CFG) for k in "ABCDEFGH"}
-    assert picks["A"][0].side == LONG and picks["A"][0].atr == pytest.approx(6.0) and picks["A"][0].rvol == 0.0
+    assert picks["A"][0].side == LONG and picks["A"][0].atr == pytest.approx(6.05) and picks["A"][0].rvol == 0.0
+    assert picks["B"][0].atr == pytest.approx(6.0)                                                     # the 6.70 bar has left the window
+    assert picks["C"][0].atr == pytest.approx(7.0) and picks["H"][0].atr == pytest.approx(7.0)        # the range-20 bar of 01-03 is in these windows
     assert (picks["A"][0].bar_open, picks["A"][0].bar_high, picks["A"][0].bar_low, picks["A"][0].bar_close) == (400.0, 401.0, 399.5, 400.8)
     assert picks["C"][0].side == SHORT and picks["D"][0].side is None                                  # a doji is a pick with no side
     assert picks["E"] == (None, "opening_bar_incomplete") and picks["G"] == (None, "no_minute_bars")
@@ -238,15 +245,16 @@ def test_the_clean_long_ambiguous_short_and_gap_days_give_the_constructed_answer
     tr = _trades(res, "primary")
     assert sorted(tr) == [D["A"], D["B"], D["C"], D["H"]]
     a = tr[D["A"]]
-    assert (a.side, a.shares, a.binding, a.trigger, a.stop, a.entry_fill, a.exit_fill, a.exit_reason) == (LONG, 62, "cap", 401.0, 400.4, 401.0, 402.0, "time")
-    assert a.stop_distance == pytest.approx(0.6) and a.gross_pnl == pytest.approx(62.0)
+    assert (a.side, a.shares, a.binding, a.trigger, a.stop, a.entry_fill, a.exit_fill, a.exit_reason) == (LONG, 62, "cap", 401.0, 400.39, 401.0, 402.0, "time")
+    assert a.stop_distance == pytest.approx(0.61) and a.gross_pnl == pytest.approx(62.0)                  # 401 - 0.605 = 400.395 -> 400.39, AWAY from the entry
     assert a.slippage_cost == pytest.approx(62 * 0.01 * 2) and a.commission == pytest.approx(62 * 0.0035 * 2)
-    assert a.net_pnl == pytest.approx(62 - 1.24 - 0.434) and a.r_net == pytest.approx(a.net_pnl / (62 * 0.6))
+    assert a.net_pnl == pytest.approx(62 - 1.24 - 0.434) and a.r_net == pytest.approx(a.net_pnl / (62 * 0.61))
     b = tr[D["B"]]
-    assert (b.exit_reason, b.entry_minute, b.exit_minute, b.exit_fill) == ("stop_same_bar", t(9, 35), t(9, 35), 400.4)
+    assert (b.exit_reason, b.entry_minute, b.exit_minute, b.exit_fill, b.stop) == ("stop_same_bar", t(9, 35), t(9, 35), 400.4, 400.4)
     assert b.gross_pnl == pytest.approx(62 * -0.6) and b.r_gross == pytest.approx(-1.0)
     c = tr[D["C"]]
-    assert (c.side, c.shares, c.trigger, c.stop, c.exit_fill) == (SHORT, 62, 399.0, 399.6, 398.0) and c.gross_pnl == pytest.approx(62.0)
+    assert (c.side, c.shares, c.trigger, c.stop, c.exit_fill) == (SHORT, 62, 399.0, 399.7, 398.0) and c.gross_pnl == pytest.approx(62.0)
+    assert c.stop_distance == pytest.approx(0.7)
     h = tr[D["H"]]
     assert h.entry_gap and h.entry_fill == 401.5 and h.exit_fill == 403.0
 
@@ -290,16 +298,32 @@ def test_same_bar_optimistic_differs_from_the_primary_only_where_the_entry_bar_r
 def test_the_extra_statistics_follow_their_definitions(res):
     ex = res["extras"]["primary"]
     tr = list(_trades(res, "primary").values())
-    assert ex["mean_stop_distance_usd"] == pytest.approx(0.6) and ex["mean_stop_distance_bps"] == pytest.approx(
-        sum(0.6 / x.trigger * 1e4 for x in tr) / 4)
+    dists = sorted(x.stop_distance for x in tr)
+    assert dists == pytest.approx([0.6, 0.61, 0.7, 0.7])
+    assert ex["mean_stop_distance_usd"] == pytest.approx(sum(dists) / 4)
+    assert ex["mean_stop_distance_bps"] == pytest.approx(sum(abs(x.trigger - x.stop) / x.trigger * 1e4 for x in tr) / 4)
     cost = sum(x.slippage_cost + x.commission for x in tr)
-    assert ex["costs_total_usd"] == pytest.approx(cost) and ex["risk_total_usd"] == pytest.approx(4 * 62 * 0.6)
-    assert ex["costs_over_total_risk"] == pytest.approx(cost / (4 * 62 * 0.6)) and ex["mean_costs_over_R"] == pytest.approx(cost / (4 * 62 * 0.6))
+    risk = sum(x.shares * x.stop_distance for x in tr)
+    assert ex["costs_total_usd"] == pytest.approx(cost) and ex["risk_total_usd"] == pytest.approx(risk) == pytest.approx(62 * 2.61)
+    assert ex["costs_over_total_risk"] == pytest.approx(cost / risk)
+    assert ex["mean_costs_over_R"] == pytest.approx(sum((x.slippage_cost + x.commission) / (x.shares * x.stop_distance) for x in tr) / 4)
     assert ex["avg_net_R"] == pytest.approx(sum(x.r_net for x in tr) / 4) == pytest.approx(res["metrics"]["primary"]["avg_r_net"])
     assert ex["avg_net_bps"] == pytest.approx(sum(x.net_pnl / (x.shares * x.entry_fill) * 1e4 for x in tr) / 4)
     assert ex["mean_shares"] == 62 and ex["t_stat_mean_daily_return"] is not None
     assert res["metrics"]["primary"]["sizing_binding"]["cap"] == 4 and res["metrics"]["primary"]["sizing_binding"]["risk"] == 0
     assert Q.extras([], {}) == {"trades": 0}
+
+
+def test_the_entry_bar_reaches_the_stop_at_exactly_the_stop_level_and_not_one_cent_short():
+    base = dict(day=D["A"], symbol="QQQ", shares=1, binding="cap", rvol=0.0, atr=6.0, trigger=401.0, stop_distance=0.6, entry_fill=401.0,
+                entry_minute=575, entry_gap=False, exit_fill=0.0, exit_minute=575, exit_reason="stop_same_bar", exit_stale=False, gross_pnl=0.0,
+                slippage_cost=0.0, commission=0.0, net_pnl=0.0, r_gross=0.0, r_net=0.0, notional=401.0)
+    long_ = E.Trade(side=LONG, stop=400.4, **base)
+    assert Q.entry_bar_reaches_stop(long_, bar(400.9, 401.1, 400.40, 400.95)) is True                  # the low equals the stop: the stop is hit
+    assert Q.entry_bar_reaches_stop(long_, bar(400.9, 401.1, 400.41, 400.95)) is False
+    short = E.Trade(side=SHORT, stop=399.6, **{**base, "trigger": 399.0})
+    assert Q.entry_bar_reaches_stop(short, bar(399.1, 399.60, 398.9, 399.0)) is True
+    assert Q.entry_bar_reaches_stop(short, bar(399.1, 399.59, 398.9, 399.0)) is False
 
 
 # ============================================================================ parity with Phase 2
@@ -357,6 +381,9 @@ def test_the_iex_check_flags_an_iex_range_outside_the_sip_range_and_equal_bars()
     iex = {D["A"]: {570: bar(400.0, 401.0, 399.5, 400.8)}, D["B"]: {570: bar(400.0, 401.2, 399.5, 400.8)}}      # B's IEX high exceeds SIP: impossible
     i = Q.iex_check(sip, iex, [D["A"], D["B"]])
     assert i["iex_range_outside_sip"] == 1 and i["high"]["share_exactly_equal"] == pytest.approx(0.5) and i["direction_agree"] == 2
+    one_cent = Q.iex_check({D["A"]: (400.0, 401.0, 399.5, 400.8)}, {D["A"]: {570: bar(400.0, 400.99, 399.5, 400.8)}}, [D["A"]])
+    assert one_cent["high"]["share_exactly_equal"] == 0.0 and one_cent["high"]["max_abs"] == pytest.approx(1.0)       # one cent is not "exactly equal"
+    assert one_cent["low"]["share_exactly_equal"] == 1.0
 
 
 def test_the_five_minute_consistency_check_names_every_difference(res):
