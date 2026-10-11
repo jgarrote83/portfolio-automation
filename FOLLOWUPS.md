@@ -663,6 +663,27 @@ wiped them.
 
 ## Open
 
+### 122. Global lead-lag study — pre-registered, run, NO-GO in all four groups (HIGH — program, fourth day-trading candidate; branch `feat/global-leadlag`, not merged)
+Question: do Asia, Europe and the UK predict the US day? Pre-registered first (`docs/specs/Global_LeadLag_Preregistration.md`, locked, 23 interpreted details) and
+built as `backtest/foreign.py` (Yahoo `yfinance` -> parquet cache, split events, 2026 refused), `leadlag.py` (pure logic), `leadlag_run/report/verify.py`. Rule per group
+(Broad SPY, Semis SMH, Banks XLF, Energy XLE; $25,000 each): s = mean of the Asian regional mean (close of the session dated D / previous close) and the Europe/UK regional
+mean (OPEN on D / previous close; a European close on D is never used); s > 0 long at the daily-bar open, s < 0 short, exit at the daily-bar close, no slippage, $0.0035/share.
+**RESULT (2026-10-11, run `20261011T142835Z-a435196`, `.review/global-leadlag-results.md`): mechanical verdict NO-GO in all four groups.** Net Sharpe / net P&L (2024; 2025):
+Broad -0.82 / -$5,649 (+$1,407; -$7,056); Semis -0.87 / -$12,457 (-$1,264; -$11,193); Banks -0.68 / -$4,799 (+$93; -$4,891); Energy -0.96 / -$8,862 (-$3,868; -$4,994); 498-502 trades each,
+hit ratio 47.6-49.8%. No sensitivity (Asia-only, Europe-only, long-only, 2-cent slippage) reaches Sharpe 0.1 in any group (best: Banks long-only +$53, Sharpe 0.01). **Context:** the foreign signal lines up
+with the US OPENING GAP at Pearson +0.42 (Broad), +0.43 (Semis), +0.40 (Banks), +0.20 (Energy) (Spearman 0.37 / 0.37 / 0.19 / 0.29) — moderate, not the high value expected.
+**Tradeable question:** the signal does not continue after the open; its correlation with US open-to-close is NEGATIVE, Pearson -0.21 / -0.17 / -0.11 / -0.20 but Spearman only -0.06 / -0.07 / -0.05 / -0.03
+(a few large days carry it), and by year ~0 in 2024 vs -0.30 / -0.23 / -0.20 / -0.29 in 2025. Regression beyond the US gap: b1 HAC t -1.95 / -2.40 / -1.14 / -1.86; the US gap itself adds nothing (b2 t -0.65 / +0.84 / -0.23 / +1.34).
+This is a weak, year-dependent partial reversal, NOT an established effect (four correlated groups, one 2-year sample); a reversal rule was NOT tested and would be a NEW pre-registration with a fresh test period.
+**Data:** all 22 members cached (504-530 rows each, no 2026 row, zero Yahoo split events; no jump in any series looks like an undetected split, and the larger moves cluster on market-wide days such as 5-6 Aug 2024 and 7-10 Apr 2025); session timing verified for all 10 markets on all 502 dates
+(closest margin before the US open: Asia >= 320 min, Europe/UK >= 330 min; every European close falls >= 120 min AFTER it). **The pre-registered stale-open rule excluded `^FTSE`** (Yahoo's open equals the previous close on 97.6% of days;
+the other 8 European members are at 0.0-3.1%), so Broad's Europe region is 3 members. **The two-source check did NOT run: Stooq's CSV endpoint answers every request with a JavaScript proof-of-work anti-bot page
+(probed for a known-good symbol); it was not bypassed (pre-registration item 15). 22 of 22 members are UNCHECKED.** A GO would have been reported as "GO, UNVERIFIED DATA"; a NO-GO is a NO-GO regardless.
+Stooq CSVs placed by hand in `data/reference/foreign/stooq/<Yahoo symbol>.csv` are read automatically. **Verified:** independent verifier 30/30 random trade-days re-derived from the raw cache; 41 injected bugs all caught
+(3 survived at first and exposed boundary gaps in the tests, now pinned); suite 1947 -> 2011 measured, ruff clean. 2026 was never read from any source; no LLM is used. By the pre-registered rule nothing here earns a holdout run.
+**Open:** (1) Jorge's decision on what follows (stop, a reversal rule as a NEW pre-registration, or hand-placed Stooq files to run the second-source check); (2) merging deploys nothing (no `src/` change; `yfinance` is in `backtest/requirements.txt` only);
+(3) the day-trading Alpaca account and Key Vault secrets in FOLLOWUPS #118 are still undefined.
+
 ### 121. ORB v1 same-minute ambiguity resolved from SIP prints — a diagnostic; ORB v1 stays NO-GO (HIGH — program; branch `feat/orb-samebar-resolution`, not merged)
 The Phase 2 engine reads one-minute bars; 4,323 of the 7,862 primary trades were stopped in their entry minute (`stop_same_bar`) under the
 pre-registered assumption that the stop came AFTER the entry. This resolves it (a diagnostic, never a verdict; nothing touches

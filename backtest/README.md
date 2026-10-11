@@ -159,3 +159,24 @@ cached per exact window in `data/cache/trades/`, offline-capable, refusing 2026)
 (odd lots, derivatively priced, out-of-sequence, late-reported and similar); the filter is checked against Alpaca's own one-minute
 bars in the report. The engine's default (`entry_bar_stop=None`) is the pre-registered rule byte for byte, and the run reproduces
 every Phase 2 primary trade before reporting anything. Outputs go to `reports/orb/samebar/<run-id>/` (gitignored).
+
+## Global lead-lag study
+
+Do Asia, Europe and the UK predict the US day? Four fixed groups (Broad/SPY, Semis/SMH, Banks/XLF, Energy/XLE), each a $25,000 sleeve
+that goes long or short the US instrument at the daily-bar open on the sign of a foreign overnight signal and exits at the daily-bar close.
+The signal is the equal-weight mean of the Asian regional mean (close of the local session dated D over its previous close) and the
+Europe/UK regional mean (the OPEN on D over the previous close; a European close on D is never used). Rules, diagnostics (Pearson/Spearman,
+Newey-West regression, sensitivities), data checks and the mechanical go/no-go are in `docs/specs/Global_LeadLag_Preregistration.md`
+(locked at its first commit; hash checked in every run header). **No LLM is used anywhere.**
+
+```
+pip install -r backtest/requirements.txt                              # adds yfinance (backtest only)
+PYTHONPATH=src python -m backtest.leadlag_run download                # 22 read-only Yahoo requests -> data/reference/foreign/ (gitignored)
+PYTHONPATH=src python -m backtest.leadlag_run run --review-file .review/global-leadlag-results.md
+PYTHONPATH=src python -m backtest.leadlag_verify                      # re-derive 30 random trade-days with separate code, offline
+```
+
+Foreign data comes only from the Yahoo cache; US data only through `backtest.data.get_bars`. Every date on or after 2026-01-01 is refused for both,
+with no override. The second-source check reads Stooq CSVs placed by hand in `data/reference/foreign/stooq/<Yahoo symbol>.csv` and fetches nothing:
+Stooq's CSV endpoint answers with a JavaScript anti-bot page, which is not worked around. A member with no such file is reported as unchecked, and a
+GO on unchecked data would read "GO, UNVERIFIED DATA". Outputs go to `reports/global_leadlag/<run-id>/` (gitignored).
