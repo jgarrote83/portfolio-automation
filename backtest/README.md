@@ -202,3 +202,21 @@ override. Outputs go to `reports/orb_qqq/<run-id>/` (gitignored).
 `PYTHONPATH=src python -m backtest.options_probe run --review-file .review/options-data-probe.md` is a read-only GET probe of Alpaca's historical options data
 (contracts list including expired series, daily bars, trades, and whether a historical quotes endpoint exists), run to decide whether free data can back a put-spread
 backtest. It contains no strategy code, never touches an order or account endpoint, and never queries 2026. Outputs go to `reports/options_probe/` (gitignored).
+
+## Safe wheel model (modeled screening backtest)
+
+A 2005-2025 simulation of a defined-risk SPY put-credit spread (35 days to expiry, short strike at a model delta of -0.20, long strike 2% of spot lower, profit-take at 50% of the
+credit, exit 7 days before expiry, a $25,000 sleeve risking 10% per position, a 20% drawdown kill switch). **Option prices are modeled** (Black-Scholes from the VIX and the
+underlying's closes), because free options data has no historical bid/ask; so the only possible outcomes are WORTH REAL DATA and NOT WORTH REAL DATA, and it can never approve
+trading. Rules, the screening gate (net Sharpe >= 0.5, drawdown <= 30%, worst year >= -20%, two-thirds of years profitable) and the nine sensitivities are in
+`docs/specs/Safe_Wheel_Model_Preregistration.md` (locked at its first commit).
+
+```
+PYTHONPATH=src python -m backtest.safe_wheel_run download                                    # FRED x3, Yahoo x2, Cboe PUT -> data/reference/wheel/
+PYTHONPATH=src python -m backtest.safe_wheel_run run --review-file .review/safe-wheel-model-results.md
+PYTHONPATH=src python -m backtest.safe_wheel_verify                                           # re-price 30 random positions with separate code, offline
+```
+
+Sources are public and read-only: FRED's CSV endpoint (asked only for dates up to 2025-12-31; FRED drops connections that send a custom User-Agent, so the library default is
+used), `yfinance` (end exclusive at 2026-01-01), and Cboe's public `PUT_History.csv` (a whole-history file: rows dated 2026 are dropped by the parser and never stored). The run
+also checks yfinance SPY closes against Alpaca SIP daily closes through `get_bars` for 2016-2025. Outputs go to `reports/safe_wheel_model/<run-id>/` (gitignored).

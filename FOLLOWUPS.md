@@ -663,6 +663,26 @@ wiped them.
 
 ## Open
 
+### 124. Safe wheel (SPY put-credit spread) modeled screening backtest — pre-registered, run, NOT WORTH REAL DATA (HIGH — program, wheel study step 1 of 2; branch `feat/safe-wheel-model`, not merged)
+**Why modeled.** The options-data probe (#123) found no historical bid/ask in free Alpaca options data, sparse daily prints and a history that starts in 2024, so step 1 PRICES the options with Black-Scholes from the VIX and the
+underlying's closes over 2005-2025 (covering 2008, 2020 and 2022). It is a screening test: its only outcomes are WORTH REAL DATA and NOT WORTH REAL DATA, and it can never approve trading; a pass would lead to step 2, the same pre-registered
+rules on paid historical bid/ask data. Pre-registered first (`docs/specs/Safe_Wheel_Model_Preregistration.md`, locked at `b081138`, 21 interpreted details, a machine-readable block pinned by `tests/test_safe_wheel.py`) and built as
+`backtest/safe_wheel.py` (+ `wheel_data.py`, `safe_wheel_report.py`, `safe_wheel_run.py`, `safe_wheel_verify.py`): 35 days to expiry, short put at model delta -0.20, long put 2% of spot lower, IV(K) = VIX/100 + 0.5 vol points per 1% OTM,
+$0.03 per share per leg per side + $0.65 per contract, profit-take at 50% of the credit or the close 7 days before expiry, $25,000 sleeve risking $2,500 per position, kill switch at 20% below the running peak for 3 months.
+**RESULT (2026-10-12, run `20261012T011058Z-393af12`, `.review/safe-wheel-model-results.md`): NOT WORTH REAL DATA — two of the four gate checks fail.** Net Sharpe 0.183 (bar 0.5; t 0.84) FAIL; maximum drawdown $7,155 = 28.6% of the sleeve
+(limit 30%) PASS, narrowly; worst calendar year 2007 -$1,935 = -7.7% (limit -20%) PASS; 12 of 21 calendar years profitable (14 needed) FAIL. Net P&L $6,584 over 21 years (1.1% a year on the sleeve), 246 positions, win rate 88.6%, average credit
+$63 and average max loss $442 per contract, one kill-switch activation (2008-07-11). **No sensitivity reaches the gate** (Sharpe: skew 0 0.43, skew 1.0 -0.13, haircut $0.01 0.46, haircut $0.06 -0.46, no profit-take 0.29, delta -0.10 -0.30,
+delta -0.30 0.19, no kill switch 0.11, QQQ with VXN -0.56 with 19 kill-switch activations). Descriptive: costs ($25,769) take about four fifths of the $32,353 earned before costs; 218 winners average +$129 and 28 losers -$767; profit-take exits
++$27,858 against time exits -$21,273; contracts fall from 13-14 (2005-2010) to 2-3 (2021-2025) because the dollar risk budget is fixed. **PUT-index calibration** (227 monthly at-the-money rolls, 2007-2025, because Cboe's file has daily rows
+only from 2007-01-03): the model earns 4.2 points a year MORE than the real index (compounded 631% vs 255%; correlation 0.98), so it flatters the seller and a real-data test would be expected to look worse; it is an at-the-money calibration and
+says nothing about the size of the bias for the spread. **Verified:** independent verifier (separate code, `erfc` normal CDF, raw cache) re-priced 30 of 30 random positions; calendar check: the five moved expiries are exactly the Good-Friday set;
+two-source price check: 2,433 of 2,514 dates agree within 0.05%, 81 disagree (largest 2.79% on 2020-03-12; only 8 of 246 positions touch such a date, by at most 0.33%); 103 injected bugs, nine survivors over two passes fixed, final pass 103/103
+caught (one survivor was an unreachable guard, removed); suite 2057 -> 2133 measured, ruff clean. **One pre-registration statement was wrong, not the rule:** item 4 expected the "position still open" skip to be a zero; it fired twice (the
+Good-Friday Thursday expiries of April 2022 and April 2025 put an entry one day before the prior position's Friday exit). By the pre-registered rule these rules earn no step 2; any variant (another delta, width, exit, underlying or cost
+assumption) is a NEW pre-registration, and the 2005-2025 path is now used for these rules.
+**Open:** (1) Jorge's decision on the wheel: stop here, or write a new pre-registration (a #123 open item, "buy options data before designing the study", is answered for THESE rules: not indicated); (2) merging deploys nothing (no `src/`
+change); (3) FRED drops connections that send a custom User-Agent (the library default works), noted in `backtest/README.md`.
+
 ### 123. ORB on QQQ — pre-registered, run, NO-GO; plus the options-data probe for the wheel study (HIGH — program, fifth day-trading candidate; branch `feat/orb-qqq`, not merged)
 **ORB on QQQ.** Pre-registered first (`docs/specs/ORB_QQQ_Preregistration.md`, locked, 19 interpreted details; everything not restated is inherited from the Phase 2
 pre-registration) and run on the verified engine (`backtest.engine.simulate_day`, `orb.signals`/`sizing`/`universe`; no new engine) as `backtest/orb_qqq.py` +
