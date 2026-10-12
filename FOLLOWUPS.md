@@ -936,6 +936,7 @@ or disabling it while it holds positions would leave them unprotected.
   catches unattributed non-Core positions and resting stops (the wiped-ledger false-FLAT);
   the runbook gains an ownership check, explicit `--subscription` on every `az`, and a
   `LearningProposals` query; U1-U11 decided (inventory section 8a); Part B is purely subtractive.
+- **`shared/separation.py` deleted (Part B, 2026-10-11 rebase onto master):** B1 had moved `flex/separation.py` there verbatim (decision U1) for the Phase 4 ORB exclusion set; FOLLOWUPS #118 removed that consumer, and after the rebase nothing in `src/`, `web/`, `backtest/` or `scripts/` imports the module, so it and `tests/test_shared_separation.py` (its 4 tests) were deleted — Part B stays purely subtractive. This answers #118 item (4) ("kept, repurposed or deleted"): deleted. Recoverable at the PORT source SHA.
 - **Jorge, between A and B:** run the runbook, trip the switch, wait until the flat check
   says FLAT twice with the trip confirmed. Part B coding may start earlier; merging and
   deploying wait for that.
