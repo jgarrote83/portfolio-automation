@@ -663,6 +663,22 @@ wiped them.
 
 ## Open
 
+### 125. Core vs SPY analysis (read-only) and a scoreboard baseline mismatch (MEDIUM — measurement integrity; branch `analysis/core-vs-spy`, not merged)
+`analysis/core_performance/` (never deployed; no change under `src/`): a GET-only Alpaca client (`alpaca_ro.py`), a fetcher, pure statistics, a ledger reconstruction from account activities, an exactly-additive daily decomposition and a
+report, with 35 tests (`tests/test_core_vs_spy_analysis.py`). Output `.review/core-vs-spy-analysis.md` (local). **Window:** pre-trade base 2026-05-22 ($100,000) to the 2026-10-09 close, 96 sessions. **Result:** book -2.68% vs SPY price +4.42%
+(+4.95% total return): a 7.09 point shortfall like-for-like (the paper account credits no dividends); beta 0.40, correlation 0.64, Sharpe -0.89 with a band of +/-3.2 (n=96). **Exact daily decomposition (sum -7.21 pp):** cash sleeve (literal cash + SGOV, average
+33% of equity) -2.84 pp (39%; about 0.27 pp of it is SGOV's uncredited distributions in the paper account); invested book vs SPY -4.37 pp (61%); fees $4.50 (about 0). **(b) allocation and (c) tactical effects are BLOCKED**: they need
+`daily-snapshots/2026-05-26.json` (inception-day reference weights) and no Azure access was available (the CLI was signed in as a service principal, not `jgarrote@easygrids.com`; told to wait); the code computes them when run with
+`--inception-snapshot`. All-weather proxy (30/40/15/7.5/7.5) trailed SPY by 6.3 points (total return), the 60/40 by 2.9; the book trailed the all-weather proxy by 1.3. Top/bottom holdings, turnover (132% one-way in July, 4.1x equity in total) and the
+2026-10-02 snapshot's regime blocks are in the report; **the override win rate must still not be quoted (#110).** **Verified:** cash rebuilt from activities equals the account's cash to the cent, all 21 positions reconcile by quantity, FIFO P&L after
+fees reconciles to equity minus the start within $0.26, and an independent naive recomputation of the decomposition matches to three decimals.
+**FINDING (decision for Jorge; nothing changed): the published scoreboard's SPY baseline is the first-day close, the book's is the pre-trade equity.** The 2026-10-02 snapshot's `spy_return_since_inception_pct` +1.785% equals SPY(10-01 close) / SPY(2026-05-26 close) - 1
+exactly, while the book's -2.958% is measured from the $100,000 pre-trade equity (the 5/22 close level); the like-for-like SPY figure is +2.461% (5/22 close base). The book is credited with its own first session and SPY's is left out, so the published excess
+(-4.743 pp) flatters the book by about 0.7 points (0.69 at 10-09). The snapshot's headline book return also uses the 09:00 pre-market equity while SPY uses closes. The stored equity series was not read (Azure), so whether later points are also off by a session is unknown.
+**Also found (not a Core change):** the account was slightly levered at the last close (cash -$4,428, SGOV 42% of equity, cash negative at the close of 5 sessions); activity outside the Core universe is ADBE, MU and NEE only (NEE 75 shares, $5,906, still open at the fetch).
+**Disclosures:** benchmark daily bars from 2026-05-20 were read, so SPY's June-September 2026 path is no longer unseen by the research program (the `backtest.data` 2026 refusal is untouched); two probe requests for SPY bars in January and August 2026 were made while diagnosing a feed error (counts and dates only).
+**Open:** (1) sign in as the required user to unblock Part 1 of the shutdown runbook, Steps 6 and 7, B8 and the inception snapshot; (2) decide whether to fix the baseline pairing in the performance block (a code change in `collector/handler.py`; not made here); (3) `.env` was deleted at the end of the task.
+
 ### 124. Safe wheel (SPY put-credit spread) modeled screening backtest — pre-registered, run, NOT WORTH REAL DATA (HIGH — program, wheel study step 1 of 2; branch `feat/safe-wheel-model`, not merged)
 **Why modeled.** The options-data probe (#123) found no historical bid/ask in free Alpaca options data, sparse daily prints and a history that starts in 2024, so step 1 PRICES the options with Black-Scholes from the VIX and the
 underlying's closes over 2005-2025 (covering 2008, 2020 and 2022). It is a screening test: its only outcomes are WORTH REAL DATA and NOT WORTH REAL DATA, and it can never approve trading; a pass would lead to step 2, the same pre-registered
