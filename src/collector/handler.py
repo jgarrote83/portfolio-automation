@@ -58,7 +58,8 @@ from shared.reference_execution import (
     resolve_settling_tranche_cap,
 )
 from shared.overrides import evaluate_falsifier
-from collector import catalyst_screen
+from shared.timeutil import now_et
+from collector import catalyst_screen, global_overnight as _go
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,7 @@ _FLEX_CANDIDATES_FILE = _SRC / "config" / "flex-candidates.json"
 _FOMC_STANCE_FILE = _SRC / "config" / "fomc-stance.json"
 _FLEX_REVIEW_FILE = _SRC / "config" / "flex-review.json"
 _RISK_LIMITS_FILE = _SRC / "config" / "risk-limits.json"
+_GLOBAL_OVERNIGHT_FILE = _SRC / "config" / "global-overnight.json"
 
 # Single stocks in the fixed core roster (idiosyncratic risk) — the single-name soft
 # cap applies to these, not to diversified ETF sleeves (which a high-conviction quadrant
@@ -1075,6 +1077,7 @@ def _build_catalyst_screen(
     top_n: int,
     close_by_date: dict[str, dict[str, float]] | None = None,
     now_iso: str | None = None,
+    global_overnight_block: dict | None = None,
 ) -> dict:
     """Task D (2026-08-10 catalyst-sleeve funnel, G3 fix) — scores the catalyst
     discovery universe and returns the `catalyst_screen` snapshot block.
@@ -1116,6 +1119,8 @@ def _build_catalyst_screen(
 
     close_by_date = close_by_date or {}
     spy_closes = close_by_date.get("SPY") or {}
+    _go_absent = tuple(
+        (global_overnight_block or {}).get("structurally_absent_sectors") or ())
     candidates = []
     for sym in discovery:
         profile = profiles_by_symbol.get(sym) or {}
@@ -1139,9 +1144,19 @@ def _build_catalyst_screen(
         # which components are structurally not_applicable vs merely
         # missing_data (see catalyst_screen.applicable_components).
         _is_fund = bool(profile.get("isEtf")) or bool(profile.get("isFund"))
+        # global_sector_tone (2026-09-13): the candidate's SECTOR's overseas
+        # move this morning, as a cross-sector excess. Zero extra I/O — the
+        # sector comes from the profile already fetched above, and the block
+        # was built once for the whole run. A structurally-domestic sector is
+        # `not_applicable` (can never resolve), which is why the reason feeds
+        # applicable_components rather than being logged and dropped.
+        _go_sector = profile.get("sector")
+        _go_tone, _go_reason = _go.sector_tone_for(
+            global_overnight_block, _go_sector, _go_absent)
         candidates.append({
             "symbol": sym,
-            "applicable": catalyst_screen.applicable_components(_is_fund),
+            "applicable": catalyst_screen.applicable_components(
+                _is_fund, global_tone_not_applicable=(_go_reason == "not_applicable")),
             "screen": {
                 "held": sym in held,
                 "separated": sym in exclude,
@@ -1166,10 +1181,12 @@ def _build_catalyst_screen(
                     political_counts.get(sym, 0), _CATALYST_POLITICAL_CAP),
                 "relative_strength": catalyst_screen.relative_strength_score(
                     raw_rel_strength, _CATALYST_RELATIVE_STRENGTH_CAP_PCT),
+                "global_sector_tone": _go_tone,
             },
             "basis": {
                 "sector": profile.get("sector"),
                 "is_fund": _is_fund,
+                "global_sector_tone_reason": _go_reason,
                 # G-10: routine noise band vs the B2 stop. NOT an ATR (the light
                 # endpoint has no high/low) — see mean_abs_daily_move_pct.
                 "mean_abs_daily_move_pct_20d": raw_noise_band,
@@ -1201,12 +1218,137 @@ def _build_catalyst_screen(
         # snapshot alone rather than by reading the source.
         "required_component": catalyst_screen.REQUIRED_COMPONENT,
         "price_confirmation_components": list(catalyst_screen.PRICE_CONFIRMATION_COMPONENTS),
+        # 2026-09-13: components that score but can never confer rankability —
+        # echoed so a reader can see the asymmetry without reading the source.
+        "non_rankability_components": list(catalyst_screen._NON_RANKABILITY_COMPONENTS),
+        "global_overnight_available": bool((global_overnight_block or {}).get("available")),
         "news_window_hours": _FLEX_NEWS_WINDOW_H,
         "min_price_usd": _FLEX_MIN_PRICE_USD,
         "discovery_source": "movers",
         "ledger": result["ledger"],
         "nominated": result["nominated"],
     }
+
+
+def _load_global_overnight_config() -> dict:
+    """`config/global-overnight.json` — the region basket + ADR sector map.
+
+    Missing/malformed → empty baskets, which makes the block cleanly
+    unavailable rather than fatal. Config, not code, because the sector map
+    needs maintenance (an ADR delists, a better proxy appears) and that must
+    never require a deploy.
+    """
+    try:
+        with open(_GLOBAL_OVERNIGHT_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        logger.warning("global-overnight.json missing/invalid — block unavailable")
+        return {"regions": [], "sector_proxies": {}, "structurally_absent_sectors": []}
+    return {
+        "regions": data.get("regions") or [],
+        "sector_proxies": data.get("sector_proxies") or {},
+        "structurally_absent_sectors": data.get("structurally_absent_sectors") or [],
+    }
+
+
+def _fetch_global_overnight_rows(fmp: FMPClient, cfg: dict) -> tuple[list[dict], list[dict]]:
+    """``(region_rows, sector_rows)`` — the ONLY I/O this feature performs.
+
+    Cost is one `/quote` call per symbol: `/batch-quote-short` returns HTTP 402
+    on this Starter key (probed 2026-09-13), so there is no batch path to take.
+    With the shipped config that is 7 regions + 21 ADRs = 28 calls/day against
+    a 250/day budget already running ~70.
+
+    **Regions prefer the real index and fall back to a US-listed country ETF**
+    only where the index itself is plan-restricted (^KS11/^GDAXI → 402). The
+    fallback is decided by the RESPONSE, not by a hardcoded list of which
+    symbols are restricted — a plan upgrade or an FMP change then starts using
+    the real index with no code edit, and a newly-restricted index degrades
+    instead of vanishing. Each row is stamped with the `source_basis` it
+    actually used, because a direct index read and an ETF proxy are not equally
+    strong evidence and a later reader must be able to tell them apart.
+    """
+    region_rows: list[dict] = []
+    for entry in cfg.get("regions") or ():
+        name = str(entry.get("region") or "").strip()
+        index_sym = entry.get("index")
+        proxy_sym = entry.get("proxy")
+        row = None
+        basis = ""
+        if index_sym:
+            try:
+                row = fmp.get_quote(str(index_sym))
+            except Exception:  # noqa: BLE001
+                logger.exception("global_overnight: index quote failed for %s", index_sym)
+                row = None
+            if row:
+                basis = "direct_index"
+        if not row and proxy_sym:
+            try:
+                row = fmp.get_quote(str(proxy_sym))
+            except Exception:  # noqa: BLE001
+                logger.exception("global_overnight: proxy quote failed for %s", proxy_sym)
+                row = None
+            if row:
+                basis = "region_proxy"
+        if not row:
+            logger.info("global_overnight: no quote for region %s (index=%s proxy=%s)",
+                        name, index_sym, proxy_sym)
+            continue
+        region_rows.append({**row, "region": name, "source_basis": basis})
+
+    sector_rows: list[dict] = []
+    seen: set[str] = set()
+    for members in (cfg.get("sector_proxies") or {}).values():
+        for m in members or ():
+            sym = str(m).upper().strip()
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            try:
+                row = fmp.get_quote(sym)
+            except Exception:  # noqa: BLE001
+                logger.exception("global_overnight: ADR quote failed for %s", sym)
+                continue
+            if not row:
+                continue
+            sector_rows.append({**row, "symbol": sym, "source_basis": "adr_proxy"})
+    return region_rows, sector_rows
+
+
+def _build_global_overnight(fmp: FMPClient, now: datetime | None = None) -> dict:
+    """The `global_overnight` snapshot block (session 2026-09-13, FOLLOWUPS #34).
+
+    Fetches, then delegates every decision to the pure
+    `collector/global_overnight.py`. Non-fatal throughout: any failure returns
+    a well-formed `available: False` block with a reason, never a lost
+    snapshot and never a fabricated tone.
+    """
+    cfg = _load_global_overnight_config()
+    absent = tuple(cfg.get("structurally_absent_sectors") or ())
+    try:
+        region_rows, sector_rows = _fetch_global_overnight_rows(fmp, cfg)
+    except Exception:  # noqa: BLE001
+        logger.exception("global_overnight fetch failed (non-fatal)")
+        return {
+            "available": False, "unavailable_reason": "fetch_failed",
+            "region_tone": {}, "sector_tone": {},
+            "structurally_absent_sectors": list(absent),
+        }
+    try:
+        return _go.build_global_overnight(
+            region_rows, sector_rows, None,
+            cfg.get("sector_proxies") or {},
+            now_et(now),
+            structurally_absent_sectors=absent,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("global_overnight build failed (non-fatal)")
+        return {
+            "available": False, "unavailable_reason": "build_failed",
+            "region_tone": {}, "sector_tone": {},
+            "structurally_absent_sectors": list(absent),
+        }
 
 
 def _roster_closes(prices: dict | None) -> dict:
@@ -3445,6 +3587,13 @@ def run() -> None:
     # must never block the snapshot; on failure the funnel falls back to the
     # pre-existing static+dynamic flex_candidates only (unchanged behavior).
     catalyst_screen_block: dict = {"available": False}
+    # Same hoist, same reason (2026-09-13): the snapshot dict reads
+    # `global_overnight_block` unconditionally, so it must be bound even if the
+    # try body raises before building it.
+    global_overnight_block: dict = {
+        "available": False, "unavailable_reason": "not_built",
+        "region_tone": {}, "sector_tone": {},
+    }
     # Hoisted above the try (2026-08-14 flex-conviction-path cycle, Task B) so
     # it's ALWAYS bound even if the try body below raises before reaching its
     # own (re-)initialization — the flex-conviction block built further down
@@ -3512,6 +3661,24 @@ def run() -> None:
             _flex_close_cache[_sym] = _close_by_date(fmp, _sym)
         _flex_close_cache["SPY"] = _close_by_date(fmp, "SPY")
 
+        # global_overnight (2026-09-13, FOLLOWUPS #34) — built BEFORE the
+        # catalyst screen because it feeds one of that screen's components.
+        # Self-contained and non-fatal: it returns an `available: False` block
+        # rather than raising, and an unavailable block simply leaves
+        # `global_sector_tone` absent on every candidate (a no-op, by design —
+        # it can never confer rankability, only rank).
+        global_overnight_block = _build_global_overnight(fmp)
+        logger.info(
+            "global_overnight: available=%s regions=%d/%d sectors_scored=%d "
+            "(with data %d) reason=%s",
+            global_overnight_block.get("available"),
+            (global_overnight_block.get("coverage") or {}).get("regions_read", 0),
+            (global_overnight_block.get("coverage") or {}).get("regions_configured", 0),
+            (global_overnight_block.get("coverage") or {}).get("sectors_scored", 0),
+            (global_overnight_block.get("coverage") or {}).get("sectors_with_data", 0),
+            global_overnight_block.get("unavailable_reason"),
+        )
+
         catalyst_screen_block = _build_catalyst_screen(
             _catalyst_discovery, _cs_profiles, _cs_bars, _earn_market_rows,
             stock_news, congressional,
@@ -3519,6 +3686,7 @@ def run() -> None:
             _flex_cfg.min_adv_usd, today, _CATALYST_TOP_N,
             close_by_date=_flex_close_cache,
             now_iso=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            global_overnight_block=global_overnight_block,
         )
         _cs_nominated = catalyst_screen_block["nominated"]
 
@@ -3924,6 +4092,7 @@ def run() -> None:
         "earnings_calendar": earnings,
         "earnings_calendar_market": earnings_calendar_market,
         "catalyst_screen": catalyst_screen_block,
+        "global_overnight": global_overnight_block,
         "stock_news": stock_news,
         "congressional_trades": congressional,
         "lobbying": lobbying,
