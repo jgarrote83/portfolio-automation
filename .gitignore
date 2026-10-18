@@ -77,3 +77,6 @@ reports/safe_wheel_model/
 
 # Core candidates study outputs (research/core_candidates)
 reports/core_candidates/
+
+# Core candidates out-of-sample outputs (research/core_candidates/oos.py)
+reports/core_candidates_oos/
