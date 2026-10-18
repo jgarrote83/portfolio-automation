@@ -30,8 +30,9 @@ export AZURE_STORAGE_ACCOUNT="$ACCOUNT" AZURE_STORAGE_KEY="$KEY"
 
 az storage container create --name "$CONTAINER" --output none
 # NOTE: `az storage container policy show` exits 0 even when the policy does not exist (verified 2026-10-18), so it cannot be used
-# as an existence probe; look the name up in the policy list instead.
-if [ "$(az storage container policy list --container-name "$CONTAINER" --query "contains(keys(@), '$POLICY')" -o tsv)" = "true" ]; then
+# as an existence probe; look the name up in the policy list instead. On Windows az ends tsv output with "\r\n" (raw output verified
+# 2026-10-18: "false\r\n"), and $(...) strips only the "\n", so drop the "\r" and lowercase before comparing.
+if [ "$(az storage container policy list --container-name "$CONTAINER" --query "contains(keys(@), '$POLICY')" -o tsv | tr -d '\r' | tr '[:upper:]' '[:lower:]')" = "true" ]; then
   az storage container policy update --container-name "$CONTAINER" --name "$POLICY" --permissions rcw --expiry "$EXPIRY" --output none
 else
   az storage container policy create --container-name "$CONTAINER" --name "$POLICY" --permissions rcw --expiry "$EXPIRY" --output none
