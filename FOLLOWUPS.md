@@ -733,6 +733,8 @@ retention 30 days). The query returned counts and dates only, never values:
   after rotation it isn't needed.
 
 ### 127. Relabel the wrong Flex exit reasons in the portal (MEDIUM — data fidelity; production blob write needs Jorge's approval)
+**Decision (Jorge, 2026-10-18): approved in principle; do it later, as part of the Part B Flex archive (#113), with a blob backup of
+`flex-ledger/closed-trades.json` first. Not now.**
 **What is wrong.** All four closed Flex trades, repaired from broker fills on 2026-10-18 with `scripts/flex_backfill_closed_trades.py`, keep
 the engine's recorded `exit_reason` (`stop_fill` ×3, `time_stop` ×1). That label is wrong: every one of those positions was **sold by
 Core's auto-executor**, not by a Flex stop or time stop.
