@@ -144,6 +144,9 @@ class FakeAlpaca:
         self.positions, self.equity, self.fail = dict(positions or {}), equity, fail or set()
         self.submitted, self.orders, self.clock_open = [], [], True
         self.cancelled, self.attempts, self.known_ids = [], [], set()   # known_ids: ids Alpaca has but list_orders does not return
+        self.lookups = []
+        self.submit_error = None                   # an exception every submit raises WITHOUT placing the order (a genuine failure)
+        self.cancel_takes_effect = True             # False: Alpaca accepts the cancel, but the order stays live (the race)
 
     def get_clock(self):
         if "clock" in self.fail:
@@ -176,12 +179,23 @@ class FakeAlpaca:
     def cancel_order(self, order_id):
         self.cancelled.append(order_id)
         for o in self.orders:
-            if o["id"] == order_id:
+            if o["id"] == order_id and self.cancel_takes_effect:
                 o["status"] = "canceled"
+
+    def get_order(self, order_id):
+        return dict(next(o for o in self.orders if o["id"] == order_id))
+
+    def get_order_by_client_id(self, client_order_id):
+        self.lookups.append(client_order_id)
+        if client_order_id in self.known_ids:
+            return {"id": f"known-{client_order_id}", "client_order_id": client_order_id, "status": "accepted"}
+        return next((dict(o) for o in self.orders if o["client_order_id"] == client_order_id), None)
 
     def submit_order(self, symbol, qty, side, order_type, time_in_force, client_order_id):
         assert order_type == "market" and time_in_force == "cls"
         self.attempts.append(client_order_id)
+        if self.submit_error is not None:
+            raise self.submit_error
         if client_order_id in self.known_ids or any(o["client_order_id"] == client_order_id for o in self.orders):
             raise duplicate_id_error()                                  # what Alpaca does with a reused client_order_id
         self.submitted.append((side, symbol, qty, client_order_id))
@@ -223,9 +237,10 @@ def test_full_flow_first_enable_execute_verify():
     a.positions = {st["decision"]["target"]: float(a.submitted[0][2])}
     a.orders[0].update({"status": "filled", "filled_avg_price": "125.0", "filled_qty": str(a.submitted[0][2])})
     deps.now = lambda: at(date(2026, 7, 6), 16, 30)
-    H.tick(deps)
+    h = H.tick(deps)
     st = store[("c5-state", "202606.json")]
     assert st["status"] == "executed" and store[("c5-ledger", "ledger.json")]["holdings"] == a.positions
+    assert h["reconcile"] == "ok" and h["holding_mismatch"] is None             # the verify tick itself: "Positions match ledger: Yes"
     assert store[("c5-equity-series", "series.json")][-1]["date"] == "2026-07-06"
     assert store[("c5-state", "preview.json")]["kind"] == "preview"
 
@@ -496,16 +511,44 @@ def test_first_enable_plus_pending_realign_on_the_same_tick_buys_exactly_once():
     assert len(a.submitted) == 1
 
 
-def test_a_duplicate_id_rejection_is_recorded_as_already_submitted(caplog):
+@pytest.mark.parametrize("error", ["duplicate_422", "timeout"])
+def test_a_submit_error_whose_order_is_found_by_client_id_is_already_submitted(error, caplog):
+    """FOUND: the lookup decides, whatever the error said (a 422 duplicate, or a timeout after Alpaca had accepted the order)."""
     a = FakeAlpaca(positions={})
     a.known_ids = {"C5-20260706-buy-SSO"}                                       # Alpaca has it; the order list did not show it
+    if error == "timeout":
+        a.submit_error = requests.Timeout("read timed out")
     deps, store = make(a, at(MON, 10, 0))
     with caplog.at_level("WARNING", logger="c5"):
         h = H.tick(deps)
     st = store[("c5-state", "202606.json")]
-    assert a.attempts == ["C5-20260706-buy-SSO"] and a.submitted == []
-    assert st["status"] == "submitted" and st["orders"][0]["status"] == "already_submitted" and h["error"] is None
-    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    assert a.attempts == ["C5-20260706-buy-SSO"] and a.lookups == ["C5-20260706-buy-SSO"] and a.submitted == []
+    o = st["orders"][0]
+    assert st["status"] == "submitted" and o["status"] == "already_submitted" and o["order_id"] == "known-C5-20260706-buy-SSO"
+    assert h["error"] is None and not [r for r in caplog.records if r.levelname == "ERROR"]
+    assert any("already submitted" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+    deps.now = lambda: at(MON, 10, 15)
+    H.tick(deps)
+    assert a.attempts == ["C5-20260706-buy-SSO"]                                # never retried
+
+
+@pytest.mark.parametrize("error", ["duplicate_422", "server_500"])
+def test_a_submit_error_whose_order_is_not_found_is_a_genuine_error_never_retried(error, caplog):
+    """NOT FOUND: a genuine ERROR even when the text LOOKS like a duplicate; the 409/422 check is only a log hint."""
+    a = FakeAlpaca(positions={})
+    if error == "duplicate_422":
+        a.submit_error = duplicate_id_error()
+    else:
+        r = requests.Response()
+        r.status_code, r._content = 500, b"internal error"
+        a.submit_error = requests.HTTPError("500 Server Error", response=r)
+    deps, store = make(a, at(MON, 10, 0))
+    with caplog.at_level("WARNING", logger="c5"):
+        H.tick(deps)
+    o = store[("c5-state", "202606.json")]["orders"][0]
+    assert o["status"] == "error: HTTPError" and "not found" in o["note"] and a.lookups == ["C5-20260706-buy-SSO"]
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert errors and ("looks like a duplicate" in errors[0]) == (error == "duplicate_422")
     deps.now = lambda: at(MON, 10, 15)
     H.tick(deps)
     assert a.attempts == ["C5-20260706-buy-SSO"]                                # never retried
@@ -519,23 +562,68 @@ def test_submit_never_buys_a_symbol_with_an_open_engine_order():
     assert a.submitted == [] and store[("c5-state", "202606.json")]["orders"][0]["status"] == "skipped_open_order"
 
 
-@pytest.mark.parametrize("state", ["paused", "paused_to_tbills"])
-def test_a_pause_before_the_cutoff_cancels_the_open_buy(state):
+def paused_before_cutoff(state, cancel_takes_effect=True):
     a, deps, store = first_enabled()
+    a.cancel_takes_effect = cancel_takes_effect
     store[("c5-state", "kill-switch.json")] = control(state, at_="2026-07-06T11:00:00-04:00")
     deps.now = lambda: at(MON, 11, 5)
     h = H.tick(deps)
-    assert a.cancelled == ["id-0"] and a.orders[0]["status"] == "canceled"
     st = store[("c5-state", "202606.json")]
-    assert st["status"] == "cancelled" and st["cancelled_because"] == state and st["cancelled_orders"] == ["C5-20260706-buy-SSO"]
-    assert any("cancelled 1 open MOC orders" in x for x in h["actions"])
+    assert a.cancelled == ["id-0"] and st["status"] == "cancel_requested"       # accepted by Alpaca is NOT yet cancelled
+    assert st["cancel_orders"] == [{"client_order_id": "C5-20260706-buy-SSO", "order_id": "id-0"}] and st["cancelled_because"] == state
+    assert h["pause"] == "Pause: cancel requested, awaiting confirmation"
+    return a, deps, store
+
+
+@pytest.mark.parametrize("state", ["paused", "paused_to_tbills"])
+def test_a_pause_before_the_cutoff_cancels_the_open_buy_and_confirms_it(state):
+    a, deps, store = paused_before_cutoff(state)
     if state == "paused":
         assert len(a.submitted) == 1                                            # nothing new
     else:
         assert a.submitted[1][:2] == ("buy", "BIL") and a.submitted[1][3] == "C5-20260706-buy-BIL"   # straight to T-bills, not SSO+BIL
+    deps.now = lambda: at(MON, 11, 20)                                          # next tick: the final status is read by id -> canceled
+    h = H.tick(deps)
+    st = store[("c5-state", "202606.json")]
+    assert st["status"] == "cancelled" and st["pause_outcome"] == "cancel_confirmed" and h["pause"] == "Pause: cancel confirmed"
+    if state == "paused_to_tbills":
+        fill(a, 1)
     deps.now = lambda: at(MON, 16, 30)
+    h = H.tick(deps)
+    assert store[("c5-state", "202606.json")]["status"] == "cancelled" and h["holding_mismatch"] is None
+
+
+def test_a_cancel_that_loses_the_race_to_the_close_records_the_fill_as_executed(caplog):
+    a, deps, store = paused_before_cutoff("paused", cancel_takes_effect=False)
+    deps.now = lambda: at(MON, 11, 20)
     H.tick(deps)
-    assert store[("c5-state", "202606.json")]["status"] == "cancelled"
+    assert store[("c5-state", "202606.json")]["status"] == "cancel_requested"   # still live before the close: wait, no alarm
+    fill(a)                                                                     # the close filled it
+    deps.now = lambda: at(MON, 16, 30)
+    with caplog.at_level("WARNING", logger="c5"):
+        h = H.tick(deps)
+    st = store[("c5-state", "202606.json")]
+    assert st["status"] == "executed" and st["pause_outcome"] == "filled_before_cancel"
+    assert st["fills"][0]["filled_qty"] == float(a.submitted[0][2]) and st["fills"][0]["avg_price"] == 60.0
+    assert store[("c5-ledger", "ledger.json")]["holdings"] == a.positions
+    assert h["holding_mismatch"] is None and h["reconcile"] == "ok" and h["error"] is None
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    assert h["pause"] == "Pause: order filled before cancel; acting next session"
+    deps.now = lambda: at(MON, 16, 45)                                          # the next tick: still no mismatch
+    assert H.tick(deps)["holding_mismatch"] is None and len(a.submitted) == 1
+
+
+def test_a_cancel_still_pending_past_the_close_is_an_error_once_a_day(caplog):
+    a, deps, store = paused_before_cutoff("paused", cancel_takes_effect=False)
+    deps.now = lambda: at(MON, 16, 30)                                          # settled close, order neither canceled nor filled
+    with caplog.at_level("ERROR", logger="c5"):
+        h = H.tick(deps)
+        deps.now = lambda: at(MON, 16, 45)
+        h2 = H.tick(deps)
+    assert store[("c5-state", "202606.json")]["status"] == "cancel_requested"
+    assert "not confirmed after the close" in h["error"] and "not confirmed after the close" in h2["error"]
+    assert sum("not confirmed after the close" in r.getMessage() for r in caplog.records) == 1
+    assert h2["pause"] == "Pause: cancel requested, awaiting confirmation"
 
 
 @pytest.mark.parametrize("state", ["paused", "paused_to_tbills"])

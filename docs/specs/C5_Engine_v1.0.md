@@ -74,11 +74,18 @@ market is open and before the cutoff, otherwise at the next session's.
   - a re-align request stays **pending** while any decision is `submitted` or this engine has an open order at Alpaca, and is honoured
     only after that close has been verified (until the fill, the positions it would plan from are stale);
   - the engine never sends a buy for a symbol on which it already has an open order;
-  - client ids are keyed on the execution session, so Alpaca itself rejects a same-day duplicate; that rejection is recorded as
-    `already_submitted`, never as an error, and never retried.
-- **Pausing with orders in flight:** a change to `paused` or `paused_to_tbills` cancels this engine's open MOC orders while Alpaca
-  still allows it (before the cutoff) and marks that decision `cancelled`; `paused_to_tbills` then places its own BIL orders. After the
-  cutoff the orders can no longer be cancelled and fill at the close; the engine logs that, and the new state acts from the next session.
+  - client ids are keyed on the execution session, so Alpaca itself rejects a same-day duplicate. **Any** submission error is resolved
+    by looking the order up by client id (`GET /v2/orders:by_client_order_id`, https://docs.alpaca.markets/reference/getorderbyclientorderid;
+    the doc lists only 200, and an unknown id was measured to return 404): found → `already_submitted` (WARNING); not found → ERROR.
+    The 409/422 error text is only a log hint, never the decision. Nothing is retried.
+- **Pausing with orders in flight:** a change to `paused` or `paused_to_tbills` asks Alpaca to cancel this engine's open MOC orders
+  while it still allows it (before the cutoff) and marks that decision `cancel_requested`; `paused_to_tbills` then places its own BIL
+  orders. Later ticks read each order's final status by id: canceled → `cancelled` (strip: "Pause: cancel confirmed"); filled first →
+  the fills are recorded and the decision is `executed`, with the ledger written from the account so no mismatch alert fires (strip:
+  "Pause: order filled before cancel; acting next session"); still not final once that session has closed → ERROR, once a day. After
+  the cutoff nothing is cancelled: the orders fill at the close, the engine logs that, and the new state acts from the next session.
+- **Reconcile** against the ledger runs at the END of each tick, after any verification, so the tick that records a fill reads
+  "Positions match ledger: Yes".
 - **Change log:** the engine appends every control change (who, when, why) and every action it takes on one to
   `c5-state/kill-switch-log.jsonl`, exactly once, within one tick.
 - **Holding check:** on every tick when no order set is in flight, the account must hold the target of the last executed state.

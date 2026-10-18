@@ -116,6 +116,19 @@ class AlpacaClient:
         r.raise_for_status()
         return r.json()
 
+    def get_order_by_client_id(self, client_order_id: str) -> dict | None:
+        """The order with this client-assigned id, or None if there is none.
+
+        `GET /v2/orders:by_client_order_id?client_order_id=...` (https://docs.alpaca.markets/reference/getorderbyclientorderid).
+        The doc defines only the 200 response; an unknown id was MEASURED to return HTTP 404 with an empty body (paper, 2026-10-18).
+        Any other failure raises.
+        """
+        r = self.session.get(f"{self.base_url}/v2/orders:by_client_order_id", params={"client_order_id": client_order_id}, timeout=20)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json()
+
     def cancel_order(self, order_id: str) -> None:
         """Cancel a single open order (idempotent — a 404/422 is treated as gone)."""
         r = self.session.delete(f"{self.base_url}/v2/orders/{order_id}", timeout=20)
