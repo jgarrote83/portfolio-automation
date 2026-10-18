@@ -388,18 +388,18 @@ def test_build_holdings_pnl_reconciles_to_equity_and_groups_symbols():
 
 
 def test_policy_portfolio_terms_are_used_when_the_inception_snapshot_and_bars_are_supplied():
-    snap = {"reference_weights": {"target_weights_pct": {"SPY": 50.0, "AGG": 40.0, "SGOV": 8.5}}}       # 1.5% literal cash is left out
+    snap = {"date": "x", "collected_at": "x", "reference_weights": {"target_weights_pct": {"SPY": 50.0, "AGG": 40.0, "SGOV": 8.5}}}
     w = run.policy_weights(snap)
-    assert sum(w.values()) == pytest.approx(1.0) and w["SPY"] == pytest.approx(50 / 98.5)
+    assert sum(w.values()) == pytest.approx(1.0) and w["SPY"] == pytest.approx(50 / 90) and "SGOV" not in w   # the cash sleeve is term (a)
     raw = synthetic_raw()
-    policy_bars = {"SPY": raw["bars_raw"]["SPY"], "SGOV": raw["bars_raw"]["SGOV"], "AGG": [_bar(d, c) for d, c in zip(DAYS, [100, 100, 100.5, 100.5, 101])]}
-    res = run.build(raw, inception_snapshot=snap, policy_bars=policy_bars, validate_as_of=None)
+    policy_bars = {"SPY": raw["bars_raw"]["SPY"], "AGG": [_bar(d, c) for d, c in zip(DAYS, [100, 100, 100.5, 100.5, 101])]}
+    res = run.build(raw, policy_snapshot=snap, policy_bars=policy_bars, policy_base=DAYS[0], validate_as_of=None)
     d = res["decomp_latest"]
-    assert d["allocation"] is not None and d["tactical"] is not None
+    assert d["allocation"] is not None and d["tactical"] is not None and d["invested_before_policy"] == pytest.approx(0.0)
     assert d["cash"] + d["allocation"] + d["tactical"] == pytest.approx(d["excess"])
     assert res["policy"]["available"] is True
-    # without the bars the policy terms stay blocked, never guessed
-    assert run.build(raw, inception_snapshot=snap, policy_bars=None, validate_as_of=None)["decomp_latest"]["allocation"] is None
+    # without the bars (or a base) the policy terms stay blocked, never guessed
+    assert run.build(raw, policy_snapshot=snap, policy_bars=None, policy_base=DAYS[0], validate_as_of=None)["decomp_latest"]["allocation"] is None
 
 
 def test_fetch_policy_bars_uses_raw_prices_and_refuses_a_missing_constituent():
@@ -415,10 +415,56 @@ def test_fetch_policy_bars_uses_raw_prices_and_refuses_a_missing_constituent():
 
 def test_the_report_renders_blocked_sections_without_a_policy_and_computed_ones_with_it():
     raw = synthetic_raw()
-    snap = {"reference_weights": {"target_weights_pct": {"SPY": 60.0, "AGG": 40.0}}}
+    snap = {"date": "2026-07-01", "collected_at": "2026-07-01T20:09:10+00:00", "reference_weights": {"target_weights_pct": {"SPY": 60.0, "AGG": 40.0}}}
     blocked = report.render(run.build(raw, validate_as_of=None), raw["fetch_meta"], snap_path="x.json", inception_given=False)
     assert "**BLOCKED**" in blocked and "daily-snapshots" in blocked and "## 6. Conclusion" in blocked
     assert "No recommendation to change Core is made" in blocked
     policy_bars = {"SPY": raw["bars_raw"]["SPY"], "AGG": [_bar(d, c) for d, c in zip(DAYS, [100, 100, 100.5, 100.5, 101])]}
-    done = report.render(run.build(raw, inception_snapshot=snap, policy_bars=policy_bars, validate_as_of=None), raw["fetch_meta"], snap_path="x.json", inception_given=True)
-    assert "The inception-day snapshot was supplied" in done and "BLOCKED, not estimated" not in done
+    done = report.render(run.build(raw, policy_snapshot=snap, policy_bars=policy_bars, policy_base=DAYS[0], validate_as_of=None), raw["fetch_meta"],
+                         snap_path="x.json", inception_given=True)
+    assert "first reference ever" in done and "BLOCKED, not estimated" not in done and "Did the AI/tactical layer" in done
+
+
+# --- live split (2026-10-17): policy from the first reference, part-window; fills vs the prior close ---------------------------------------
+
+def test_part_window_policy_keeps_the_terms_exactly_additive():
+    from analysis.core_performance import attribution as A
+    pre = [A.daily_terms(100000.0, 30000.0, 5000.0, 0.001, 0.004, 0.0001) for _ in range(2)]
+    post = [A.daily_terms(100000.0, 20000.0, 10000.0, 0.003, 0.01, 0.0001, r_policy=0.006) for _ in range(3)]
+    d = A.decompose(pre + post, 0.01, 0.03)
+    assert d["policy_days"] == 3 and d["days"] == 5
+    assert d["cash"] + d["invested_before_policy"] + d["allocation"] + d["tactical"] == pytest.approx(d["excess"])
+    assert d["invested_before_policy"] == pytest.approx(100 * sum(t["invested"] for t in pre))
+
+
+def test_policy_weights_drop_the_cash_sleeve_and_normalise():
+    snap = {"reference_weights": {"target_weights_pct": {"GLD": 30.0, "TLT": 30.0, "SGOV": 25.0, "__cash__": 5.0, "QQQ": 0.0, "SPY": 10.0}}}
+    w = run.policy_weights(snap)
+    assert set(w) == {"GLD", "TLT", "SPY"} and w["GLD"] == pytest.approx(30 / 70) and sum(w.values()) == pytest.approx(1.0)
+
+
+def test_policy_base_is_the_close_at_or_before_collection():
+    raw = {"bars_all": {"SPY": [{"t": f"{d}T04:00:00Z", "c": 1.0} for d in ("2026-06-30", "2026-07-01", "2026-07-02")]}}
+    assert run.policy_base_close(raw, {"collected_at": "2026-07-01T20:09:10+00:00"}) == "2026-07-01"     # 16:09 ET, after the close
+    assert run.policy_base_close(raw, {"collected_at": "2026-07-01T13:02:00+00:00"}) == "2026-06-30"     # 09:02 ET, before it
+
+
+def test_fills_vs_prior_close_signs_matching_and_exclusions():
+    from analysis.core_performance import execution as X
+    days = ["2026-07-01", "2026-07-02"]
+    closes = {"GLD": {"2026-07-01": 100.0}, "TLT": {"2026-07-01": 50.0}}
+    trades = {"2026-07-02": [{"symbol": "GLD", "side": "buy", "quantity": 10, "validation": {"status": "passed"}},
+                             {"symbol": "TLT", "side": "sell", "quantity": 20, "validation": {"status": "passed"}},
+                             {"symbol": "XLI", "side": "buy", "quantity": 5, "validation": {"status": "rejected"}},
+                             {"symbol": "QQQ", "side": "buy", "quantity": 1, "validation": {"status": "passed"}}]}
+    fills = [{"day": "2026-07-02", "symbol": "GLD", "side": "buy", "qty": 4.0, "price": 101.0},
+             {"day": "2026-07-02", "symbol": "GLD", "side": "buy", "qty": 6.0, "price": 102.0},
+             {"day": "2026-07-02", "symbol": "TLT", "side": "sell", "qty": 20.0, "price": 49.0},
+             {"day": "2026-07-02", "symbol": "NEE", "side": "buy", "qty": 75.0, "price": 77.0}]
+    r = X.fills_vs_reference(trades, fills, closes, days)
+    g = [x for x in r["rows"] if x["symbol"] == "GLD"][0]
+    t = [x for x in r["rows"] if x["symbol"] == "TLT"][0]
+    assert g["fill_price"] == pytest.approx(101.6) and g["cost_bps"] == pytest.approx(160.0) and g["cost_usd"] == pytest.approx(16.0)
+    assert t["cost_bps"] == pytest.approx((50 / 49 - 1) * 1e4) and t["cost_usd"] == pytest.approx(20.0)   # sold below the reference = a cost
+    assert r["proposed"] == 3 and r["matched"] == 2 and [u["symbol"] for u in r["unfilled"]] == ["QQQ"]  # the rejected XLI is never expected
+    assert r["unattributed_fill_groups"] == 1 and r["total"]["cost_usd"] == pytest.approx(36.0)

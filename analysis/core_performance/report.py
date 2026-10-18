@@ -55,23 +55,27 @@ def render(res: dict, meta: dict, *, snap_path: str, inception_given: bool) -> s
            "it makes no recommendation to change Core. Written for Jorge.", ""]
 
     # ----------------------------------------------------------------------------------- status
+    pol_ = res.get("policy") or {}
     out += ["## Status: what was and was not possible", "",
-            "This run had **no Azure access** (the Azure CLI is signed in as a service principal, not as the required user, and the instruction was to wait for the user login). "
-            "Sections that need Azure blobs or tables are marked **BLOCKED** with the exact input they need; nothing is estimated in their place.", "",
+            "This run had **read-only Azure access** as the required user (`jgarrote@easygrids.com`, subscription EasyGridsProduction; `stpfautoprod` and `kv-pfauto-prod` "
+            "verified to be in `rg-portfolio-automation-prod`). Read: `daily-snapshots/2026-05-26.json` (inception), `daily-snapshots/2026-07-01.json` (the first snapshot "
+            "with `reference_weights`; `2026-06-30.json` was also read and has none) and every `daily-trades/*.json` from 2026-05-26. Nothing was written to Azure or to the account.", "",
             table(["Part", "Status", "Why / what it needs"], [
                 ["1. Scoreboard (return, volatility, Sharpe, drawdown, beta)", "Done", "Alpaca portfolio history + SPY bars"],
                 ["1. Equity-curve cross-check vs snapshots", "Partly", "Only the local 2026-10-02 snapshot exists; the full `performance/equity-series.json` and the other daily snapshots need Azure"],
                 ["2(a) Cash drag", "Done (exact daily)", "Cash rebuilt exactly from account activities; SGOV from fills and SGOV bars"],
-                ["2(b) Allocation effect (policy portfolio)", "**BLOCKED**", "Needs `daily-snapshots/2026-05-26.json` (inception-day reference weights); re-run with `--inception-snapshot`"],
-                ["2(c) Tactical effect", "**BLOCKED**", "Same input as (b); (b) and (c) are reported only as their sum"],
-                ["2(d) Costs and turnover", "Partly", "Fees and turnover done; fills vs reference prices needs `daily-trades/*.json` (Azure)"],
+                ["2(b) Allocation effect (policy portfolio)", ("Done from " + str(pol_.get("first_policy_day"))) if pol_.get("available") else "**BLOCKED**",
+                 "The inception snapshot has **no `reference_weights`** (the block shipped 2026-06-30, commit `9da6f8d`); per Jorge's decision the policy is the first reference (2026-07-01), measured from its own date"],
+                ["2(c) Tactical effect", "Done from the same date" if pol_.get("available") else "**BLOCKED**", "Before it, the invested book is one combined term (no policy existed)"],
+                ["2(d) Costs and turnover", "Done (proxy reference)" if res.get("execution") else "Partly",
+                 "`daily-trades` holds no prices; fills are compared with the prior session's close, the end-of-day price the 09:00 analysis reads"],
                 ["3. Other benchmarks", "Done", "Benchmark bars"],
                 ["4. Contribution by holding", "Done", "FIFO from activities, marked at the fetch prices"],
-                ["5. Regime calls and judgment", "Echo of 2026-10-02", "Latest snapshot needs Azure; the local one is dated 2026-10-02, five sessions before the last one"]], ["---", "---", "---"]), "",
+                ["5. Regime calls and judgment", "Echo of 2026-10-02", "Only the inception and first-reference snapshots were authorised this run; the echo is the earlier local 2026-10-02 snapshot"]], ["---", "---", "---"]), "",
             "**Disclosures.** (1) Benchmark daily bars from 2026-05-20 were read for this analysis, so SPY's daily path in June-September 2026 is no longer unseen "
             "by the research program (the 2026 holdout in `backtest.data` is untouched and still refuses 2026 for research). (2) While diagnosing a data-feed error "
             "I made two probe requests for SPY bars in windows outside this analysis (2026-01-05 to 01-09 and 2026-08-03 to 08-07); only bar counts and dates were looked at, "
-            "no prices were printed or saved from them.", ""]
+            "no prices were printed or saved from them. (3) This run read daily bars to 2026-10-16 for the benchmarks, the policy's constituents and every traded symbol.", ""]
 
     # ----------------------------------------------------------------------------------- sources
     paths = ", ".join(meta["paths"])
@@ -79,10 +83,12 @@ def render(res: dict, meta: dict, *, snap_path: str, inception_given: bool) -> s
             table(["Input", "Source", "Window / size"], [
                 ["Equity by session", "Alpaca paper `GET /v2/account/portfolio/history` (period 1A, 1D, `pnl_reset=no_reset`)",
                  f"{res['base']} to {res['last']}; no missing session, no external flow after 2026-05-12"],
-                ["Cash, fills, fees", "Alpaca paper `GET /v2/account/activities` (all, ascending)", f"{meta['counts']['activities']} rows 2026-05-12 to 2026-10-09: {res['fill_count']} fills, {res['fees']['count']} fees, 1 journal"],
+                ["Cash, fills, fees", "Alpaca paper `GET /v2/account/activities` (all, ascending)", f"{meta['counts']['activities']} rows from 2026-05-12: {res['fill_count']} fills (the last on 2026-10-09; none since), {res['fees']['count']} fees, 1 journal"],
                 ["Positions", "Alpaca paper `GET /v2/positions`, `GET /v2/account`", f"{meta['counts']['positions']} positions at the fetch ({meta['fetched_utc'][:16]}Z)"],
                 ["Benchmarks", "Alpaca market data `GET /v2/stocks/bars`, 1Day, SIP; raw and split+dividend-adjusted", f"{meta['bars_start']} to {meta['bars_end']}: SPY, AGG, VTI, TLT, IEF, GLD, DBC, SGOV"],
-                ["Snapshot echo", f"`{snap_path}` (downloaded earlier under a prior authorisation; no new Azure read)", "date 2026-10-02"],
+                ["Snapshot echo", f"`{snap_path}` (downloaded earlier under a prior authorisation)", "date 2026-10-02"],
+                ["Policy portfolio", "`daily-snapshots/2026-07-01.json` `reference_weights.target_weights_pct` (read-only)", f"held buy-and-hold from the {pol_.get('base')} close"],
+                ["Proposed trades", "`daily-trades/*.json` (read-only)", f"{(res.get('execution') or {}).get('proposed', 0)} non-rejected trades in the window"],
                 ["Core universe", "`shared.quadrants` (`CORE_ROSTER` and `LEGACY_EXITS`), read from the repo", "live config"]], ["---", "---", "---"]), "",
             f"Requests made this run: {meta['requests']} GETs (paths: {paths}). No order, account-change or Azure call exists in the code (`alpaca_ro.py` has only `get`).", ""]
 
@@ -107,7 +113,7 @@ def render(res: dict, meta: dict, *, snap_path: str, inception_given: bool) -> s
                 f"{res['baseline']['base_date']} close; the existing scoreboard's SPY baseline is the {res['baseline']['first_day']} close ({res['baseline']['first_day_spy']:.2f}), "
                 f"after SPY had already moved {pct(res['baseline']['spy_move_base_to_first_day_pct'])} from {res['baseline']['base_spy']:.2f}. The book is therefore credited with its own first session "
                 f"while SPY's first session is left out, which makes the published excess look about {res['baseline']['excess_flattery_pp']:.2f} points better than the like-for-like figure "
-                f"(to 10-09: SPY {pct(res['baseline']['spy_to_last_from_base_pct'])} from the common base against {pct(res['baseline']['spy_to_last_from_first_day_pct'])} from the first-day close). "
+                f"(to {res['last']}: SPY {pct(res['baseline']['spy_to_last_from_base_pct'])} from the common base against {pct(res['baseline']['spy_to_last_from_first_day_pct'])} from the first-day close). "
                 "I could not see the stored equity series, so I cannot say whether the pairing of morning equity with same-day SPY closes also shifts later points by a session.", ""]
     w0 = res["weights"][-1]
     out += ["### Account checks", "",
@@ -132,13 +138,18 @@ def render(res: dict, meta: dict, *, snap_path: str, inception_given: bool) -> s
                 ["**(a) Cash drag**: cash sleeve (literal cash + SGOV)", pp(d["cash"]), f"average weight {d['avg_sleeve_weight_pct']:.1f}% of equity"],
                 ["   of which literal cash (earns 0)", pp(d["cash_literal"]), "negative when cash is a drag; positive on the levered days"],
                 ["   of which SGOV (price return only)", pp(d["cash_sgov"]), f"SGOV price return {pct(res['sgov_yield_artifact']['sgov_price_return_pct'], 2)}"],
-                ["**(b)+(c) Invested book vs SPY**, allocation and tactical together", pp(d["invested"]), "exact residual of the daily excess"],
-                ["   (b) Allocation effect (policy portfolio vs SPY)", pp(d["allocation"]) if d["allocation"] is not None else "**BLOCKED**", "needs the inception-day reference weights"],
-                ["   (c) Tactical effect (actual invested book vs policy)", pp(d["tactical"]) if d["tactical"] is not None else "**BLOCKED**", "same input"],
+                ["**Invested book vs SPY**, all of it", pp(d["invested"]), "exact residual of the daily excess"],
+                ["   before the policy existed (to " + str(pol_.get("base")) + ")", pp(d["invested_before_policy"]) if d.get("invested_before_policy") is not None else "—",
+                 "no reference yet: allocation and tactical cannot be told apart"],
+                ["   **(b) Allocation effect** (policy vs SPY, from " + str(pol_.get("first_policy_day")) + ")", pp(d["allocation"]) if d["allocation"] is not None else "**BLOCKED**",
+                 f"{d.get('policy_days', 0)} sessions; invested weight x (policy return - SPY return)"],
+                ["   **(c) Tactical effect** (actual invested book vs policy, same days)", pp(d["tactical"]) if d["tactical"] is not None else "**BLOCKED**",
+                 "the AI's trades and overrides **and** later mechanical reference updates, together"],
                 ["**(d) Fees**", f"{usd(abs(res['fees']['total']), 2)} in total", f"{res['fees']['count']} regulatory fee lines; negligible in paper"],
                 ["Compounding residual (compounded minus arithmetic)", pp(d["compounding_residual"]), "shown, not hidden"]],
                   ["---", "---:", "---"]), "",
-            f"**Share of the arithmetic excess:** cash sleeve {100 * d['cash'] / d['excess']:.0f}%, invested book {100 * d['invested'] / d['excess']:.0f}%."]
+            f"**Share of the arithmetic excess:** cash sleeve {100 * d['cash'] / d['excess']:.0f}%, invested book {100 * d['invested'] / d['excess']:.0f}%. "
+            "Cash + invested-before-policy + allocation + tactical = the sum of daily excess returns, exactly; the compounding residual takes it to the compounded excess."]
     if dv and res.get("existing_method_validate"):
         e = res["existing_method_validate"]
         sn = ""
@@ -175,12 +186,47 @@ def render(res: dict, meta: dict, *, snap_path: str, inception_given: bool) -> s
             f"{usd(abs(res['fees']['total']), 2)} of regulatory fees. **Paper fills carry no spread or slippage, so real costs are not visible here**; for scale only, each 2 / 5 / 10 basis points per side on "
             f"that notional would be {usd(gross * 0.0002)} / {usd(gross * 0.0005)} / {usd(gross * 0.0010)} "
             f"({gross * 0.0002 / res['inception_equity'] * 100:.2f} / {gross * 0.0005 / res['inception_equity'] * 100:.2f} / {gross * 0.0010 / res['inception_equity'] * 100:.2f} points of the starting equity). "
-            "Fills against the analyzer's reference prices **cannot be computed here** (the reference prices are in `daily-trades`, an Azure blob).", "",
-            ""]
+            "Fills against the analyzer's prices are below.", ""]
+    ex = res.get("execution")
+    if ex:
+        t_, b_, s_ = ex["total"], ex["buys"], ex["sells"]
+        worst = sorted(ex["rows"], key=lambda r: -(r["cost_usd"] or 0))[:8]
+        best = sorted(ex["rows"], key=lambda r: (r["cost_usd"] or 0))[:5]
+        hdr = ["Date", "Symbol", "Side", "Qty", "Fill", "Prior close", "bps", "Cost"]
+        aln = ["---", "---", "---", "---:", "---:", "---:", "---:", "---:"]
+
+        def frow(r):
+            return [r["date"], r["symbol"], r["side"], f"{r['filled_qty']:.0f}", f"{r['fill_price']:.2f}", f"{r['ref_price']:.2f}", f"{r['cost_bps']:+.0f}", usd(r["cost_usd"])]
+        out += ["#### Fills vs the price the analyzer reasoned with", "",
+                "`daily-trades` carries **no price** (core trades are market orders; the file has no reference or gap price). The analyzer prices from its 09:00 ET snapshot, whose "
+                "prices are end-of-day closes, so the reference here is **the previous session's close**, a proxy for the exact snapshot figure. Positive = filled worse than that "
+                "price. Because orders fill after the next open, this is mostly the **overnight move between the decision's prices and the fill**: the cost of deciding on "
+                "yesterday's close and trading this morning, not execution quality (paper fills have no spread). **It is already inside the returns above, not an extra term.**", "",
+                table(["", "Trades", "Notional", "Cost (+ = worse)", "Notional-weighted"],
+                      [["All matched trades", t_["trades"], usd(t_["notional"]), usd(t_["cost_usd"]), f"{t_['weighted_bps']:.1f} bps"],
+                       ["Buys", b_["trades"], usd(b_["notional"]), usd(b_["cost_usd"]), f"{b_['weighted_bps']:.1f} bps"],
+                       ["Sells", s_["trades"], usd(s_["notional"]), usd(s_["cost_usd"]), f"{s_['weighted_bps']:.1f} bps"]], ["---", "---:", "---:", "---:", "---:"]), "",
+                f"Median {ex['median_bps']:.1f} bps per trade. Of {ex['proposed']} proposed (non-rejected) trades, {ex['matched']} had same-day fills of the same symbol and side; "
+                f"{len(ex['unfilled'])} had none (failed submissions such as the 403s on stale resting orders, clamps to zero, or deferrals); {ex['unattributed_fill_groups']} "
+                "same-day fill groups had no proposed trade (the separate Flex engine's orders) and are not attributed.", "",
+                "**Largest costs**", "", table(hdr, [frow(r) for r in worst], aln), "",
+                "**Largest gains** (filled better than the prior close)", "", table(hdr, [frow(r) for r in best], aln), ""]
     out += ["### (b) and (c)", ""]
-    if inception_given:
-        out += ["The inception-day snapshot was supplied: the policy portfolio (its `reference_weights.target_weights_pct`, normalised to fully invested, held buy-and-hold from the base close) "
-                "is computed above and the three terms add to the same total.", ""]
+    if pol_.get("available"):
+        top = sorted(pol_["weights"].items(), key=lambda kv: -kv[1])
+        out += ["**The inception snapshot (2026-05-26) carries no `reference_weights`**: the block was introduced on 2026-06-30 (commit `9da6f8d`), so for the first "
+                f"{d.get('days', 0) - d.get('policy_days', 0)} sessions the analyzer allocated with no reference at all. Per Jorge's decision the policy portfolio is the **first reference ever "
+                f"produced** (`daily-snapshots/{pol_['snapshot_date']}.json`, collected {pol_['collected_at'][:16]}Z, after that day's close), held buy-and-hold from the {pol_['base']} close and "
+                f"measured only from {pol_['first_policy_day']}; the earlier days are reported as one combined invested term. No look-ahead.", "",
+                "**The policy is the reference's risk assets, normalised to 100%**: SGOV and literal cash are left out because the cash sleeve is already term (a); keeping SGOV "
+                f"in the policy would count it twice (excluded keys: {', '.join(pol_['excluded'])}). Weights: " + ", ".join(f"{s_} {100 * w_:.1f}%" for s_, w_ in top[:6])
+                + f", and {len(top) - 6} names at {100 * top[-1][1]:.1f}% each (the 0.1%-of-core floors). That first reference was very defensive (gold and long Treasuries). "
+                f"It returned {pct(pol_['total_return'] * 100)} buy-and-hold from its base close to {res['last']}.", "",
+                "**What (c) does and does not isolate.** The policy is frozen at the 2026-07-01 reference, but the reference itself was recomputed every day after that "
+                "(regime changes, auto-switched sleeves, band enforcement). So (c) is everything that moved the actual invested book away from the first reference: the AI's own "
+                "trades and overrides **and** the mechanical reference updates it executed toward. Separating those two would need every day's reference weights, which were not read.", ""]
+    elif inception_given:
+        out += ["The inception snapshot was supplied but carries no `reference_weights`, and no policy snapshot was available: (b) and (c) stay combined.", ""]
     else:
         out += ["**BLOCKED, not estimated.** To complete them, read-only, after signing in as the required user (subscription `EasyGridsProduction`, `-g rg-portfolio-automation-prod`, "
                 "ownership of `stpfautoprod` verified first):", "",
@@ -212,8 +258,8 @@ def render(res: dict, meta: dict, *, snap_path: str, inception_given: bool) -> s
     def hrow(s, v):
         return [s, usd(v["realized"]), usd(v["unrealized"]), usd(v["total"]), f"{100 * v['total'] / start:+.2f}", "held" if v["qty"] > 1e-9 else "closed"]
     out += ["## 4. Contribution by holding", "",
-            f"FIFO lots from the activity log, open lots marked at the position prices of the fetch ({h['fetched_utc'][:16]}Z, after Monday 2026-10-12's close), so this table is dated 2026-10-12, "
-            f"one session after the scoreboard's last close. Reconciliation: cash + marked holdings = {usd(h['identity']['cash_plus_mv'], 2)} against account equity {usd(h['identity']['equity_now'], 2)} "
+            f"FIFO lots from the activity log, open lots marked at the position prices of the fetch ({h['fetched_utc'][:16]}Z), so this table is dated by that fetch, "
+            f"which may be a session after the scoreboard's last close. Reconciliation: cash + marked holdings = {usd(h['identity']['cash_plus_mv'], 2)} against account equity {usd(h['identity']['equity_now'], 2)} "
             f"(difference {usd(h['identity']['diff'], 2)}); total FIFO P&L after fees {usd(h['identity']['pnl_total_after_fees'], 2)} against equity minus the $100,000 start "
             f"{usd(h['identity']['equity_minus_start'], 2)}. Contribution = P&L / starting equity (points of the book's return); dividends are not credited in this account.", "",
             "**Bottom 8**", "", table(["Symbol", "Realized", "Unrealized", "Total", "Points of book return", "Status"], [hrow(s, v) for s, v in fifo[:8]], ["---", "---:", "---:", "---:", "---:", "---"]), "",
@@ -253,21 +299,25 @@ def render(res: dict, meta: dict, *, snap_path: str, inception_given: bool) -> s
             f"* **The size of the lag.** Over {res['trading_days_in_window']} sessions the book returned {pct(bk['total_return'] * 100)} against SPY's {pct(L['spy_price']['total_return'] * 100)} "
             f"(price; {pct(L['spy_total']['total_return'] * 100)} with dividends): a shortfall of {abs(L['excess_price_pp']):.1f} points like-for-like. The published scoreboard shows a smaller gap partly "
             f"because its SPY baseline starts a session late (about {res['baseline']['excess_flattery_pp']:.2f} points).",
-            f"* **Which lever explains most.** Of the four named levers only (a) and (d) can be measured separately here. **(a) Cash drag explains about {cash_share:.0f}% of the lag ({pp(d['cash'])})** "
+            f"* **Which lever explains most.** **(a) Cash drag explains about {cash_share:.0f}% of the lag ({pp(d['cash'])})** "
             f"because the cash sleeve averaged {d['avg_sleeve_weight_pct']:.0f}% of equity while SPY rose, earning nothing in this paper account (about {res['sgov_yield_artifact']['missing_yield_pp_of_book']:.1f} points of it is the "
             f"missing SGOV yield). **(d) Costs are ~0 in paper** ({usd(abs(res['fees']['total']), 2)} of fees) though turnover was high (about {gross / 2 / res['inception_equity']:.1f}x equity one-way in {res['trading_days_in_window']} sessions). "
-            f"The remaining **{inv_share:.0f}% ({pp(d['invested'])}) is the invested book against SPY, which is (b) allocation plus (c) tactical together; they cannot be separated until the inception-day snapshot is read.**",
-            f"* **What the available evidence says about (b) vs (c), as a hint and not a measurement.** The book's beta to SPY was {num(bk['beta'])} (correlation {num(bk['corr'])}): in a market that rose {pct(L['spy_price']['total_return'] * 100)} "
-            f"a beta of that size accounts for roughly {pct(bk['beta'] * L['spy_price']['total_return'] * 100)}, leaving about {abs(bk['total_return'] * 100 - bk['beta'] * L['spy_price']['total_return'] * 100):.1f} points of shortfall as the "
-            f"regression's alpha ({pct(bk['alpha_annual'] * 100, 0)} annualised, statistically unreliable at this sample). Separately, an all-weather proxy portfolio itself trailed SPY by "
-            f"{abs(aw['total_return'] - spy_t['total_return']) * 100:.1f} points (total return, both), more than the invested book's {abs(d['invested']):.1f} (price, no dividends): that points to the diversified, defensive design in a rising equity market "
-            "as a large part of the invested-book gap, but the proxy is not the system's policy, so this must be confirmed with part (b).",
+            + ((f"The remaining **{inv_share:.0f}% ({pp(d['invested'])}) is the invested book against SPY**: {pp(d['invested_before_policy'])} before any reference existed, "
+                f"**(b) {pp(d['allocation'])} from the policy itself** and **(c) {pp(d['tactical'])} from moving away from it**.") if d.get("allocation") is not None else
+               f"The remaining **{inv_share:.0f}% ({pp(d['invested'])}) is the invested book against SPY**; (b) and (c) could not be separated."),
+            (f"* **Did the AI/tactical layer add or cost return?** From {pol_.get('first_policy_day')} to {res['last']} ({d.get('policy_days')} sessions) the actual "
+             f"invested book **{'added' if d['tactical'] > 0 else 'cost'} {abs(d['tactical']):.2f} points** against simply holding the first reference, which itself cost {pp(d['allocation'])} against SPY. "
+             "In plain terms: the reference the system started from was the larger problem (very defensive, mostly gold and long Treasuries in a rising stock market), and the "
+             "day-to-day layer clawed part of that back. Two cautions: (1) this layer includes the later mechanical reference updates as well as the AI's own judgment, which this data "
+             "cannot separate; (2) it is about 75 sessions in one market regime, far too short to tell skill from luck, and a difference of this size could easily reverse. "
+             f"The fills cost about {((res.get('execution') or {}).get('total') or {}).get('weighted_bps') or 0:.0f} bps against the prior close, the overnight cost of trading on yesterday's prices, which is already inside these numbers.")
+            if d.get("tactical") is not None else "* **Did the AI/tactical layer add or cost return?** Not measurable without a policy portfolio.",
             "* **Timing.** The shortfall built in the months when SPY rallied and the book was most in cash or defensive assets (the month tables). The cash sleeve (literal cash plus SGOV) averaged "
             + ", ".join(f"{mw[m]['sleeve_pct']:.0f}% of equity in {m}" for m in sorted(mw)) + f", and was {w_last['sleeve_pct']:.0f}% at the {w_last['day']} close "
             f"(SGOV {w_last['sgov_pct']:.0f}%, literal cash {w_last['cash_pct']:.1f}%); the early months are the ramp from 100% cash.",
-            "* **What this does not say.** About 95 trading days is a short sample, one market regime and one start date; every figure here describes this window and is not an estimate of the "
+            f"* **What this does not say.** About {res['trading_days_in_window']} trading days is a short sample, one market regime and one start date; every figure here describes this window and is not an estimate of the "
             "system's long-run behaviour. No recommendation to change Core is made. The levers and their measured sizes are: cash sleeve " + pp(d["cash"]) + "; fees about zero; invested book against SPY "
-            + pp(d["invested"]) + f"; and the published scoreboard's baseline convention, which flatters its excess by about {res['baseline']['excess_flattery_pp']:.2f} points.", ""]
+            + pp(d["invested"]) + (f" ((b) {pp(d['allocation'])}, (c) {pp(d['tactical'])}, before the policy {pp(d['invested_before_policy'])})" if d.get("allocation") is not None else "") + f"; and the published scoreboard's baseline convention, which flatters its excess by about {res['baseline']['excess_flattery_pp']:.2f} points.", ""]
 
     # ----------------------------------------------------------------------------------- appendix
     out += ["## Appendix: method notes", "",

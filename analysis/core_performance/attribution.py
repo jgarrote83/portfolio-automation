@@ -39,17 +39,21 @@ def decompose(days: list[dict], book_total_return: float, spy_total_return: floa
     arithmetic excess they add to, the compounded excess, and the compounding residual between the two."""
     keys = ("excess", "cash", "cash_literal", "cash_sgov", "invested")
     sums = {k: sum(d[k] for d in days) for k in keys}
-    has_policy = all(d["allocation"] is not None for d in days) and bool(days)
-    if has_policy:
-        sums["allocation"] = sum(d["allocation"] for d in days)
-        sums["tactical"] = sum(d["tactical"] for d in days)
+    with_policy = [d for d in days if d["allocation"] is not None]
+    if with_policy:
+        # the policy may start part-way through the window (no reference existed before it): the invested term of the earlier days is
+        # reported on its own, so cash + invested_before_policy + allocation + tactical = excess still holds exactly
+        sums["allocation"] = sum(d["allocation"] for d in with_policy)
+        sums["tactical"] = sum(d["tactical"] for d in with_policy)
+        sums["invested_before_policy"] = sum(d["invested"] for d in days if d["allocation"] is None)
     else:
-        sums["allocation"] = sums["tactical"] = None
+        sums["allocation"] = sums["tactical"] = sums["invested_before_policy"] = None
     compounded = book_total_return - spy_total_return
     pp = {k: (None if v is None else v * 100.0) for k, v in sums.items()}
     pp["compounded_excess"] = compounded * 100.0
     pp["compounding_residual"] = (compounded - sums["excess"]) * 100.0
     pp["days"] = len(days)
+    pp["policy_days"] = len(with_policy)
     pp["avg_sleeve_weight_pct"] = 100.0 * sum(d["sleeve_weight"] for d in days) / len(days) if days else None
     return pp
 

@@ -13,7 +13,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import attribution, ledger, metrics
+from . import attribution, execution, ledger, metrics
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(__file__).resolve().parent / "data"
@@ -60,7 +60,8 @@ def window_stats(values: list[float], spy: list[float]) -> dict:
 
 
 def build(raw: dict, *, inception: str = "2026-05-26", validate_as_of: str | None = "2026-10-01", snapshot: dict | None = None,
-          inception_snapshot: dict | None = None, policy_bars: dict | None = None) -> dict:
+          inception_snapshot: dict | None = None, policy_bars: dict | None = None, policy_snapshot: dict | None = None,
+          policy_base: str | None = None, trades_by_date: dict | None = None, trade_bars: dict | None = None) -> dict:
     core, legacy = core_universe()
     adj, rawp = bars_by_date(raw["bars_all"]), bars_by_date(raw["bars_raw"])
     spy_days = sorted(adj["SPY"])
@@ -119,18 +120,26 @@ def build(raw: dict, *, inception: str = "2026-05-26", validate_as_of: str | Non
                                "holdings_pct": 100 * (E[i] - cash[d]) / E[i], "risk_assets_pct": 100 * (E[i] - cash[d] - sgov_val[d]) / E[i]})
 
     # ---- daily decomposition (cash term exact; policy terms only when an inception snapshot and its bars are supplied)
-    policy_r = None
-    if inception_snapshot is not None and policy_bars is not None:
-        w = policy_weights(inception_snapshot)
+    # The policy portfolio is the first snapshot that carries `reference_weights`, held buy-and-hold from `policy_base` (the close at or
+    # before that snapshot was collected). Days up to and including the base have no policy: no reference existed then.
+    policy_r: dict[str, float] = {}
+    policy_info = {"available": False}
+    if policy_snapshot is not None and policy_bars is not None and policy_base is not None:
+        w = policy_weights(policy_snapshot)
         pb = bars_by_date(policy_bars)
-        pdays = [d for d in days if all(d in pb[s] for s in w)]
-        if pdays == days:
-            policy_r = metrics.returns(metrics.value_index(pb, w, days))
+        pdays = [d for d in days if d >= policy_base]
+        missing = [(s, d) for d in pdays for s in w if d not in pb.get(s, {})]
+        if missing:
+            raise ValueError(f"policy constituents lack bars: {missing[:5]}")
+        vals = metrics.value_index(pb, w, pdays)
+        policy_r = {pdays[i]: vals[i] / vals[i - 1] - 1.0 for i in range(1, len(pdays))}
+        policy_info = {"available": True, "snapshot_date": policy_snapshot.get("date"), "collected_at": policy_snapshot.get("collected_at"),
+                       "base": policy_base, "weights": w, "first_policy_day": pdays[1] if len(pdays) > 1 else None,
+                       "total_return": vals[-1] / vals[0] - 1.0, "excluded": sorted(k for k in policy_snapshot["reference_weights"]["target_weights_pct"] if k not in w)}
     terms = []
     for t in range(1, len(days)):
         d0 = days[t - 1]
-        terms.append(attribution.daily_terms(E[t - 1], cash[d0], sgov_val[d0], r_book[t - 1], r_spy[t - 1], r_sgov[t - 1],
-                                             None if policy_r is None else policy_r[t - 1]))
+        terms.append(attribution.daily_terms(E[t - 1], cash[d0], sgov_val[d0], r_book[t - 1], r_spy[t - 1], r_sgov[t - 1], policy_r.get(days[t])))
     res["terms"] = terms
 
     def decomp(as_of: str) -> dict:
@@ -262,14 +271,21 @@ def build(raw: dict, *, inception: str = "2026-05-26", validate_as_of: str | Non
                 "spy_return_from_base_close_pct": (spy_raw_v[i] / spy_raw_v[0] - 1) * 100,
                 "spy_return_from_first_day_close_pct": (spy_raw_v[i] / spy_raw_v[1] - 1) * 100,
                 "max_drawdown_close_pct": metrics.max_drawdown(E[: i + 1])["max_drawdown"] * 100}
-    res["policy"] = {"available": policy_r is not None}
+    res["policy"] = policy_info
+    res["inception_snapshot"] = {"given": inception_snapshot is not None,
+                                 "has_reference_weights": bool((inception_snapshot or {}).get("reference_weights"))}
+    if trades_by_date is not None and trade_bars is not None:
+        res["execution"] = execution.fills_vs_reference(trades_by_date, parts["fills"], bars_by_date(trade_bars), spy_days)
     return res
 
 
+POLICY_EXCLUDED = ("SGOV", "__cash__")
+
+
 def policy_weights(snapshot: dict) -> dict[str, float]:
-    """Reference weights of an (inception-day) snapshot as a fully invested policy portfolio: the per-ticker targets, normalised to 1
-    (the literal-cash residual is spread pro rata, SGOV stays a holding)."""
-    tw = {s: float(w) for s, w in snapshot["reference_weights"]["target_weights_pct"].items() if float(w) > 0}
+    """Reference weights of a snapshot as a fully invested RISK-ASSET policy: the per-ticker targets, normalised to 1, without the cash
+    sleeve (SGOV and literal cash). The cash sleeve is already measured by term (a); keeping SGOV in the policy would count it twice."""
+    tw = {s: float(w) for s, w in snapshot["reference_weights"]["target_weights_pct"].items() if float(w) > 0 and s not in POLICY_EXCLUDED}
     total = sum(tw.values())
     return {s: w / total for s, w in tw.items()}
 
@@ -285,18 +301,33 @@ def snapshot_echo(s: dict) -> dict:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="analysis.core_performance.run", description=__doc__.split("\n")[0])
     ap.add_argument("--snapshot", default=str(REPO_ROOT / "data" / "replay" / "2026-10-02.json"))
-    ap.add_argument("--inception-snapshot", help="daily-snapshots/<inception>.json, to compute the policy portfolio (b) and the tactical effect (c)")
+    ap.add_argument("--inception-snapshot", help="daily-snapshots/<inception>.json; used for (b)/(c) when it carries reference_weights")
+    ap.add_argument("--policy-snapshot", default=str(REPO_ROOT / "data" / "replay" / "2026-07-01.json"),
+                    help="the first snapshot that carries reference_weights (used when the inception snapshot has none)")
+    ap.add_argument("--trades-dir", default=str(REPO_ROOT / "data" / "replay" / "daily-trades"), help="daily-trades/*.json, for fills vs reference")
     ap.add_argument("--out", default=str(REPO_ROOT / ".review" / "core-vs-spy-analysis.md"))
     args = ap.parse_args(argv)
     from . import report
     raw = load_raw()
     snap = json.loads(Path(args.snapshot).read_text(encoding="utf-8")) if args.snapshot and Path(args.snapshot).is_file() else None
     inc = json.loads(Path(args.inception_snapshot).read_text(encoding="utf-8")) if args.inception_snapshot else None
-    policy_bars = None
-    if inc is not None:
-        policy_bars = fetch_policy_bars(list(policy_weights(inc)), raw["fetch_meta"]["bars_start"], raw["fetch_meta"]["bars_end"])
-    res = build(raw, snapshot=snap, inception_snapshot=inc, policy_bars=policy_bars,
-                validate_as_of=(snap or {}).get("date") and _prev_day(raw, snap["date"]))
+    pol = inc if inc is not None and inc.get("reference_weights") else None
+    if pol is None and args.policy_snapshot and Path(args.policy_snapshot).is_file():
+        pol = json.loads(Path(args.policy_snapshot).read_text(encoding="utf-8"))
+    start, end = raw["fetch_meta"]["bars_start"], raw["fetch_meta"]["bars_end"]
+    policy_bars = policy_base = None
+    if pol is not None:
+        policy_bars = fetch_policy_bars(list(policy_weights(pol)), start, end)
+        policy_base = policy_base_close(raw, pol)
+    trades = trade_bars = None
+    td = Path(args.trades_dir)
+    if td.is_dir():
+        trades = {f.stem: (json.loads(f.read_text(encoding="utf-8")).get("trades") or []) for f in sorted(td.glob("2026-*.json"))}
+        trades = {d: t for d, t in trades.items() if start <= d <= end}
+        syms = sorted({str(t["symbol"]).upper() for ts in trades.values() for t in ts})
+        trade_bars = fetch_policy_bars(syms, start, end) if syms else {}
+    res = build(raw, snapshot=snap, inception_snapshot=inc, policy_bars=policy_bars, policy_snapshot=pol, policy_base=policy_base,
+                trades_by_date=trades, trade_bars=trade_bars, validate_as_of=(snap or {}).get("date") and _prev_day(raw, snap["date"]))
     try:
         shown = str(Path(args.snapshot).resolve().relative_to(REPO_ROOT)).replace("\\", "/")
     except ValueError:
@@ -317,6 +348,18 @@ def fetch_policy_bars(symbols: list[str], start: str, end: str, api=None) -> dic
     if missing:
         raise ValueError(f"no bars returned for policy constituents {missing}")
     return bars
+
+
+def policy_base_close(raw: dict, snapshot: dict) -> str:
+    """The session close at or before the moment the policy snapshot was collected: its own date if collected after the 16:00 ET close,
+    otherwise the previous session (the policy is held buy-and-hold from that close)."""
+    from zoneinfo import ZoneInfo
+    days = sorted(bars_by_date(raw["bars_all"])["SPY"])
+    at = datetime.fromisoformat(snapshot["collected_at"].replace("Z", "+00:00")).astimezone(ZoneInfo("America/New_York"))
+    d = at.date().isoformat()
+    if d in days and (at.hour, at.minute) >= (16, 0):
+        return d
+    return max(x for x in days if x < d)
 
 
 def _prev_day(raw: dict, snapshot_date: str) -> str:
