@@ -695,7 +695,10 @@ the international sleeve. That data never reaches it, so the line is harmless bu
 
 Recommended: 1 and 2 together. Defer 3 until a block or rule needs it.
 
-### 128. Rotate the FRED API key, then update its Key Vault secret (HIGH — security; leaked 2026-10-18, never committed)
+### 128. FRED API key exposure — reminder only; rotation declined (LOW — accepted risk; leaked 2026-10-18, never committed)
+**Decision (Jorge, 2026-10-18): do NOT rotate the FRED key: low impact (a free, read-only public-data key), accepted risk. The logging
+fix (`a17f80e`) stays.** The entry stays open as a reminder only. If the key is ever abused (FRED rate-limits or revokes it), rotate as
+below.
 **What happened.** On 2026-10-18 the quadrant-backtest prompt built the ALFRED vintage cache (`scripts/alfred_cache.py`). Thirteen series
 returned HTTP 400 (DFF, DGS10, DGS2, T10Y2Y, VIXCLS, CHPMINDXM, T10Y3M, DGS3MO, DGS30, DFII10, T10YIE, T5YIE, T5YIFR).
 `shared/clients/fred.py` logs each failure as `logger.error("FRED vintages %s failed: %s", series_id, e)`, and a `requests.HTTPError`
