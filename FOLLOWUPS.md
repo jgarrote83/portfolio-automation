@@ -663,6 +663,38 @@ wiped them.
 
 ## Open
 
+### 129. `CHPMINDXM` is deprecated (HTTP 400 every run), and the collector requests two comment keys as series (LOW — data hygiene; no change yet)
+**What happens today.**
+- `src/config/macro-series.json` lists `CHPMINDXM` ("China Manufacturing PMI (NBS)", monthly).
+- `collector.handler` fetches **every key** of that file:
+  `fred.get_all_series(list(macro_meta.keys()))` (`src/collector/handler.py:2850`).
+- FRED answers 400 for `CHPMINDXM`, so `FREDClient.get_series_latest` logs an ERROR and returns `[]`.
+- The snapshot's `macro` block then carries `CHPMINDXM: []`. Nothing breaks: the failure is swallowed, and the run continues.
+- App Insights (2026-09-21 to 2026-10-16, the whole 30-day retention window): **20 failures, one per collector run.**
+- The same blind fetch also requests the file's two **comment keys**, `_inflation_quality_comment` and `_leading_growth_comment`, as FRED
+  series: **20 failures each**, also daily.
+- Before `a17f80e` (#128), every one of those 60 ERROR lines carried the API key.
+
+**Which Core input it feeds: none.**
+- No code reads `CHPMINDXM` by id (repo-wide grep).
+- It is not in the analyzer's `_MACRO_SERIES_KEPT` (`src/analyzer/handler.py:156`), so the analyzer prunes it before the prompt.
+- No pre-computed block (`regional_rotation`, `intl_governance`, `bond_signals`, the axes) uses it.
+
+**The only trace is a stale instruction.** `src/config/project-instructions.md:2567` still tells the model to use "China/Eurozone PMI" for
+the international sleeve. That data never reaches it, so the line is harmless but misleading.
+
+**Proposal (decide; nothing changed yet):**
+1. **Remove `CHPMINDXM`** from `macro-series.json`, and drop "China/Eurozone PMI" from the prompt line. The international sleeve is
+   governed by `regional_rotation` / `intl_governance` (rotation score + DXY), which never used it, so this has zero behavioural effect.
+2. **Make `get_all_series` skip keys starting with `_`**, as `scripts/alfred_cache.series_ids()` already does. This ends the two
+   comment-key requests and their daily ERRORs.
+3. **Only if a China growth gauge is actually wanted:** add a maintained series as a NEW input with a stated consumer.
+   - Candidates on FRED: the OECD composite leading indicator or business confidence for China.
+   - **Verify the exact series id exists and updates with the rotated key before adopting it; don't guess an id.**
+   - Without a consumer it is just another unused fetch.
+
+Recommended: 1 and 2 together. Defer 3 until a block or rule needs it.
+
 ### 128. Rotate the FRED API key, then update its Key Vault secret (HIGH — security; leaked 2026-10-18, never committed)
 **What happened.** On 2026-10-18 the quadrant-backtest prompt built the ALFRED vintage cache (`scripts/alfred_cache.py`). Thirteen series
 returned HTTP 400 (DFF, DGS10, DGS2, T10Y2Y, VIXCLS, CHPMINDXM, T10Y3M, DGS3MO, DGS30, DFII10, T10YIE, T5YIE, T5YIFR).
@@ -688,9 +720,17 @@ output file and in the session's tool output.
 3. Fix the logging so it can't recur. `shared/clients/fred.py`'s two `logger.error(... e)` calls must log the status code and series,
    never `e`'s message or the URL. The C5 engine's own FRED fetch already does this.
 
-**Production may have the same leak.** The collector fetches every `macro-series.json` series daily, and `CHPMINDXM` is deprecated, so
-App Insights may already hold the key in ERROR lines. Check (`traces | where message has "api_key="`) and, after rotating, purge or
-accept.
+**Production had the same leak, confirmed 2026-10-18** by a read-only query on `log-pfauto-prod` (App Insights is workspace-based,
+retention 30 days). The query returned counts and dates only, never values:
+- **86 `AppTraces` lines contain `api_key=`**, first 2026-09-21 13:00Z, last 2026-10-16 13:03Z; `AppExceptions`: 0.
+- They are the collector's daily FRED failures: 20× `CHPMINDXM`, 20× each of the two comment keys (#129), plus intermittent DGS10,
+  T10Y2Y, PCEPI, CPILFESL and DEXCHUS failures.
+- The window starts 2026-09-18, so older lines have already aged out; the leak almost certainly ran for months before that.
+- **Fixed at the source in `a17f80e`:** `FREDClient` now logs only the type, HTTP status and URL path, never the query string or the key.
+  The test uses genuine `requests` exceptions and fails on the old client.
+- The existing lines stay readable by anyone with workspace read access until they age out (≤ 30 days) or are purged. **Rotation is
+  what makes them harmless.** A purge (`az monitor log-analytics workspace data-export`/purge API) is a write action and Jorge's call;
+  after rotation it isn't needed.
 
 ### 127. Relabel the wrong Flex exit reasons in the portal (MEDIUM — data fidelity; production blob write needs Jorge's approval)
 **What is wrong.** All four closed Flex trades, repaired from broker fills on 2026-10-18 with `scripts/flex_backfill_closed_trades.py`, keep
