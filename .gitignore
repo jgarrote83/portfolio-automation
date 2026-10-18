@@ -74,3 +74,6 @@ reports/global_leadlag/
 reports/orb_qqq/
 reports/options_probe/
 reports/safe_wheel_model/
+
+# Core candidates study outputs (research/core_candidates)
+reports/core_candidates/
