@@ -83,3 +83,6 @@ reports/core_candidates_oos/
 
 # Quadrant-tilt backtest outputs (research/quadrant_backtest)
 reports/quadrant_backtest/
+
+# C5 holdout smoke test outputs
+reports/c5_holdout/

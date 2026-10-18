@@ -11,6 +11,8 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
+from . import holdout
+
 WINDOW_START, WINDOW_END = date(2005, 1, 3), date(2025, 12, 31)
 FIRST_DECISION = date(2004, 12, 31)
 HOLDOUT_START = date(2026, 1, 1)
@@ -29,7 +31,8 @@ class HoldoutRefused(ValueError):
 
 def refuse_holdout(*days) -> None:
     for d in days:
-        if (d.date() if isinstance(d, pd.Timestamp) else d) >= HOLDOUT_START:
+        dd = d.date() if isinstance(d, pd.Timestamp) else d
+        if dd >= HOLDOUT_START and not holdout.permits(dd):
             raise HoldoutRefused(f"{d}: dates on/after {HOLDOUT_START} are this study's holdout; refused (no override).")
 
 

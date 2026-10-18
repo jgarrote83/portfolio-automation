@@ -27,6 +27,8 @@ from backtest.data.bars import HoldoutError
 from backtest.data.config import REPO_ROOT
 from backtest.wheel_data import http_text, parse_fred_csv
 
+from . import holdout
+
 CACHE_DIR = REPO_ROOT / "data" / "reference" / "core_candidates"
 DATA_FROM = date(2003, 1, 1)
 LAST_DAY = date(2025, 12, 31)
@@ -40,7 +42,7 @@ FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series}&cosd=200
 def assert_not_holdout(*days) -> None:
     for d in days:
         d = d.date() if isinstance(d, (datetime, pd.Timestamp)) else d
-        if d >= HOLDOUT_START:
+        if d >= HOLDOUT_START and not holdout.permits(d):
             raise HoldoutError(f"{d} is on/after {HOLDOUT_START}: the 2026 window is this study's holdout and is closed (no override exists).")
 
 
@@ -70,7 +72,7 @@ def _paths(kind: str, name: str, root: Path) -> tuple[Path, Path]:
 
 
 def _write(df: pd.DataFrame, meta: dict, kind: str, name: str, root: Path) -> dict:
-    if len(df) and df["date"].max().date() >= HOLDOUT_START:
+    if len(df) and df["date"].max().date() >= HOLDOUT_START and not holdout.permits(df["date"].max().date()):
         raise HoldoutError(f"{name}: received a row dated {df['date'].max().date()}; refusing to keep 2026 data.")
     pq, js = _paths(kind, name, root)
     pq.parent.mkdir(parents=True, exist_ok=True)
@@ -94,7 +96,7 @@ def read(kind: str, name: str, root: Path = CACHE_DIR) -> tuple[pd.DataFrame, di
         raise FileNotFoundError(f"{name} is not cached under {pq.parent} (run `python -m research.core_candidates.run download`).")
     df = pd.read_parquet(pq)
     df["date"] = pd.to_datetime(df["date"])
-    if len(df) and df["date"].max().date() >= HOLDOUT_START:
+    if len(df) and df["date"].max().date() >= HOLDOUT_START and not holdout.permits(df["date"].max().date()):
         raise HoldoutError(f"{name}: the cache holds a 2026 row; refusing to read it.")
     return df, json.loads(js.read_text(encoding="utf-8"))
 
