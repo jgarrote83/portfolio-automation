@@ -32,6 +32,7 @@ from threading import Lock
 
 import azure.functions as func
 import learning_github
+import easygrid  # noqa: E402
 from azure.core.exceptions import ResourceNotFoundError
 from azure.data.tables import TableServiceClient
 from azure.storage.blob import BlobServiceClient
@@ -1167,4 +1168,69 @@ def performance(req: func.HttpRequest) -> func.HttpResponse:
         return _json(payload)
     except Exception as e:
         log.exception("performance failed")
+        return _err(str(e), status=500)
+
+
+# ============================================================================ EasyGrid (the C5 paper account)
+# Read-only views over the C5 engine's own blobs (web/api/easygrid.py). The SWA never touches the C5 account itself.
+
+def _easygrid_states() -> list[dict]:
+    out = []
+    try:
+        for b in _blobs().get_container_client("c5-state").list_blobs():
+            stem = b.name.rsplit(".", 1)[0]
+            if len(stem) == 6 and stem.isdigit():
+                doc = _download_json("c5-state", b.name)
+                if isinstance(doc, dict):
+                    out.append(doc)
+    except ResourceNotFoundError:
+        return []
+    return out
+
+
+def _easygrid_blob(container: str, name: str, default=None):
+    try:
+        v = _download_json(container, name)
+    except Exception:  # noqa: BLE001
+        log.exception("easygrid blob %s/%s unreadable", container, name)
+        return default
+    return default if v is None else v
+
+
+@app.route(route="easygrid/summary", methods=["GET"])
+def easygrid_summary(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        return _json(easygrid.summary(_easygrid_states(), _easygrid_blob("c5-equity-series", "series.json", []),
+                                      _easygrid_blob("c5-state", "health.json"), _easygrid_blob("c5-ledger", "ledger.json"),
+                                      _easygrid_blob("c5-state", "dry-run.json")))
+    except Exception as e:  # noqa: BLE001
+        log.exception("easygrid summary failed")
+        return _err(str(e), status=500)
+
+
+@app.route(route="easygrid/series", methods=["GET"])
+def easygrid_series(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        return _json(easygrid.series_indexed(_easygrid_states(), _easygrid_blob("c5-equity-series", "series.json", []),
+                                             _easygrid_blob("performance", "equity-series.json", [])))
+    except Exception as e:  # noqa: BLE001
+        log.exception("easygrid series failed")
+        return _err(str(e), status=500)
+
+
+@app.route(route="easygrid/decisions", methods=["GET"])
+def easygrid_decisions(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        return _json(easygrid.decisions(_easygrid_states()))
+    except Exception as e:  # noqa: BLE001
+        log.exception("easygrid decisions failed")
+        return _err(str(e), status=500)
+
+
+@app.route(route="easygrid/criteria", methods=["GET"])
+def easygrid_criteria(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        return _json(easygrid.criteria(_easygrid_states(), _easygrid_blob("c5-state", "preview.json"), _easygrid_blob("c5-state", "dry-run.json")))
+    except Exception as e:  # noqa: BLE001
+        log.exception("easygrid criteria failed")
         return _err(str(e), status=500)

@@ -150,6 +150,8 @@ def tick(d: Deps | None = None) -> dict:
         ss, closes, raws, baa = load_inputs(d, now)
         today = sch.session_on(ss, now.date())
         positions = positions_of(d)
+        nxt = next((x for x in ss if x.day >= now.date() and not sch.settled(x, now) and sch.next_session(ss, x.day) and sch.is_month_end(ss, x.day)), None)
+        health["next_decision_date"] = nxt.day.isoformat() if nxt else None
         if not d.enabled:
             _refresh_dry_run(d, now, ss, closes, raws, baa, positions, health)
             return _finish(d, health)

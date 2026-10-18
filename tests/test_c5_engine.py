@@ -290,3 +290,12 @@ def test_c5_never_touches_core_and_core_never_imports_c5():
         assert not re.search(r"^\s*(from|import) c5\b", p.read_text(encoding="utf-8"), re.M), p
     fa = (ROOT / "src" / "function_app.py").read_text(encoding="utf-8")
     assert "C5_ALPACA_KEY_ID" not in fa and "AlpacaApiKey" not in fa.split("def c5_tick")[1].split("@app")[0]
+
+
+def test_health_carries_the_next_decision_date():
+    a = FakeAlpaca()
+    deps, store = make(a, at(date(2026, 7, 6), 10, 0), enabled=False)
+    h = H.tick(deps)
+    assert h["next_decision_date"] == "2026-07-31"
+    deps2, _ = make(FakeAlpaca(), at(date(2026, 7, 31), 16, 30), enabled=False)
+    assert H.tick(deps2)["next_decision_date"] == "2026-08-28"        # 07-31 has settled; August ends on Friday 08-28

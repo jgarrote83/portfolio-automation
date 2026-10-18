@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>EasyGrid &middot; Portfolio Automation</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topnav">
+    <strong>Portfolio Automation</strong>
+    <nav>
+      <a href="/today.html">Today</a>
+      <a href="/history.html">History</a>
+      <a href="/portfolio.html">Portfolio</a>
+      <a href="/performance.html">Performance</a>
+      <a href="/easygrid.html" class="active">EasyGrid</a>
+    </nav>
+    <span id="user" class="user"></span>
+  </header>
+  <main class="container">
+    <h1>EasyGrid</h1>
+    <p class="muted" style="margin-top:-.5rem">The C5 (trend + credit) rule, traded on its own Alpaca paper account, independent of Core.</p>
+
+    <div id="eg-summary" class="eg-summary">Loading…</div>
+
+    <h2>Performance</h2>
+    <p class="muted" style="margin-top:-.5rem">EasyGrid, Core and the S&amp;P 500 (SPY), each indexed to 100 at EasyGrid's first fill. Markers show decisions where the holding changed.</p>
+    <div class="chart-wrap" style="height:300px"><canvas id="egChart" height="100"></canvas></div>
+    <p id="eg-chart-note" class="muted"></p>
+
+    <h2>Criteria</h2>
+    <div id="eg-criteria" class="eg-criteria"></div>
+
+    <h2>Decision history</h2>
+    <div id="eg-decisions" class="table-scroll"></div>
+
+    <h2>Engine health</h2>
+    <div id="eg-health" class="eg-health"></div>
+
+    <h2>About the rule</h2>
+    <div class="markdown eg-explainer">
+      <p><strong>At the close of each month's last trading day</strong>, two tests:</p>
+      <ul>
+        <li><strong>Trend:</strong> is SPY's month-end close above its average over the last 10 month-ends?</li>
+        <li><strong>Credit:</strong> is the Baa corporate spread over Treasuries (<code>BAA10Y</code>, as published for the prior day) at or below its 126-day average?</li>
+      </ul>
+      <p>Both pass → <strong>SSO</strong> (2x S&amp;P 500). One passes → <strong>SPY</strong>. Neither → <strong>T-bills</strong> (BIL). The trade happens at the next session's close.</p>
+      <p><strong>The record (backtests, not this account):</strong> 1989–2025, about <strong>14.4% a year against 11.3%</strong> for the S&amp;P 500, with a worst drawdown of <strong>38.8% against 55.2%</strong>. It passed the 2005–2025 test and the 1989–2004 out-of-sample test, and the 2026-01-02 to 2026-05-19 holdout smoke test.</p>
+      <p><strong>Caveats:</strong> it has bad stretches (2018 and 2022 were both well behind the index), and a short holdout already trailed SPY. SSO's leverage costs money: financing, a 0.91% expense ratio, and daily-reset decay in choppy markets. Monthly switching realizes gains, so taxes matter outside a tax-free account. This paper account probably credits no distributions, which understates the T-bill and SPY legs.</p>
+    </div>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="/app.js" defer></script>
+  <script src="/easygrid.js" defer></script>
+</body>
+</html>

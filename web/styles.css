@@ -141,3 +141,11 @@ tbody tr:hover { background: #1a1f2a; }
 .sleeve-table td, .sleeve-table th { white-space: nowrap; }
 .sleeve-table .num { text-align: right; font-variant-numeric: tabular-nums; }
 .sleeve-table tr.total td { border-top: 2px solid var(--border); background: #1c212c; }
+
+/* EasyGrid tab (easygrid.html) */
+.eg-summary { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: .75rem 1rem; }
+.eg-crit-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; }
+.eg-crit { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: .75rem 1rem; }
+.eg-crit h3 { margin: 0 0 .5rem; font-size: 1rem; }
+.eg-crit p { margin: .3rem 0; }
+.eg-health { color: var(--muted); font-size: .92rem; }
