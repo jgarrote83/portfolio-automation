@@ -17,7 +17,9 @@ def upct(v, d=1):
 
 def render(r: dict) -> str:
     m, v = r["metrics"], r["verdicts"]
-    sub_lab = [f"{a[:7]} to {b[:7]}" for a, b in r["sub_periods"]]
+    sub_lab = [f"{a[:7]} to {b[:7]}" if a <= b else f"window start to {b[:7]} (empty)" for a, b in r["sub_periods"]]
+    if r["sub_periods"][0][0] > r["sub_periods"][0][1]:
+        sub_lab[1] = f"{r['first_trading_day'][:7]} to {r['sub_periods'][1][1][:7]}"
     p = r["prereg"]
     out = ["# Quadrant-tilt backtest: does Core's quadrant framework work?", "",
            f"Run `{r['run_id']}`. Pre-registration `docs/specs/Quadrant_Backtest_Preregistration.md`, first commit `{(p.get('first_commit') or '?')[:12]}`; "
