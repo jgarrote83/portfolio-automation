@@ -89,6 +89,40 @@ def auto_executor_retry(timer: func.TimerRequest) -> None:
 
 
 @app.timer_trigger(
+    # C5 / "EasyGrid" engine (src/c5/handler.py): every 15 min, weekdays. No market hour is
+    # encoded: the engine gates on Alpaca's clock and calendar (C5's OWN account). With
+    # C5_ENABLED != "true" (the Bicep default) it never trades; it only refreshes the dry run.
+    schedule="0 */15 * * * 1-5",
+    arg_name="timer",
+    run_on_startup=False,
+    use_monitor=True,
+)
+def c5_tick(timer: func.TimerRequest) -> None:
+    from c5.handler import tick
+    try:
+        h = tick()
+        logger.info("c5_tick: enabled=%s error=%s actions=%s", h.get("enabled"), h.get("error"), h.get("actions"))
+    except Exception:  # noqa: BLE001
+        logger.exception("c5_tick failed (no trade)")
+
+
+@app.route(
+    route="c5",
+    methods=["GET", "POST"],
+    auth_level=func.AuthLevel.FUNCTION,
+)
+def c5_dry_run(req: func.HttpRequest) -> func.HttpResponse:
+    """C5 dry run: inputs, decision and intended orders for the latest month-end. Never trades, whatever C5_ENABLED says."""
+    from c5.handler import dry_run
+    try:
+        result = dry_run()
+    except Exception as e:  # noqa: BLE001
+        logger.exception("c5 dry run failed")
+        return func.HttpResponse(json.dumps({"error": f"{type(e).__name__}: {e}"}), status_code=500, mimetype="application/json")
+    return func.HttpResponse(json.dumps(result, default=str), status_code=200, mimetype="application/json")
+
+
+@app.timer_trigger(
     # Every 15 min, weekdays. The cron is TIMEZONE-INDEPENDENT by design: market
     # hours are NOT encoded — the engine gates on Alpaca's clock (is_open) inside
     # run_flex_intraday, which is the DST-safe choice. Do NOT add a TZ-local note.

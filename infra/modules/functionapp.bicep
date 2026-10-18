@@ -120,6 +120,16 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         //   after dry-run validation (POST /api/daytrade {"dry_run":true}) AND
         //   resolving consolidated_source (docs/specs/DayTrade_Lab_v0.1.md §2).
         { name: 'DAYTRADE_ENABLED',                          value: 'false' }
+        //   C5 / "EasyGrid" engine (src/c5/, docs/specs/C5_Engine_v1.0.md): trades ONLY its
+        //   own paper account, with ONLY these two keys (Key Vault references; the app's
+        //   managed identity already holds Key Vault Secrets User on the vault, so no
+        //   new role assignment). Core never sees them and C5 never reads Core's.
+        //   C5_ENABLED ships 'false' and only Jorge flips it — HERE, not with
+        //   `az functionapp config appsettings set` alone (an infra deploy replaces
+        //   the app-setting set wholesale and would silently revert a live-only flip).
+        { name: 'C5_ALPACA_KEY_ID',                          value: '@Microsoft.KeyVault(SecretUri=${keyVaultUri}secrets/Alpaca-Easygrid-API-Key/)' }
+        { name: 'C5_ALPACA_SECRET',                          value: '@Microsoft.KeyVault(SecretUri=${keyVaultUri}secrets/Alpaca-Easygrid-API-Secret/)' }
+        { name: 'C5_ENABLED',                                value: 'false' }
         //   Learning Loop reviewer (FOLLOWUPS #13/#32, docs/specs/Learning_Loop_v1.0.md).
         //   Launches on the EXISTING analyzer Foundry deployment — NO new
         //   deployment, no new quota. The Fable 5 upgrade is a config flip
