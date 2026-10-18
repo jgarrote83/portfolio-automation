@@ -88,7 +88,16 @@ def main(argv=None) -> int:
     dl = sub.add_parser("download")
     dl.add_argument("--refresh", action="store_true")
     sub.add_parser("run")
+    rd = sub.add_parser("render", help="re-render the report from a finished run's outputs (no simulation)")
+    rd.add_argument("run_dir")
     args = ap.parse_args(argv)
+    if args.cmd == "render":
+        d = Path(args.run_dir)
+        res = json.loads((d / "results.json").read_text(encoding="utf-8"))
+        res["verification"] = json.loads((d / "verification.json").read_text(encoding="utf-8"))
+        REVIEW.write_text(report.render(res), encoding="utf-8")
+        print("report:", REVIEW)
+        return 0
     if args.cmd == "download":
         D.ensure_cache(refresh=args.refresh, log=print)
         return 0
