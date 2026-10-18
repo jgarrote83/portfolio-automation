@@ -192,6 +192,14 @@ def test_status_is_never_colour_alone_and_mismatch_is_red_with_expected_vs_actua
 
 
 @needs_node
+@pytest.mark.parametrize("line", ["Pause: cancel confirmed", "Pause: order filled before cancel; acting next session"])
+def test_health_strip_shows_the_engine_pause_line(line):
+    hv = EG.health_view({"reconcile": "ok", "control": "paused", "pause": line})
+    assert hv["pause"] == line and line in js("EG.healthHtml(D)", hv)
+    assert "Pause:" not in js("EG.healthHtml(D)", EG.health_view({"reconcile": "ok"}))
+
+
+@needs_node
 def test_control_buttons_only_for_admins():
     assert "data-action" not in js("EG.controlsHtml(D)", {"state": "active", "is_admin": False, "log": []})
     html = js("EG.controlsHtml(D)", {"state": "paused", "is_admin": True, "log": []})

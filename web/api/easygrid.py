@@ -212,7 +212,7 @@ def health_view(health: dict | None) -> dict:
             "kill_switch": h.get("control") not in (None, "active"), "realign_pending": bool(h.get("realign_pending")),
             "positions_match": None if rec in (None, "not_checked") else (rec == "ok" and not mm),
             "holding_mismatch": mm, "reconcile_mismatches": (rec or {}).get("mismatches") if isinstance(rec, dict) else None,
-            "data": h.get("data"), "error": h.get("error")}
+            "data": h.get("data"), "error": h.get("error"), "pause": h.get("pause")}
 
 
 # ================================================================================================ controls

@@ -157,7 +157,8 @@
       `<span><span class="k">Kill switch</span> ${esc(STATE_WORD[h.control] && h.control !== "active" ? STATE_WORD[h.control] : "Off")}</span>` +
       `<span><span class="k">Positions match ledger</span> ${match}</span>` +
       `<span><span class="k">Data</span> ${data}</span>` +
-      (h.error ? `<span class="eg-alert">${ICON_BAD} ${esc(h.error)}</span>` : "");
+      (h.pause ? `<span>${esc(h.pause)}</span>` : "") +
+      (h.error ?`<span class="eg-alert">${ICON_BAD} ${esc(h.error)}</span>` : "");
   }
 
   function controlsHtml(c) {
