@@ -751,22 +751,26 @@ def _sleeve_series(points: list[dict]) -> list[dict]:
     return out
 
 
-def _attach_sleeve_series(payload: dict, cutoff_str: str) -> None:
+def _attach_sleeve_equity(payload: dict, cutoff_str: str) -> list | None:
     """Best-effort attach of the flex sleeve panel data to a performance
     response, mutating ``payload["series"]`` in place. An absent/malformed
     blob must yield the response UNCHANGED (Task D) — the existing chart's
     datasets must never break because this feature isn't populated yet, so
     every failure mode here degrades to simply not adding the fields.
+
+    Returns the RAW equity-series points (every date, unfiltered) when they
+    were read, else None, so the per-ticker trades block can look up the
+    sleeve's equity on a trade's close date without a second blob read.
     """
     payload["sleeve_available"] = False
     payload["sleeve_closed_trade_count_total"] = 0
     try:
         raw = _download_json("flex-ledger", "equity-series.json")
         if not isinstance(raw, list) or not raw:
-            return
+            return None
         pts = [p for p in raw if isinstance(p, dict) and (p.get("date") or "") >= cutoff_str]
         if not pts:
-            return
+            return None
         sleeve_rows = _sleeve_series(pts)
         by_date = {p["date"]: row for p, row in zip(pts, sleeve_rows)}
         for pt in payload.get("series") or []:
@@ -776,10 +780,135 @@ def _attach_sleeve_series(payload: dict, cutoff_str: str) -> None:
                 pt["sleeve_trade_count"] = row["sleeve_trade_count"]
         payload["sleeve_available"] = True
         payload["sleeve_closed_trade_count_total"] = int(raw[-1].get("closed_trades_to_date") or 0)
+        return raw
     except Exception:  # noqa: BLE001
         log.exception("sleeve series attach failed (non-fatal)")
         payload["sleeve_available"] = False
         payload["sleeve_closed_trade_count_total"] = 0
+        return None
+
+
+def _num(v) -> float | None:
+    """A finite float, else None. The blobs are written by our own engine, but this page never trusts a blob to be well-formed."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f and f not in (float("inf"), float("-inf")) else None
+
+
+def _sleeve_trade_row(t: dict, equity_by_date: dict) -> dict | None:
+    """One closed trade from ``flex-ledger/closed-trades.json`` as the page shows it.
+
+    ``pnl_usd`` is the engine's own figure (None, never fabricated, when a fill price was unknown). ``cost_usd`` is the entry price times the
+    shares actually SOLD, the same basis the engine used for ``pnl_usd``, so ``return_pct = pnl_usd / cost_usd`` is a return on the capital that
+    was put at risk in THIS trade. ``contribution_pp`` is the trade's P&L as a share of the sleeve account's equity on its close date.
+    """
+    sym = str(t.get("symbol") or "").strip().upper()
+    if not sym:
+        return None
+    fills = [f for f in (t.get("fills") or []) if isinstance(f, dict)]
+    qty_sold = sum(_num(f.get("qty")) or 0.0 for f in fills)
+    priced = bool(fills) and all(_num(f.get("price")) is not None for f in fills)
+    exit_price = (sum((_num(f["qty"]) or 0.0) * _num(f["price"]) for f in fills) / qty_sold) if priced and qty_sold > 0 else None
+    entry_price = _num(t.get("entry_price"))
+    cost = entry_price * qty_sold if entry_price is not None and qty_sold > 0 else None
+    pnl = _num(t.get("pnl_usd"))
+    ret = pnl / cost * 100.0 if pnl is not None and cost else None
+    equity = equity_by_date.get(t.get("closed_date"))
+    contribution = pnl / equity * 100.0 if pnl is not None and equity else None
+    return {
+        "trade_id": t.get("trade_id"), "symbol": sym, "entry_date": t.get("entry_date"), "closed_date": t.get("closed_date"),
+        "holding_days": t.get("holding_days"), "exit_reason": t.get("exit_reason"),
+        "qty": round(qty_sold, 6) if qty_sold else None,
+        "entry_price": entry_price, "exit_price": round(exit_price, 4) if exit_price is not None else None,
+        "cost_usd": round(cost, 2) if cost is not None else None,
+        "pnl_usd": round(pnl, 2) if pnl is not None else None, "return_pct": round(ret, 3) if ret is not None else None,
+        "contribution_pp": round(contribution, 4) if contribution is not None else None,
+        "pnl_unavailable_reason": t.get("pnl_unavailable_reason"), "r_multiple": _num(t.get("r_multiple")),
+    }
+
+
+def _sleeve_trades(closed: list, ledger: dict, equity_points: list | None = None) -> dict:
+    """The Flex sleeve's trades by ticker: every closed trade, every position still open, and a per-ticker roll-up.
+
+    * ``gain_pct`` (per ticker and in total) = total realised P&L / total cost of the shares sold. It is never an average of trade returns and is
+      never annualised. A trade whose P&L the engine could not determine is COUNTED (``pnl_unavailable``) but adds to neither P&L nor capital.
+    * An open position carries no P&L here: this API holds no live prices (the sleeve's unrealised P&L is inside the chart line, not per ticker).
+    * Deliberately NO win rate, Sharpe or other skill statistic (the sleeve panel's standing rule: the sample is far too small).
+    """
+    eq = {p.get("date"): _num(p.get("total_equity")) for p in (equity_points or []) if isinstance(p, dict) and p.get("date")}
+    trades = [r for r in (_sleeve_trade_row(t, eq) for t in (closed or []) if isinstance(t, dict)) if r]
+    trades.sort(key=lambda r: (r["closed_date"] or "", r["entry_date"] or "", r["symbol"]))
+    open_rows = []
+    for key, row in sorted((ledger or {}).items()):
+        if not isinstance(row, dict):
+            continue
+        qty = _num(row.get("qty_current"))
+        if qty is None:
+            qty = _num(row.get("qty_initial"))
+        open_rows.append({"symbol": str(row.get("symbol") or key).upper(), "entry_date": row.get("entry_date"),
+                          "entry_price": _num(row.get("entry_price")), "qty": qty, "path": row.get("path"), "scaled_out": bool(row.get("scaled_out"))})
+    by: dict[str, dict] = {}
+
+    def slot(sym: str) -> dict:
+        return by.setdefault(sym, {"symbol": sym, "closed_trades": 0, "pnl_usd": None, "capital_usd": None, "gain_pct": None,
+                                   "contribution_pp": None, "pnl_unavailable": 0, "open": False, "last_date": None})
+
+    for r in trades:
+        b = slot(r["symbol"])
+        b["closed_trades"] += 1
+        if r["pnl_usd"] is not None and r["cost_usd"]:
+            b["pnl_usd"] = (b["pnl_usd"] or 0.0) + r["pnl_usd"]
+            b["capital_usd"] = (b["capital_usd"] or 0.0) + r["cost_usd"]
+            if r["contribution_pp"] is not None:
+                b["contribution_pp"] = (b["contribution_pp"] or 0.0) + r["contribution_pp"]
+        else:
+            b["pnl_unavailable"] += 1
+        b["last_date"] = max(filter(None, [b["last_date"], r["closed_date"], r["entry_date"]]), default=None)
+    for o in open_rows:
+        b = slot(o["symbol"])
+        b["open"] = True
+        b["last_date"] = max(filter(None, [b["last_date"], o["entry_date"]]), default=None)
+    for b in by.values():
+        if b["pnl_usd"] is not None:
+            b["pnl_usd"] = round(b["pnl_usd"], 2)
+            b["capital_usd"] = round(b["capital_usd"], 2)
+            b["gain_pct"] = round(b["pnl_usd"] / b["capital_usd"] * 100.0, 3) if b["capital_usd"] else None
+        if b["contribution_pp"] is not None:
+            b["contribution_pp"] = round(b["contribution_pp"], 4)
+    by_symbol = sorted(by.values(), key=lambda b: (b["last_date"] or "", b["symbol"]), reverse=True)
+    priced = [r for r in trades if r["pnl_usd"] is not None and r["cost_usd"]]
+    pnl_total = sum(r["pnl_usd"] for r in priced)
+    capital_total = sum(r["cost_usd"] for r in priced)
+    contrib = [r["contribution_pp"] for r in priced if r["contribution_pp"] is not None]
+    return {"trades": trades, "open": open_rows, "by_symbol": by_symbol,
+            "totals": {"closed_trades": len(trades), "open_positions": len(open_rows),
+                       "pnl_usd": round(pnl_total, 2) if priced else None, "capital_usd": round(capital_total, 2) if priced else None,
+                       "gain_pct": round(pnl_total / capital_total * 100.0, 3) if capital_total else None,
+                       "contribution_pp": round(sum(contrib), 4) if contrib else None, "pnl_unavailable": len(trades) - len(priced)}}
+
+
+def _attach_sleeve_trades(payload: dict, equity_raw: list | None) -> None:
+    """Best-effort attach of ``sleeve_trades`` (the per-ticker view). Independent of the equity series: a missing or malformed blob leaves
+    ``{"available": False}`` and every other field of the response untouched."""
+    payload["sleeve_trades"] = {"available": False}
+    try:
+        closed = _download_json("flex-ledger", "closed-trades.json")
+        ledger = _download_json("flex-ledger", "ledger.json")
+        built = _sleeve_trades(closed if isinstance(closed, list) else [], ledger if isinstance(ledger, dict) else {}, equity_raw)
+        if built["trades"] or built["open"]:
+            payload["sleeve_trades"] = {"available": True, **built}
+    except Exception:  # noqa: BLE001
+        log.exception("sleeve trades attach failed (non-fatal)")
+        payload["sleeve_trades"] = {"available": False}
+
+
+def _attach_sleeve_series(payload: dict, cutoff_str: str) -> None:
+    """Attach the Flex sleeve panel's data: the windowed contribution line (``_attach_sleeve_equity``) and the per-ticker trades view
+    (``_attach_sleeve_trades``). Each degrades independently and neither can raise."""
+    raw = _attach_sleeve_equity(payload, cutoff_str)
+    _attach_sleeve_trades(payload, raw)
 
 
 def _attach_quadrant_accountability(payload: dict, snap: dict | None) -> None:

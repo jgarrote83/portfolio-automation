@@ -27,6 +27,12 @@
   const SLEEVE_COLOR = "#b8348f";
   const SLEEVE_THIN_COLOR = "#5a6070";
   const SLEEVE_MIN_N = 30;
+  // Trade markers on the sleeve chart. Shape carries the outcome as well as colour (triangle up = profit, down =
+  // loss, circle = P&L unavailable, hollow diamond = ticker chosen), so no meaning rests on red-vs-green alone.
+  const MARK_GAIN = "#2bb673";
+  const MARK_LOSS = "#e0524d";
+  const MARK_NEUTRAL = "#8a93a6";
+  const MARK_PANEL = "#161a22";
 
   let chart = null;
   let sleeveChart = null;
@@ -45,6 +51,7 @@
       renderQuadSummary(data);
       renderQuadAccountability(data);
       renderSleeveSummary(data);
+      renderSleeveTrades(data);
       renderLeanLegend(data);
     } catch (e) {
       summaryEl.textContent = `Error: ${e.message}`;
@@ -391,25 +398,99 @@
 
   // Sample-size honesty (required, not optional — Task E): the closed-trade
   // count is always shown, and no Sharpe/win-rate/skill statistic is ever
-  // computed or displayed on this panel at any N.
+  // computed or displayed on this panel at any N. The realised-gain headline
+  // (total P&L / capital deployed, not annualised) is arithmetic, not a skill
+  // statistic, and comes from SleeveTrades.headline.
   function renderSleeveSummary(data) {
     const el = document.getElementById("sleeve-summary");
     if (!el) return;
-    if (!data.sleeve_available) {
+    const st = data.sleeve_trades;
+    const haveTrades = !!(st && st.available);
+    if (!data.sleeve_available && !haveTrades) {
       el.textContent = "No sleeve activity recorded yet.";
       return;
     }
-    const n = data.sleeve_closed_trade_count_total || 0;
-    el.innerHTML = n < SLEEVE_MIN_N
+    const n = data.sleeve_closed_trade_count_total != null && data.sleeve_available
+      ? data.sleeve_closed_trade_count_total
+      : (haveTrades && st.totals ? st.totals.closed_trades || 0 : 0);
+    const gain = window.SleeveTrades ? window.SleeveTrades.headline(st) : "";
+    el.innerHTML = (n < SLEEVE_MIN_N
       ? `<strong>${n} closed trade${n === 1 ? "" : "s"}</strong> since inception — ` +
         `below ${SLEEVE_MIN_N}, not yet a meaningful sample (line shown dashed/greyed).`
-      : `<strong>${n} closed trades</strong> since inception.`;
+      : `<strong>${n} closed trades</strong> since inception.`) + (gain ? ` ${gain}` : "");
   }
+
+  // One dataset of markers on the sleeve line. WHICH markers exist (and their labels) is decided by
+  // SleeveTrades.buildMarkers; only the Chart.js styling lives here. Every option is scriptable and
+  // tolerates ctx.dataIndex === undefined, which is what the legend passes.
+  function markerDataset(kind, list, n) {
+    const byIndex = new Map(list.map(m => [m.index, m]));
+    const data = Array(n).fill(null);
+    list.forEach(m => { data[m.index] = m.y; });
+    const entry = kind === "entry";
+    const outcome = (ctx) => { const m = byIndex.get(ctx.dataIndex); return m ? m.outcome : "unknown"; };
+    const fill = (ctx) => {
+      const o = outcome(ctx);
+      return o === "gain" ? MARK_GAIN : (o === "loss" ? MARK_LOSS : MARK_NEUTRAL);
+    };
+    return {
+      label: entry ? "Entry (ticker chosen)" : "Exit (trade closed)",
+      data, markerList: list, markerKind: kind,
+      order: 0, showLine: false, spanGaps: false,
+      pointRadius: entry ? 6 : 7, pointHoverRadius: entry ? 8 : 9, pointBorderWidth: 2,
+      pointStyle: (ctx) => entry ? "rectRot" : (["gain", "loss"].includes(outcome(ctx)) || byIndex.get(ctx.dataIndex) == null ? "triangle" : "circle"),
+      pointRotation: (ctx) => (!entry && outcome(ctx) === "loss" ? 180 : 0),
+      pointBackgroundColor: (ctx) => entry ? MARK_PANEL : fill(ctx),
+      pointBorderColor: (ctx) => entry ? "#e6e8ee" : fill(ctx),
+      borderColor: entry ? "#e6e8ee" : MARK_NEUTRAL, backgroundColor: entry ? MARK_PANEL : MARK_NEUTRAL,
+    };
+  }
+
+  // Draws each marker's ticker (entries above the point; exits below, with the realised return) in a small
+  // panel-coloured box so it stays readable over the line. Boxes that would collide are nudged vertically.
+  const sleeveTickerLabels = {
+    id: "sleeveTickerLabels",
+    afterDatasetsDraw(chart) {
+      const ST = window.SleeveTrades;
+      if (!ST) return;
+      const { ctx, chartArea } = chart;
+      ctx.save();
+      ctx.font = "600 11px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+      ctx.textBaseline = "middle";
+      ctx.textAlign = "left";  // Chart.js leaves "center" set after drawing its own text
+      const placed = [];
+      chart.data.datasets.forEach((ds, di) => {
+        if (!ds.markerList || !chart.isDatasetVisible(di)) return;
+        const meta = chart.getDatasetMeta(di);
+        const above = ds.markerKind === "entry";
+        ds.markerList.forEach((m) => {
+          const el = meta.data[m.index];
+          if (!el) return;
+          const w = ctx.measureText(m.label).width + 8, h = 15;
+          const x0 = Math.min(Math.max(el.x - w / 2, chartArea.left), Math.max(chartArea.left, chartArea.right - w));
+          let y0 = above ? el.y - 11 - h : el.y + 11;
+          if (y0 < chartArea.top) y0 = el.y + 11;
+          else if (y0 + h > chartArea.bottom) y0 = el.y - 11 - h;
+          const box = { x0, x1: x0 + w, y0, y1: y0 + h };
+          const dy = ST.pickLabelOffset(box, placed, [0, 15, -15, 30, -30]);
+          box.y0 += dy; box.y1 += dy;
+          placed.push(box);
+          ctx.fillStyle = "rgba(22,26,34,.88)";
+          ctx.fillRect(box.x0, box.y0, w, h);
+          ctx.fillStyle = above ? "#e6e8ee" : (m.outcome === "gain" ? MARK_GAIN : (m.outcome === "loss" ? MARK_LOSS : "#c3c8d4"));
+          ctx.fillText(m.label, box.x0 + 4, box.y0 + h / 2 + 0.5);
+        });
+      });
+      ctx.restore();
+    },
+  };
 
   // Separate panel, separate y-axis unit (percentage points of equity
   // contributed, not a buy-and-hold index) — shares x-axis labels, the
   // window selector, and the regimeBands plugin/regimeKeys with the main
   // chart above (renderChart must run first each load() to set regimeKeys).
+  // Markers (session 2026-10-17): the ticker chosen at its entry date and each
+  // closed trade at its close date, sitting ON the contribution line.
   function renderSleeveChart(data) {
     const canvas = document.getElementById("sleeveChart");
     if (sleeveChart) { sleeveChart.destroy(); sleeveChart = null; }
@@ -420,6 +501,12 @@
     const n = data.sleeve_closed_trade_count_total || 0;
     const thin = n < SLEEVE_MIN_N;
     const sleeveData = series.map(p => p.sleeve_contribution_pp != null ? p.sleeve_contribution_pp : null);
+    const markers = window.SleeveTrades
+      ? window.SleeveTrades.buildMarkers(series, data.sleeve_trades)
+      : { entries: [], exits: [] };
+    const markerSets = [];
+    if (markers.entries.length) markerSets.push(markerDataset("entry", markers.entries, labels.length));
+    if (markers.exits.length) markerSets.push(markerDataset("exit", markers.exits, labels.length));
 
     const cfg = {
       type: "line",
@@ -433,21 +520,28 @@
           borderWidth: 2,
           borderDash: thin ? [5, 4] : [],
           tension: 0.15, pointRadius: 0, pointHoverRadius: 4, spanGaps: true,
-        }],
+          order: 1,
+        }, ...markerSets],
       },
       options: {
         responsive: true, maintainAspectRatio: false,
         interaction: { mode: "index", intersect: false },
         plugins: {
-          legend: { labels: { color: thin ? SLEEVE_THIN_COLOR : "#e6e8ee" } },
+          legend: { labels: { color: thin ? SLEEVE_THIN_COLOR : "#e6e8ee", usePointStyle: true } },
           tooltip: {
+            filter: (item) => item.raw != null,
             callbacks: {
               label: (ctx) => {
+                const ds = ctx.dataset;
+                if (ds.markerList && window.SleeveTrades) {
+                  const m = ds.markerList.find(x => x.index === ctx.dataIndex);
+                  return m ? window.SleeveTrades.tooltipLines(m) : "";
+                }
                 const v = ctx.parsed.y;
                 const pt = series[ctx.dataIndex];
                 const tc = pt && pt.sleeve_trade_count != null ? pt.sleeve_trade_count : null;
                 const pct = v == null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(3)}pp`;
-                return tc != null ? `${ctx.dataset.label}: ${pct} (${tc} trades)` : `${ctx.dataset.label}: ${pct}`;
+                return tc != null ? `${ds.label}: ${pct} (${tc} trades)` : `${ds.label}: ${pct}`;
               },
             },
           },
@@ -461,9 +555,28 @@
           },
         },
       },
-      plugins: [regimeBands],
+      plugins: [regimeBands, sleeveTickerLabels],
     };
     sleeveChart = new Chart(canvas, cfg);
+  }
+
+  // The Flex section's tables (since inception; independent of the window selector).
+  function renderSleeveTrades(data) {
+    const byEl = document.getElementById("sleeve-by-ticker");
+    const logEl = document.getElementById("sleeve-trade-log");
+    const wrap = document.getElementById("sleeve-log-wrap");
+    if (!byEl || !logEl) return;
+    const ST = window.SleeveTrades;
+    const st = data.sleeve_trades;
+    if (!ST || !st || !st.available) {
+      byEl.innerHTML = `<p class="muted">No flex trades recorded yet.</p>`;
+      logEl.innerHTML = "";
+      if (wrap) wrap.style.display = "none";
+      return;
+    }
+    if (wrap) wrap.style.display = "";
+    byEl.innerHTML = ST.byTickerHtml(st);
+    logEl.innerHTML = ST.tradeLogHtml(st);
   }
 
   // Static legend for the leanRail track (Task B4) — shown whenever the

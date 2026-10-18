@@ -41,8 +41,18 @@
 
     <h2 style="margin-top:1.5rem">Flex catalyst sleeve</h2>
     <p class="muted" style="margin-top:-.5rem">Contribution to total equity from the intraday catalyst sleeve, cumulative from the window start — a separate panel because this is NOT a buy-and-hold index like the chart above (the sleeve is intermittently deployed and flat much of the time). <span id="sleeve-summary"></span></p>
-    <div class="chart-wrap" style="height:220px">
+    <div class="chart-wrap" style="height:280px">
       <canvas id="sleeveChart" height="80"></canvas>
+    </div>
+
+    <div id="sleeve-trades" class="sleeve-block">
+      <h3>By ticker <span class="muted">&mdash; since inception, independent of the window selector</span></h3>
+      <div id="sleeve-by-ticker"></div>
+      <div id="sleeve-log-wrap">
+        <h3>Trades</h3>
+        <div id="sleeve-trade-log"></div>
+      </div>
+      <p class="muted" id="sleeve-trades-note">Chart markers: &#9671; a ticker was chosen (entered), &#9650; a trade closed in profit, &#9660; a trade closed at a loss, &#9679; closed with P&amp;L unavailable. Gain % = realised P&amp;L &divide; cost of the shares sold, summed over a ticker's closed trades (not an average of trade returns, not annualised). Contribution = each trade's P&amp;L as a share of the account's equity on its close date. Open positions show no P&amp;L here &mdash; their unrealised P&amp;L is inside the line above. No win rate or Sharpe is shown at any sample size.</p>
     </div>
 
     <h2 style="margin-top:2rem">Holdings valuation</h2>
@@ -64,6 +74,7 @@
   </main>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script src="/app.js" defer></script>
+  <script src="/sleeve_trades.js" defer></script>
   <script src="/performance.js" defer></script>
 </body>
 </html>

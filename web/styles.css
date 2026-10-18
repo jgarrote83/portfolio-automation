@@ -134,3 +134,10 @@ tbody tr:hover { background: #1a1f2a; }
 .lean-legend .swatch-rail.unknown {
   background: rgba(25, 158, 112, .20); border: none;
 }
+
+/* Flex sleeve per-ticker view (performance.html) */
+.sleeve-block h3 { margin: 1.25rem 0 .4rem; font-size: 1rem; }
+.table-scroll { overflow-x: auto; }
+.sleeve-table td, .sleeve-table th { white-space: nowrap; }
+.sleeve-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.sleeve-table tr.total td { border-top: 2px solid var(--border); background: #1c212c; }
