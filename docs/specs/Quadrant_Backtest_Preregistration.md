@@ -58,3 +58,28 @@ Each is listed so it can be challenged before the first real run.
 12. **Hit table.** For each quadrant, its basket's standalone equal-weight index (rebalanced at month-ends, composition events as in item 7, no cost) is compared on the days that quadrant was in force for Q-TILT against the days it was not: annualised mean daily return, and the cumulative return over each set.
 13. **Verifier.** A separate post-run program, importing nothing from the backtest modules, re-derives from the raw cached files **12 random quadrant switches** (seed 11): the switch date from the cached replay, the execution date and the new basket; and **12 random calendar months** (seed 11): Q-TILT's and Q-ALL's monthly returns. Exact for dates and baskets, 1e-9 relative for returns.
 14. **Only the exact pre-registered run yields verdicts:** this window rule, these baskets and proxies (Appendix A), these portfolios, and an unmodified pre-registration. Outputs go to `reports/quadrant_backtest/<run-id>/` (gitignored). Report and stop: no tuning, no new variants.
+
+## Appendix A — basket history and proxies (generated mechanically by section 2, item 6; committed before any return was computed)
+
+First dates are each symbol's first adjusted close in `data/reference/quadrant_backtest/` (requested from 2009-01-01, so "2009-01-02" means "older than the request"). Only first dates were looked at; no return was computed.
+
+| Member | Baskets | First date | Proxy until the member exists | Reason (asset class) |
+| --- | --- | --- | --- | --- |
+| SPY | Q1 | 2009-01-02 | none needed | predates the window |
+| QQQ | Q1 | 2009-01-02 | none needed | predates the window |
+| SMH | Q1 | 2009-01-02 | none needed | predates the window (the SOXX semiconductor fallback is not used) |
+| XLI | Q2 | 2009-01-02 | none needed | predates the window |
+| XLF | Q2 | 2009-01-02 | none needed | predates the window |
+| COWZ | Q2, Q3 | 2016-12-22 | **IWD** (first date 2009-01-02) until 2016-12-22 | US value / cash-flow factor equity |
+| VDE | Q2, Q3 | 2009-01-02 | none needed | predates the window |
+| PDBC | Q2, Q3 | 2014-11-07 | **DBC** (2009-01-02) until 2014-11-07 | broad commodities |
+| VTIP | Q2, Q3 | 2012-10-16 | **STIP** (2010-12-03) until 2012-10-16 | short-maturity TIPS |
+| GLD | Q3, Q4 | 2009-01-02 | none needed | predates the window |
+| XLP | Q3, Q4 | 2009-01-02 | none needed | predates the window |
+| XLV | Q3, Q4 | 2009-01-02 | none needed | predates the window |
+| KMLM | Q3, Q4 | 2020-12-02 | **dropped until 2020-12-02** | managed futures: no defensible ETF proxy; the rest of the basket is reweighted |
+| TLT | Q4 | 2009-01-02 | none needed | predates the window |
+| IEF | Q4 | 2009-01-02 | none needed | predates the window |
+| USMV | Q4 | 2011-10-20 | **SPLV** (2011-05-05) until 2011-10-20 | US minimum-volatility equity |
+
+Every proxy's first date precedes 2011-07-01, the earliest possible window start, so no member needs to be dropped for lack of a proxy except KMLM.
