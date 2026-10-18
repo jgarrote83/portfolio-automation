@@ -37,7 +37,8 @@ Every session's open and close come from Alpaca's `GET /v2/calendar`, which carr
    `c5-state/<yyyymm>.json` with the inputs, the decision and the target.
 3. **Execution** on the next session, once the market is open and before the cutoff:
    - **Market-on-close orders** (`time_in_force: cls`), whole shares, **sells first, then buys**, with client ids
-     `C5-<yyyymm>-<side>-<symbol>`. Ids already present at the broker are skipped, so the step is idempotent.
+     `C5-<session yyyymmdd>-<side>-<symbol>`, keyed on the session the orders execute in. Ids already present at the broker are skipped,
+     so the step is idempotent.
    - **Cutoff:** per Alpaca's "Orders at Alpaca" page, *"CLS orders submitted after 3:50pm but before 7:00pm ET will be rejected."*
      The page does not cover half-days, so the engine applies the same 10-minute lead to each session's own close (12:50 on a 13:00
      half-day).
@@ -69,6 +70,15 @@ market is open and before the cutoff, otherwise at the next session's.
 - **Re-align:** `c5-state/realign-request.json` is a one-shot request. While `active`, it is honoured at the next close: the engine
   aligns to the latest completed month-end decision exactly as on first enable, supersedes any not-yet-executed monthly decision, then
   clears the request. While paused it is ignored. Resuming from the portal writes `active` **and** a re-align request.
+- **In-flight orders (no duplicate buy; three independent layers):**
+  - a re-align request stays **pending** while any decision is `submitted` or this engine has an open order at Alpaca, and is honoured
+    only after that close has been verified (until the fill, the positions it would plan from are stale);
+  - the engine never sends a buy for a symbol on which it already has an open order;
+  - client ids are keyed on the execution session, so Alpaca itself rejects a same-day duplicate; that rejection is recorded as
+    `already_submitted`, never as an error, and never retried.
+- **Pausing with orders in flight:** a change to `paused` or `paused_to_tbills` cancels this engine's open MOC orders while Alpaca
+  still allows it (before the cutoff) and marks that decision `cancelled`; `paused_to_tbills` then places its own BIL orders. After the
+  cutoff the orders can no longer be cancelled and fill at the close; the engine logs that, and the new state acts from the next session.
 - **Change log:** the engine appends every control change (who, when, why) and every action it takes on one to
   `c5-state/kill-switch-log.jsonl`, exactly once, within one tick.
 - **Holding check:** on every tick when no order set is in flight, the account must hold the target of the last executed state.

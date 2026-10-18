@@ -1,21 +1,38 @@
 """C5 orders, reconciliation and verification (pure).
 
-Orders are market-on-close (`time_in_force: cls`), whole shares, sells first then buys, with idempotent client order ids
-`C5-<yyyymm>-<side>-<symbol>`. The target gets 100% of equity less a small cash buffer (`CASH_BUFFER_PCT`, because an MOC order fills
+Orders are market-on-close (`time_in_force: cls`), whole shares, sells first then buys, with client order ids
+`C5-<session yyyymmdd>-<side>-<symbol>`. The id is keyed on the SESSION the order executes in, not on the decision that produced it, so
+two decisions acting on the same session (first enable plus a re-align, a pause and a resume) produce the same id and Alpaca itself
+rejects the second as a duplicate. The target gets 100% of equity less a small cash buffer (`CASH_BUFFER_PCT`, because an MOC order fills
 at a closing price not known at submission); whatever whole shares leave over stays as cash.
 """
 from __future__ import annotations
 
 import math
+from datetime import date
 
 CASH_BUFFER_PCT = 0.5
+ID_PREFIX = "C5-"
+OPEN_STATUSES = ("new", "accepted", "pending_new", "partially_filled", "held", "accepted_for_bidding", "pending_replace")
 
 
-def client_id(month: str, side: str, symbol: str) -> str:
-    return f"C5-{month}-{side}-{symbol}"
+def session_tag(day: date) -> str:
+    return day.strftime("%Y%m%d")
 
 
-def plan(positions: dict[str, float], target: str, equity: float, price: float, month: str, buffer_pct: float = CASH_BUFFER_PCT) -> list[dict]:
+def client_id(tag: str, side: str, symbol: str) -> str:
+    return f"{ID_PREFIX}{tag}-{side}-{symbol}"
+
+
+def is_engine_order(order: dict) -> bool:
+    return str(order.get("client_order_id") or "").startswith(ID_PREFIX)
+
+
+def is_open(order: dict) -> bool:
+    return str(order.get("status") or "").lower() in OPEN_STATUSES
+
+
+def plan(positions: dict[str, float], target: str, equity: float, price: float, tag: str, buffer_pct: float = CASH_BUFFER_PCT) -> list[dict]:
     """Orders to move the account to 100% `target`: every other holding sold in full, the target bought (or trimmed) to
     floor(equity x (1 - buffer) / price) shares. Sells are listed before buys."""
     if equity <= 0 or price <= 0:
@@ -33,7 +50,7 @@ def plan(positions: dict[str, float], target: str, equity: float, price: float, 
         sells.append({"symbol": target, "side": "sell", "qty": have - want})
     out = sells + buys
     for o in out:
-        o.update({"type": "market", "time_in_force": "cls", "client_order_id": client_id(month, o["side"], o["symbol"])})
+        o.update({"type": "market", "time_in_force": "cls", "client_order_id": client_id(tag, o["side"], o["symbol"])})
     return out
 
 

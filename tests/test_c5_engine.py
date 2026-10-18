@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import requests
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -112,13 +113,14 @@ def test_preview_is_labelled_as_a_preview():
 
 # --- orders ---------------------------------------------------------------------------------------------------------------
 
-def test_plan_sells_first_whole_shares_and_idempotent_ids():
-    o = ords.plan({"SPY": 150.0, "BIL": 3.0}, "SSO", 100_000.0, 99.0, "202606")
+def test_plan_sells_first_whole_shares_and_session_keyed_ids():
+    tag = ords.session_tag(date(2026, 7, 6))
+    o = ords.plan({"SPY": 150.0, "BIL": 3.0}, "SSO", 100_000.0, 99.0, tag)
     assert [x["side"] for x in o] == ["sell", "sell", "buy"]
     assert o[-1] == {"symbol": "SSO", "side": "buy", "qty": int(100_000 * 0.995 // 99), "type": "market", "time_in_force": "cls",
-                     "client_order_id": "C5-202606-buy-SSO"}
-    assert {x["client_order_id"] for x in o} == {"C5-202606-sell-BIL", "C5-202606-sell-SPY", "C5-202606-buy-SSO"}
-    assert ords.plan({"SSO": 1005.0}, "SSO", 100_000.0, 99.0, "202606") == []      # already at target: no order
+                     "client_order_id": "C5-20260706-buy-SSO"}
+    assert {x["client_order_id"] for x in o} == {"C5-20260706-sell-BIL", "C5-20260706-sell-SPY", "C5-20260706-buy-SSO"}
+    assert ords.plan({"SSO": 1005.0}, "SSO", 100_000.0, 99.0, tag) == []      # already at target: no order
 
 
 def test_reconcile_and_verify():
@@ -130,10 +132,18 @@ def test_reconcile_and_verify():
 
 # --- the engine on a fake C5 account --------------------------------------------------------------------------------------
 
+def duplicate_id_error():
+    r = requests.Response()
+    r.status_code = 422
+    r._content = b'{"code":40010001,"message":"client_order_id must be unique"}'
+    return requests.HTTPError("422 Client Error", response=r)
+
+
 class FakeAlpaca:
     def __init__(self, positions=None, equity=100_000.0, fail=None):
         self.positions, self.equity, self.fail = dict(positions or {}), equity, fail or set()
         self.submitted, self.orders, self.clock_open = [], [], True
+        self.cancelled, self.attempts, self.known_ids = [], [], set()   # known_ids: ids Alpaca has but list_orders does not return
 
     def get_clock(self):
         if "clock" in self.fail:
@@ -161,10 +171,19 @@ class FakeAlpaca:
         return [{"symbol": s, "qty": str(q)} for s, q in self.positions.items()]
 
     def list_orders(self, status="open"):
-        return list(self.orders)
+        return [o for o in self.orders if ords.is_open(o)] if status == "open" else list(self.orders)
+
+    def cancel_order(self, order_id):
+        self.cancelled.append(order_id)
+        for o in self.orders:
+            if o["id"] == order_id:
+                o["status"] = "canceled"
 
     def submit_order(self, symbol, qty, side, order_type, time_in_force, client_order_id):
         assert order_type == "market" and time_in_force == "cls"
+        self.attempts.append(client_order_id)
+        if client_order_id in self.known_ids or any(o["client_order_id"] == client_order_id for o in self.orders):
+            raise duplicate_id_error()                                  # what Alpaca does with a reused client_order_id
         self.submitted.append((side, symbol, qty, client_order_id))
         o = {"id": f"id-{len(self.orders)}", "client_order_id": client_order_id, "status": "accepted", "symbol": symbol}
         self.orders.append(o)
@@ -224,7 +243,7 @@ def test_month_end_decision_then_next_session_execution_sells_first():
     H.tick(deps)
     assert st["decision"]["target"] == "SSO"                           # rising SPY, flat credit (<= its average) -> both healthy
     assert [(x[0], x[1]) for x in a.submitted] == [("sell", "SPY"), ("buy", "SSO")]       # sells first
-    assert [x[3] for x in a.submitted] == ["C5-202607-sell-SPY", "C5-202607-buy-SSO"]
+    assert [x[3] for x in a.submitted] == ["C5-20260803-sell-SPY", "C5-20260803-buy-SSO"]       # keyed on the execution session
 
 
 @pytest.mark.parametrize("fail", ["clock", "calendar", "bars", "fred"])
@@ -336,7 +355,7 @@ def test_paused_to_tbills_sells_to_bil_at_the_next_close_then_stops():
     deps, store = make(a, at(date(2026, 7, 7), 10, 5), store=store)            # within one tick of the change
     H.tick(deps)
     assert [(x[0], x[1]) for x in a.submitted] == [("sell", "SSO"), ("buy", "BIL")]          # sells first
-    assert all(x[3].startswith("C5-PT202607071000-") for x in a.submitted)
+    assert all(x[3].startswith("C5-20260707-") for x in a.submitted)
     a.positions = {"BIL": float(a.submitted[1][2])}
     deps.now = lambda: at(date(2026, 7, 7), 16, 30)
     H.tick(deps)
@@ -419,3 +438,119 @@ def test_disabled_dry_run_reflects_a_pause_within_one_tick():
     H.tick(deps)
     dr = store[("c5-state", "dry-run.json")]
     assert dr["control"] == "paused" and dr["intended_orders"] == [] and a.submitted == []
+
+
+# --- in-flight orders: re-align, duplicate ids, pause cancels (fix/c5-realign-inflight) ------------------------------------
+
+MON = date(2026, 7, 6)                                                          # a full session; MOC cutoff 15:50
+
+
+def first_enabled(now=None):
+    """First enable at 10:00 on MON: one MOC buy submitted and resting at Alpaca."""
+    a = FakeAlpaca(positions={})
+    deps, store = make(a, now or at(MON, 10, 0))
+    H.tick(deps)
+    assert len(a.submitted) == 1 and a.submitted[0][3] == "C5-20260706-buy-SSO"
+    return a, deps, store
+
+
+def fill(a, i=0):
+    o = a.orders[i]
+    a.positions[o["symbol"]] = float(a.submitted[i][2])
+    o.update({"status": "filled", "filled_avg_price": "60.0", "filled_qty": str(a.submitted[i][2])})
+
+
+def test_realign_arriving_mid_window_places_no_second_order():
+    a, deps, store = first_enabled()
+    store[("c5-state", "kill-switch.json")] = control("active", at_="2026-07-06T15:40:00-04:00", reason="resume")
+    store[("c5-state", "realign-request.json")] = {"requested_at": "2026-07-06T15:40:00-04:00", "requested_by": "jorge", "reason": "resume"}
+    deps.now = lambda: at(MON, 15, 45)                                          # after submit, before the cutoff and the close
+    h = H.tick(deps)
+    assert len(a.submitted) == 1 and a.attempts == ["C5-20260706-buy-SSO"]       # no second order, not even an attempt
+    assert any("re-align deferred" in x for x in h["actions"]) and h["realign_pending"] is True
+    assert not store[("c5-state", "realign-request.json")].get("cleared_at")
+    fill(a)
+    deps.now = lambda: at(MON, 16, 30)                                          # the settled close verifies the first set ...
+    H.tick(deps)
+    assert store[("c5-state", "202606.json")]["status"] == "executed"
+    assert not store[("c5-state", "realign-request.json")].get("cleared_at")    # ... and the re-align still waits for the next tick
+    deps.now = lambda: at(MON, 16, 45)
+    H.tick(deps)
+    ra = [v for (c, n), v in store.items() if c == "c5-state" and n.startswith("RA")][0]
+    assert ra["execution_date"] == "2026-07-07" and store[("c5-state", "realign-request.json")]["cleared_at"]
+    deps.now = lambda: at(date(2026, 7, 7), 10, 0)                              # planned from the FILLED position: a trim, never a re-buy
+    H.tick(deps)
+    assert len(a.submitted) <= 2 and all(q < 20 for (_, _, q, _) in a.submitted[1:])
+
+
+def test_first_enable_plus_pending_realign_on_the_same_tick_buys_exactly_once():
+    store = {("c5-state", "kill-switch.json"): control("active", at_="2026-07-06T09:40:00-04:00"),
+             ("c5-state", "realign-request.json"): {"requested_at": "2026-07-06T09:40:00-04:00", "requested_by": "jorge", "reason": "resume"}}
+    a = FakeAlpaca(positions={})
+    deps, store = make(a, at(MON, 10, 0), store=store)
+    H.tick(deps)
+    assert [(s, sym, cid) for (s, sym, _, cid) in a.submitted] == [("buy", "SSO", "C5-20260706-buy-SSO")]
+    assert store[("c5-state", "202606.json")]["status"] == "superseded"
+    deps.now = lambda: at(MON, 10, 15)
+    H.tick(deps)
+    assert len(a.submitted) == 1
+
+
+def test_a_duplicate_id_rejection_is_recorded_as_already_submitted(caplog):
+    a = FakeAlpaca(positions={})
+    a.known_ids = {"C5-20260706-buy-SSO"}                                       # Alpaca has it; the order list did not show it
+    deps, store = make(a, at(MON, 10, 0))
+    with caplog.at_level("WARNING", logger="c5"):
+        h = H.tick(deps)
+    st = store[("c5-state", "202606.json")]
+    assert a.attempts == ["C5-20260706-buy-SSO"] and a.submitted == []
+    assert st["status"] == "submitted" and st["orders"][0]["status"] == "already_submitted" and h["error"] is None
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    deps.now = lambda: at(MON, 10, 15)
+    H.tick(deps)
+    assert a.attempts == ["C5-20260706-buy-SSO"]                                # never retried
+
+
+def test_submit_never_buys_a_symbol_with_an_open_engine_order():
+    a = FakeAlpaca(positions={})
+    a.orders.append({"id": "old", "client_order_id": "C5-20260702-buy-SSO", "status": "accepted", "symbol": "SSO"})
+    deps, store = make(a, at(MON, 10, 0))
+    H.tick(deps)
+    assert a.submitted == [] and store[("c5-state", "202606.json")]["orders"][0]["status"] == "skipped_open_order"
+
+
+@pytest.mark.parametrize("state", ["paused", "paused_to_tbills"])
+def test_a_pause_before_the_cutoff_cancels_the_open_buy(state):
+    a, deps, store = first_enabled()
+    store[("c5-state", "kill-switch.json")] = control(state, at_="2026-07-06T11:00:00-04:00")
+    deps.now = lambda: at(MON, 11, 5)
+    h = H.tick(deps)
+    assert a.cancelled == ["id-0"] and a.orders[0]["status"] == "canceled"
+    st = store[("c5-state", "202606.json")]
+    assert st["status"] == "cancelled" and st["cancelled_because"] == state and st["cancelled_orders"] == ["C5-20260706-buy-SSO"]
+    assert any("cancelled 1 open MOC orders" in x for x in h["actions"])
+    if state == "paused":
+        assert len(a.submitted) == 1                                            # nothing new
+    else:
+        assert a.submitted[1][:2] == ("buy", "BIL") and a.submitted[1][3] == "C5-20260706-buy-BIL"   # straight to T-bills, not SSO+BIL
+    deps.now = lambda: at(MON, 16, 30)
+    H.tick(deps)
+    assert store[("c5-state", "202606.json")]["status"] == "cancelled"
+
+
+@pytest.mark.parametrize("state", ["paused", "paused_to_tbills"])
+def test_a_pause_after_the_cutoff_does_not_cancel_and_acts_next_session(state):
+    a, deps, store = first_enabled()
+    store[("c5-state", "kill-switch.json")] = control(state, at_="2026-07-06T15:52:00-04:00")
+    deps.now = lambda: at(MON, 15, 55)
+    h = H.tick(deps)
+    assert a.cancelled == [] and len(a.submitted) == 1 and store[("c5-state", "202606.json")]["status"] == "submitted"
+    assert any("after the MOC cutoff" in x for x in h["actions"])
+    assert any(e.get("action") == f"{state} after the MOC cutoff" for e in store[("c5-state", "kill-switch-log.jsonl")])
+    if state == "paused_to_tbills":
+        pt = [v for (c, n), v in store.items() if c == "c5-state" and n.startswith("PT")][0]
+        assert pt["execution_date"] == "2026-07-07" and pt["status"] == "decided"
+    fill(a)
+    deps.now = lambda: at(MON, 16, 30)                                          # the order filled at the close: verified normally
+    H.tick(deps)
+    assert store[("c5-state", "202606.json")]["status"] == "executed"

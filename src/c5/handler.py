@@ -19,6 +19,15 @@ Control states (`kill-switch.json` `{"state", "changed_at", "changed_by", "reaso
 orders and keeps the holding; `paused_to_tbills` sells to BIL at the next close (once), then places nothing. A re-align request
 (`realign-request.json`) is honoured at the next close only while `active`: it aligns to the latest month-end decision exactly as on first
 enable, then is cleared. Resuming from the portal writes `active` AND a re-align request.
+
+IN-FLIGHT ORDERS (three independent layers; each alone prevents a duplicate buy):
+  (a) a re-align request stays PENDING while any decision is `submitted` or this engine has an open order at Alpaca; it is honoured
+      only after that close has been verified, since until the fill the positions it would plan from are stale;
+  (b) `_submit` never sends a buy for a symbol that already has an open order from this engine;
+  (c) client ids are keyed on the execution SESSION (`C5-<yyyymmdd>-<side>-<symbol>`), so Alpaca rejects a same-day duplicate; that
+      rejection is recorded as `already_submitted`, never as an error.
+A change to `paused` / `paused_to_tbills` cancels this engine's open MOC orders while Alpaca still allows it (before the MOC cutoff) and
+marks that decision `cancelled`; after the cutoff the orders fill at the close, which is logged, and the pause acts from the next session.
 First enable (no state at all, `active`): decide for the most recent completed month-end and execute at the next close.
 Fail closed: any missing input -> no trade, an ERROR log, holdings kept. `C5_ENABLED` != "true" -> no trading at all; the tick only
 refreshes the dry run (which shows the control state's effect), the preview, the control log and the health record.
@@ -42,7 +51,7 @@ CONTROL, REALIGN, CONTROL_LOG, ALERTS = "kill-switch.json", "realign-request.jso
 CONTROL_STATES = ("active", "paused", "paused_to_tbills")
 FRED_OBS_URL = "https://api.stlouisfed.org/fred/series/observations"
 HISTORY_DAYS = 420                                # covers 10 month-ends and 126 sessions with room
-TERMINAL = ("executed", "verify_failed", "superseded")
+TERMINAL = ("executed", "verify_failed", "superseded", "cancelled")
 
 
 @dataclass
@@ -259,6 +268,7 @@ def tick(d: Deps | None = None) -> dict:
             logger.error("C5 reconcile mismatch: %s", mism)
         states = _states(d)
         monthly = [s for s in states if s.get("kind", "monthly") == "monthly"]
+        open_orders = _open_engine_orders(d)
 
         # first enable (only while active) / routine month-end decision (recorded in every control state)
         if not states and cstate == "active":
@@ -277,6 +287,8 @@ def tick(d: Deps | None = None) -> dict:
             health["actions"].append(f"decision for {today.day}: {st['decision']['target']}" + ("" if cstate == "active" else f" (recorded; {cstate}: not executed)"))
 
         # control actions
+        if cstate in ("paused", "paused_to_tbills"):
+            open_orders = _cancel_inflight(d, states, cstate, open_orders, today, now, health)
         if cstate == "paused_to_tbills":
             tag = "PT" + _compact(control.get("changed_at"))
             if not any(s["month"] == tag for s in states):
@@ -291,6 +303,8 @@ def tick(d: Deps | None = None) -> dict:
                 _log(d, {"key": f"engine:{tag}", "logged_at": now.isoformat(), "kind": "engine", "action": "pause_to_tbills scheduled",
                          "execution_date": st["execution_date"], "status": st["status"]})
                 health["actions"].append(f"pause to T-bills: {st['status']} for {st['execution_date']}")
+        elif realign and cstate == "active" and (any(s.get("status") == "submitted" for s in states) or open_orders):
+            health["actions"].append("re-align deferred: an order set is in flight; honoured after that close is verified")
         elif realign and cstate == "active":
             me = sch.last_completed_month_end(ss, now)
             if me is None:
@@ -319,14 +333,15 @@ def tick(d: Deps | None = None) -> dict:
         if (pending and pending["status"] == "decided" and today and clock.get("is_open") and today.open <= now < sch.moc_cutoff(today)
                 and today.day >= date.fromisoformat(pending["execution_date"])):
             if _may_execute(pending, cstate):
-                _submit(d, pending, positions, raws, today, health)
+                _submit(d, pending, positions, raws, today, open_orders, health)
             else:
                 health["actions"].append(f"{cstate}: no orders")
 
-        # after the settled close
+        # after the settled close: verify every submitted order set whose session has closed (not only the newest decision, so a
+        # submitted set is never stranded behind a later one, and a missed evening is caught up on the next settled close)
         if today and sch.settled(today, now):
-            if pending and pending["status"] == "submitted" and pending.get("submitted_on") == today.day.isoformat():
-                _verify(d, pending, states, raws, closes, today, health)
+            for s in [x for x in states if x.get("status") == "submitted" and (x.get("submitted_on") or "9") <= today.day.isoformat()]:
+                _verify(d, s, states, raws, closes, date.fromisoformat(s["submitted_on"]), health)
             _after_close(d, today, ss, closes, baa, health)
         _holding_check(d, states, positions_of(d) if (today and sch.settled(today, now)) else positions, now, health)
     except dec.MissingInput as e:
@@ -364,20 +379,85 @@ def _holding_check(d: Deps, states: list[dict], positions: dict, now: datetime, 
             d.write(STATE, ALERTS, {**alerts, "last_holding_mismatch": now.date().isoformat()})
 
 
-def _submit(d: Deps, st: dict, positions: dict, raws: dict, today: sch.Session, health: dict) -> None:
+def _open_engine_orders(d: Deps) -> list[dict]:
+    """This engine's OPEN orders at Alpaca (client id `C5-...`). Unreadable -> MissingInput: no order decision is made blind."""
+    try:
+        return [o for o in d.alpaca.list_orders(status="open") if ords.is_engine_order(o) and ords.is_open(o)]
+    except Exception as e:  # noqa: BLE001
+        raise dec.MissingInput(f"Alpaca open orders unreadable: {type(e).__name__}") from None
+
+
+def _is_duplicate_id(e: Exception) -> bool:
+    """Alpaca's rejection of a reused client_order_id (HTTP 422 "client_order_id must be unique")."""
+    r = getattr(e, "response", None)
+    return r is not None and getattr(r, "status_code", None) in (409, 422) and "client_order_id" in (getattr(r, "text", "") or "").lower()
+
+
+def _cancel_inflight(d: Deps, states: list[dict], cstate: str, open_orders: list[dict], today: sch.Session | None, now: datetime,
+                     health: dict) -> list[dict]:
+    """Paused / paused to T-bills: cancel the open MOC orders of every submitted decision the new state may not execute (the
+    to-T-bills set itself is kept), while Alpaca still allows it. Returns the open orders still left."""
+    inflight = [s for s in states if s.get("status") == "submitted" and not _may_execute(s, cstate)]
+    if not inflight:
+        return open_orders
+    if not (today and now < sch.moc_cutoff(today)):
+        key = f"engine:after-cutoff:{cstate}:{now.date().isoformat()}"
+        if key not in {e.get("key") for e in (d.read_lines(STATE, CONTROL_LOG) if d.read_lines else [])}:
+            _log(d, {"key": key, "logged_at": now.isoformat(), "kind": "engine", "action": f"{cstate} after the MOC cutoff",
+                     "note": "today's orders can no longer be cancelled and will fill at the close; the new state acts from the next session"})
+        logger.warning("C5 %s after the MOC cutoff: %s will fill at the close; acting from the next session", cstate,
+                       [s["month"] for s in inflight])
+        health["actions"].append(f"{cstate} after the MOC cutoff: today's orders will fill at the close; acting from the next session")
+        return open_orders
+    by_cid = {o.get("client_order_id"): o for o in open_orders}
+    gone: set[str] = set()
+    for s in inflight:
+        cancelled, failed = [], []
+        for o in s.get("orders", []):
+            b = by_cid.get(o.get("client_order_id"))
+            if not b:
+                continue                                      # no longer open at Alpaca (rejected, or never placed)
+            try:
+                d.alpaca.cancel_order(b["id"])
+                cancelled.append(o["client_order_id"])
+            except Exception as e:  # noqa: BLE001
+                failed.append(o["client_order_id"])
+                logger.error("C5 cancel of %s failed: %s", o["client_order_id"], type(e).__name__)
+        gone.update(cancelled)
+        if failed:
+            health["actions"].append(f"{cstate}: cancel FAILED for {failed}; {s['month']} left submitted")
+            continue
+        s.update({"status": "cancelled", "cancelled_at": now.isoformat(), "cancelled_because": cstate, "cancelled_orders": cancelled})
+        _write_state(d, s)
+        _log(d, {"key": f"engine:cancel:{s['month']}", "logged_at": now.isoformat(), "kind": "engine", "action": f"{cstate}: open orders cancelled",
+                 "decision": s["month"], "orders": cancelled})
+        health["actions"].append(f"{cstate}: cancelled {len(cancelled)} open MOC orders of {s['month']}")
+    return [o for o in open_orders if o.get("client_order_id") not in gone]
+
+
+def _submit(d: Deps, st: dict, positions: dict, raws: dict, today: sch.Session, open_orders: list[dict], health: dict) -> None:
     target = st["decision"]["target"]
     equity = float(d.alpaca.get_account()["equity"])
-    planned = ords.plan(positions, target, equity, _price(raws, target), st["month"])
+    planned = ords.plan(positions, target, equity, _price(raws, target), ords.session_tag(today.day))
     existing = {o.get("client_order_id") for o in d.alpaca.list_orders(status="all")}
+    open_symbols = {str(o.get("symbol") or "").upper() for o in open_orders}
     placed = []
     for o in planned:                                         # sells first (plan lists them first)
         if o["client_order_id"] in existing:
             placed.append({**o, "status": "already_submitted"})
             continue
+        if o["side"] == "buy" and o["symbol"] in open_symbols:                     # layer (b)
+            placed.append({**o, "status": "skipped_open_order"})
+            logger.warning("C5 buy %s skipped: this engine already has an open order on %s", o["client_order_id"], o["symbol"])
+            continue
         try:
             r = d.alpaca.submit_order(o["symbol"], o["qty"], o["side"], order_type="market", time_in_force="cls", client_order_id=o["client_order_id"])
             placed.append({**o, "order_id": r.get("id"), "status": r.get("status")})
         except Exception as e:  # noqa: BLE001
+            if _is_duplicate_id(e):                                                # layer (c): Alpaca already has this session's order
+                placed.append({**o, "status": "already_submitted", "note": "Alpaca rejected a duplicate client_order_id"})
+                logger.warning("C5 order %s: duplicate client_order_id at Alpaca, recorded as already submitted", o["client_order_id"])
+                continue
             placed.append({**o, "status": f"error: {type(e).__name__}"})
             logger.error("C5 order %s failed: %s", o["client_order_id"], type(e).__name__)
     st.update({"status": "submitted", "submitted_on": today.day.isoformat(), "equity_at_submit": equity, "orders": placed,
@@ -386,7 +466,8 @@ def _submit(d: Deps, st: dict, positions: dict, raws: dict, today: sch.Session, 
     health["actions"].append(f"submitted {len(placed)} MOC orders for {st['month']} -> {target}")
 
 
-def _verify(d: Deps, st: dict, states: list[dict], raws: dict, closes: dict, today: sch.Session, health: dict) -> None:
+def _verify(d: Deps, st: dict, states: list[dict], raws: dict, closes: dict, day: date, health: dict) -> None:
+    """Verify the order set submitted on `day` (its session has closed)."""
     positions = positions_of(d)
     target = st["decision"]["target"]
     by_id = {o.get("client_order_id"): o for o in d.alpaca.list_orders(status="all")}
@@ -394,23 +475,23 @@ def _verify(d: Deps, st: dict, states: list[dict], raws: dict, closes: dict, tod
     for o in st.get("orders", []):
         b = by_id.get(o["client_order_id"]) or {}
         px = float(b["filled_avg_price"]) if b.get("filled_avg_price") else None
-        close = (raws.get(o["symbol"]) or {}).get(today.day)
+        close = (raws.get(o["symbol"]) or {}).get(day)
         slip = None if (px is None or not close) else ((px / close - 1.0) * 1e4 * (1 if o["side"] == "buy" else -1))
         fills.append({"client_order_id": o["client_order_id"], "symbol": o["symbol"], "side": o["side"], "status": b.get("status"),
                       "filled_qty": float(b.get("filled_qty") or 0), "avg_price": px, "close": close, "slippage_bps_vs_close": slip,
                       "fill_minus_close": None if (px is None or not close) else px - close})
     acct = d.alpaca.get_account()
     st["fills"], st["equity_after_close"] = fills, float(acct["equity"])
-    st["spy_close_at_execution"] = closes.get(today.day)
+    st["spy_close_at_execution"] = closes.get(day)
     if ords.holds_target(positions, target):
         st["status"] = "executed"
-        d.write(LEDGER, "ledger.json", {"holdings": positions, "as_of": today.day.isoformat(), "month": st["month"]})
+        d.write(LEDGER, "ledger.json", {"holdings": positions, "as_of": day.isoformat(), "month": st["month"]})
         health["actions"].append(f"verified: holds {target}")
         prev = next((s for s in reversed(states) if s.get("status") == "executed" and s is not st and (s.get("created_at") or "") <= (st.get("created_at") or "")), None)
-        if prev and prev.get("equity_after_close") and prev.get("spy_close_at_execution") and closes.get(today.day):
-            prev["period"] = {"from": prev["submitted_on"], "to": today.day.isoformat(),
+        if prev and prev.get("equity_after_close") and prev.get("spy_close_at_execution") and closes.get(day):
+            prev["period"] = {"from": prev["submitted_on"], "to": day.isoformat(),
                               "return": st["equity_after_close"] / prev["equity_after_close"] - 1.0,
-                              "spy_return": closes[today.day] / prev["spy_close_at_execution"] - 1.0}
+                              "spy_return": closes[day] / prev["spy_close_at_execution"] - 1.0}
             _write_state(d, prev)
     else:
         st["status"] = "verify_failed"
@@ -450,13 +531,14 @@ def _dry(d, now, ss, closes, raws, baa, positions, control, realign) -> dict:
     decision = dec.decide(me.day, closes, ss, baa)
     equity = float(d.alpaca.get_account()["equity"])
     cstate = control["state"]
+    tag = ords.session_tag(_exec_session(ss, sch.session_on(ss, now.date()), now).day)     # the session the orders would execute in
     if cstate == "paused":
         intended, effect = [], "paused: no orders; the holding is kept"
     elif cstate == "paused_to_tbills":
-        intended = [] if ords.holds_target(positions, "BIL") else ords.plan(positions, "BIL", equity, _price(raws, "BIL"), "PT" + _compact(control.get("changed_at")))
+        intended = [] if ords.holds_target(positions, "BIL") else ords.plan(positions, "BIL", equity, _price(raws, "BIL"), tag)
         effect = "paused to T-bills: sell to BIL at the next close, then no orders"
     else:
-        intended = ords.plan(positions, decision["target"], equity, _price(raws, decision["target"]), sch.yyyymm(me.day))
+        intended = ords.plan(positions, decision["target"], equity, _price(raws, decision["target"]), tag)
         effect = "active" + (": a re-align to this decision is pending for the next close" if realign else "")
     return {"as_of": now.isoformat(), "enabled": d.enabled, "control": cstate, "realign_pending": bool(realign), "effect": effect,
             "decision": decision, "equity": equity, "positions": positions, "intended_orders": intended,
