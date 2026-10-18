@@ -663,6 +663,75 @@ wiped them.
 
 ## Open
 
+### 128. Rotate the FRED API key, then update its Key Vault secret (HIGH — security; leaked 2026-10-18, never committed)
+**What happened.** On 2026-10-18 the quadrant-backtest prompt built the ALFRED vintage cache (`scripts/alfred_cache.py`). Thirteen series
+returned HTTP 400 (DFF, DGS10, DGS2, T10Y2Y, VIXCLS, CHPMINDXM, T10Y3M, DGS3MO, DGS30, DFII10, T10YIE, T5YIE, T5YIFR).
+`shared/clients/fred.py` logs each failure as `logger.error("FRED vintages %s failed: %s", series_id, e)`, and a `requests.HTTPError`
+message carries the **full request URL, `api_key=` included**. The key therefore landed in a scratchpad log, in the background task's
+output file and in the session's tool output.
+
+**Scan (2026-10-18, by exact match on the key and by the patterns `api_key=<32 hex>` / `api_key <32 hex>`, value never printed):**
+- **0 hits** in the working tree, including ignored and hidden paths (`.review/`, `reports/`, `data/`, `scripts/.alfred_cache/`).
+- **0 hits** in the `pf-web` worktree.
+- **0 hits** in the full git history: 399 commits across every branch, tag and the reflog, no stash.
+- The control searches (the secret's name `FredApiKey`, the word `api_key`, a known string in `.review/`) found matches, so the method
+  works.
+- **Nothing containing the key was ever committed.** The two session files that held it were deleted the same day.
+
+**The one remaining copy** is outside the repo: this Claude Code session's local transcript,
+`~/.claude/projects/c--GitRepos-portfolio-automation-1/e7d16372-….jsonl`.
+
+**To do:**
+1. Request a new key at fred.stlouisfed.org (My Account → API Keys) and revoke the old one there.
+2. `az keyvault secret set --vault-name kv-pfauto-prod --subscription EasyGridsProduction --name FredApiKey --value <new>`. The collector
+   and the C5 engine read the secret at runtime, so no deploy is needed.
+3. Fix the logging so it can't recur. `shared/clients/fred.py`'s two `logger.error(... e)` calls must log the status code and series,
+   never `e`'s message or the URL. The C5 engine's own FRED fetch already does this.
+
+**Production may have the same leak.** The collector fetches every `macro-series.json` series daily, and `CHPMINDXM` is deprecated, so
+App Insights may already hold the key in ERROR lines. Check (`traces | where message has "api_key="`) and, after rotating, purge or
+accept.
+
+### 127. Relabel the wrong Flex exit reasons in the portal (MEDIUM — data fidelity; production blob write needs Jorge's approval)
+**What is wrong.** All four closed Flex trades, repaired from broker fills on 2026-10-18 with `scripts/flex_backfill_closed_trades.py`, keep
+the engine's recorded `exit_reason` (`stop_fill` ×3, `time_stop` ×1). That label is wrong: every one of those positions was **sold by
+Core's auto-executor**, not by a Flex stop or time stop.
+- **INTC:** Core's analyzer treated it as a `LEGACY_EXITS` wind-down. It was proposed on 09-24, 09-25 and 09-28 (the first two
+  attempts 403'd), and again on 10-08.
+- **NEE:** treated as an "orphaned flex position". It was sold on 09-18 and 10-08.
+
+The Flex engine only saw the positions vanish and filled in a reason. The portal's Trades table therefore shows "Stop hit" / "Time stop"
+for exits Flex never made.
+
+**To do:**
+1. Relabel the four records in `flex-ledger/closed-trades.json` to a new `exit_reason`, `core_sold` (label "Sold by Core"), keeping a
+   `repaired.previous_exit_reason`.
+2. Add the label to `web/sleeve_trades.js`'s `EXIT_LABELS`.
+
+**The underlying cross-book bug** is that Core sells the Flex sleeve's positions. `flex_separation_set` stops Flex from buying Core
+names, but nothing stops Core from selling Flex holdings. It ends with Part B's retirement of Flex (#113). If Flex stays, it needs its
+own entry.
+
+### 126. Replace the web API's account-wide `STORAGE_CONNECTION_STRING` with a read-only credential (MEDIUM — security hardening)
+**What is wrong.** `swa-pfauto`'s managed API reads every blob and table through `STORAGE_CONNECTION_STRING`, the full account connection
+string: read, write and delete on the whole `stpfautoprod` account. SWA managed functions have no managed identity, so it can't be an
+RBAC role. That one credential can write anything, including Core's trades and the C5 state, despite the EasyGrid controls' narrow
+design.
+- The controls write only through two blob-scoped SAS URLs (`C5_KILL_SWITCH_SAS_URL` / `C5_REALIGN_SAS_URL`, policy
+  `easygrid-controls`), and a test enforces that.
+- But the broad connection string is still in the same process.
+
+**The fix:** replace it with read-only, revocable credentials.
+- A read+list **service SAS** per container the API reads (`daily-reports`, `daily-trades`, `daily-executions`, `daily-snapshots`,
+  `performance`, `flex-ledger`, `c5-state`, `c5-ledger`, `c5-equity-series`, `approvals` …) or one account SAS limited to
+  `r`/`l` on blob + table.
+- Each one signed against a stored access policy where the service supports it, kept in Key Vault and injected at deploy time like the
+  existing SWA secrets.
+
+**The existing writes need their own narrow credentials:** `approvals/` (manual trade approval) and the Learning Loop's table writes
+(`LearningProposals`). Inventory every `_upload_json` / table `upsert` in `web/api/function_app.py` first. Then rotate the storage account
+key, because the current connection string embeds it.
+
 ### 124. Safe wheel (SPY put-credit spread) modeled screening backtest — pre-registered, run, NOT WORTH REAL DATA (HIGH — program, wheel study step 1 of 2; branch `feat/safe-wheel-model`, not merged)
 **Why modeled.** The options-data probe (#123) found no historical bid/ask in free Alpaca options data, sparse daily prints and a history that starts in 2024, so step 1 PRICES the options with Black-Scholes from the VIX and the
 underlying's closes over 2005-2025 (covering 2008, 2020 and 2022). It is a screening test: its only outcomes are WORTH REAL DATA and NOT WORTH REAL DATA, and it can never approve trading; a pass would lead to step 2, the same pre-registered
