@@ -10,6 +10,7 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
+from c5 import signals as c5_signals
 
 WINDOW_START, WINDOW_END = date(2005, 1, 3), date(2025, 12, 31)
 FIRST_DECISION = date(2004, 12, 31)
@@ -86,7 +87,7 @@ def build_market(prices: dict[str, pd.DataFrame], dtb3: pd.DataFrame, baa: pd.Da
     for t in range(1, n):
         prev = days[t - 1]
         r = _latest_value(p_dtb3, prev, strict=False)
-        c = _latest_value(p_baa, days[t], strict=True)
+        c = c5_signals.credit_value_before(p_baa[0], p_baa[1], days[t])
         in_window = window[0] <= days[t] <= window[1]
         if r is not None:
             rate[t] = r[0] / 100.0
@@ -136,7 +137,7 @@ def trend_monthly(m: Market, d: int, months: int = 10) -> bool:
     if len(me) < months:
         raise ValueError("not enough month-ends for the moving average")
     a = m.adj["SPY"]
-    return bool(a[d] > float(np.mean(a[me[-months:]])))
+    return c5_signals.trend_healthy([float(a[i]) for i in me], months)
 
 
 def trend_daily(m: Market, d: int, n: int = 200) -> bool:
@@ -151,7 +152,7 @@ def credit_calm(m: Market, d: int, window: int = 126) -> bool:
     c = m.credit[d - window + 1: d + 1]
     if d - window + 1 < 0 or np.isnan(c).any():
         raise ValueError("not enough credit history")
-    return bool(m.credit[d] <= float(c.mean()))
+    return c5_signals.credit_calm([float(x) for x in c], window)
 
 
 def realised_vol(m: Market, d: int, n: int = 21) -> float:
@@ -261,7 +262,7 @@ def decisions(m: Market, cfg: Config, window=(WINDOW_START, WINDOW_END)) -> list
             out.append((d, {"2X": 1.0} if ok else {"TB": 1.0}, {"credit": ok}))
         elif cfg.rule == "C5":
             t, c = trend_monthly(m, d, cfg.sma_months), credit_calm(m, d, cfg.credit_window)
-            w = {"2X": 1.0} if (t and c) else ({"SPY": 1.0} if (t or c) else {"TB": 1.0})
+            w = {c5_signals.LEVERED: {"2X": 1.0}, c5_signals.ONE_X: {"SPY": 1.0}, c5_signals.TBILLS: {"TB": 1.0}}[c5_signals.holding(t, c)]
             out.append((d, w, {"trend": t, "credit": c}))
         else:
             raise ValueError(cfg.rule)
