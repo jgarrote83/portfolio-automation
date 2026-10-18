@@ -184,7 +184,7 @@ def main(argv=None) -> int:
     b = res["benchmark"]
     for r in RULES:
         c = res["candidates"][r]
-        v = res["verdicts"].get(r, {"verdict": "reference (no verdict)", "sub_wins": res["reference_criteria"][r]["sub_wins"]})
+        v = res["verdicts"][r] if r in res["verdicts"] else {"verdict": "reference (no verdict)", "sub_wins": res["reference_criteria"][r]["sub_wins"]}
         print(r, v["verdict"], f"CAGR {c['cagr']:.4f} vs {b['cagr']:.4f}", f"MDD {c['mdd']:.4f} vs {b['mdd']:.4f}", v["sub_wins"])
     print("verification", res["verification"]["matched"], "/", res["verification"]["checks"], "PASS" if res["verification"]["pass"] else "FAIL")
     print("preregistered run:", res["preregistered_run"])
