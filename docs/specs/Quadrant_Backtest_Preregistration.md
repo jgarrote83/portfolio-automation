@@ -83,3 +83,13 @@ First dates are each symbol's first adjusted close in `data/reference/quadrant_b
 | USMV | Q4 | 2011-10-20 | **SPLV** (2011-05-05) until 2011-10-20 | US minimum-volatility equity |
 
 Every proxy's first date precedes 2011-07-01, the earliest possible window start, so no member needs to be dropped for lack of a proxy except KMLM.
+
+## Appendix B — the replay's window start (recorded before any return was computed)
+
+`scripts/replay_axes.replay("2010-01-04", "2025-12-31", cache)` over the ALFRED cache built with `--start 2008-01-01 --end 2025-12-31` (no vintage with a `realtime_start` on or after 2026-01-01 is in the cache) produced 4,173 business days. The confirmed quadrant was determinate on 979 of them (23%), first on 2016-05-18. GDPNow's ALFRED vintages start on 2016-05-17, not in 2011 as section 0 assumed, so the growth axis cannot be reconstructed before mid-2016. Since 2016-01-01, 1,630 of 2,609 business days were indeterminate (Q1 253, Q2 195, Q3 271, Q4 260).
+
+**Window start (section 2, item 2): 2018-01-19**, the first business day from which the quadrant was determinate for 20 consecutive business days. It is a trading day, so the portfolios start at its close.
+
+Consequence for the verdicts, settled here before any return is seen: the first sub-period ("window start–2015-12") contains no day of the window. **An empty sub-period has no return and is never counted as won** (strict reading of "beats … in at least 2 of 3"), so each verdict's sub-period condition requires winning both 2018-01-19–2020-12 and 2021-01–2025-12.
+
+ALFRED vintage requests returned HTTP 400 (no rows) for DFF, DGS10, DGS2, T10Y2Y, VIXCLS, CHPMINDXM, T10Y3M, DGS3MO, DGS30, DFII10, T10YIE, T5YIE and T5YIFR. None of them sets an axis direction (the breakevens feed only the describe-only inflation bridge); the direction inputs (GDPNow vintages, core PCE/CPI, WTI/Brent) are all present.
