@@ -663,6 +663,25 @@ wiped them.
 
 ## Open
 
+### 130. C5 ERRORs email nobody: no alert rule exists (MEDIUM — accepted for enable on 2026-10-18; build it next)
+**What happens today.**
+- Every C5 ERROR goes only to App Insights as a `logger.error` trace from func-pfauto. That covers a holding mismatch, a failed
+  submit, a failed verify, a fail-closed missing input, and an unconfirmed cancel.
+- `rg-portfolio-automation-prod` has **no** scheduled-query alert rules and no metric alerts (checked 2026-10-18).
+- The only action group is "Application Insights Smart Detection": no email receivers. It notifies the Monitoring
+  Contributor/Reader roles only for Smart Detection's own anomaly findings, not for our traces.
+- So nobody is emailed. A problem shows only on the EasyGrid tab (the red strip, from `c5-state/health.json`).
+
+**Why it matters.** The agreed design was "no retry, plus an App Insights alert, plus a red Holding mismatch". The alert was
+never built. Jorge decided on 2026-10-18 to enable C5 without it (he may be away on 2026-10-19, the first execution day).
+
+**Fix (not started).** In Bicep, inside `rg-portfolio-automation-prod`:
+- an action group that emails Jorge;
+- one log-search alert on func-pfauto traces with `severityLevel >= 3` and a message starting with `C5 `, evaluated every
+  15 minutes.
+
+---
+
 ### 129. `CHPMINDXM` is deprecated (HTTP 400 every run), and the collector requests two comment keys as series (LOW — data hygiene; no change yet)
 **What happens today.**
 - `src/config/macro-series.json` lists `CHPMINDXM` ("China Manufacturing PMI (NBS)", monthly).

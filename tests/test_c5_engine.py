@@ -307,7 +307,7 @@ def test_enabled_defaults_to_false(monkeypatch):
     monkeypatch.setenv("C5_ENABLED", "true")
     assert H.enabled() is True
     bicep = (ROOT / "infra" / "modules" / "functionapp.bicep").read_text(encoding="utf-8")
-    assert re.search(r"name: 'C5_ENABLED',\s+value: 'false'", bicep)
+    assert re.search(r"name: 'C5_ENABLED',\s+value: 'true'", bicep)                 # Jorge enabled C5 on 2026-10-18 (in Bicep, not az)
     assert "secrets/Alpaca-Easygrid-API-Key/" in bicep and "secrets/Alpaca-Easygrid-API-Secret/" in bicep
 
 
