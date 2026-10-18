@@ -4,9 +4,13 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>EasyGrid &middot; Portfolio Automation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" />
   <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/easygrid.css" />
 </head>
-<body>
+<body class="eg">
   <header class="topnav">
     <strong>Portfolio Automation</strong>
     <nav>
@@ -14,42 +18,101 @@
       <a href="/history.html">History</a>
       <a href="/portfolio.html">Portfolio</a>
       <a href="/performance.html">Performance</a>
-      <a href="/easygrid.html" class="active">EasyGrid</a>
+      <a href="/easygrid.html" class="active" aria-current="page">EasyGrid</a>
     </nav>
     <span id="user" class="user"></span>
   </header>
-  <main class="container">
-    <h1>EasyGrid</h1>
-    <p class="muted" style="margin-top:-.5rem">The C5 (trend + credit) rule, traded on its own Alpaca paper account, independent of Core.</p>
 
-    <div id="eg-summary" class="eg-summary">Loading…</div>
-
-    <h2>Performance</h2>
-    <p class="muted" style="margin-top:-.5rem">EasyGrid, Core and the S&amp;P 500 (SPY), each indexed to 100 at EasyGrid's first fill. Markers show decisions where the holding changed.</p>
-    <div class="chart-wrap" style="height:300px"><canvas id="egChart" height="100"></canvas></div>
-    <p id="eg-chart-note" class="muted"></p>
-
-    <h2>Criteria</h2>
-    <div id="eg-criteria" class="eg-criteria"></div>
-
-    <h2>Decision history</h2>
-    <div id="eg-decisions" class="table-scroll"></div>
-
-    <h2>Engine health</h2>
-    <div id="eg-health" class="eg-health"></div>
-
-    <h2>About the rule</h2>
-    <div class="markdown eg-explainer">
-      <p><strong>At the close of each month's last trading day</strong>, two tests:</p>
-      <ul>
-        <li><strong>Trend:</strong> is SPY's month-end close above its average over the last 10 month-ends?</li>
-        <li><strong>Credit:</strong> is the Baa corporate spread over Treasuries (<code>BAA10Y</code>, as published for the prior day) at or below its 126-day average?</li>
-      </ul>
-      <p>Both pass → <strong>SSO</strong> (2x S&amp;P 500). One passes → <strong>SPY</strong>. Neither → <strong>T-bills</strong> (BIL). The trade happens at the next session's close.</p>
-      <p><strong>The record (backtests, not this account):</strong> 1989–2025, about <strong>14.4% a year against 11.3%</strong> for the S&amp;P 500, with a worst drawdown of <strong>38.8% against 55.2%</strong>. It passed the 2005–2025 test and the 1989–2004 out-of-sample test, and the 2026-01-02 to 2026-05-19 holdout smoke test.</p>
-      <p><strong>Caveats:</strong> it has bad stretches (2018 and 2022 were both well behind the index), and a short holdout already trailed SPY. SSO's leverage costs money: financing, a 0.91% expense ratio, and daily-reset decay in choppy markets. Monthly switching realizes gains, so taxes matter outside a tax-free account. This paper account probably credits no distributions, which understates the T-bill and SPY legs.</p>
+  <main class="eg-main">
+    <div class="eg-head">
+      <div>
+        <h1>EasyGrid · C5 forward test</h1>
+        <p>Paper account, independent of Core. One decision per month, made after the last close.</p>
+      </div>
+      <div class="eg-chips" id="eg-chips">
+        <span class="eg-chip">Paper account</span>
+        <span class="eg-chip">Rule: C5 (trend + credit)</span>
+        <span class="eg-chip" id="eg-chip-engine">Engine: …</span>
+      </div>
     </div>
+
+    <section aria-label="Headline" class="eg-panel eg-headline" id="eg-headline"><p class="eg-kicker">Loading…</p></section>
+
+    <section aria-label="Key numbers" class="eg-keys" id="eg-keys"></section>
+
+    <div class="eg-row">
+      <section aria-label="Growth of 100" class="eg-panel eg-wide">
+        <div class="eg-toolbar">
+          <h2>Growth of 100</h2>
+          <div role="group" aria-label="Range" class="eg-range" id="eg-range">
+            <button type="button" class="eg-btn" data-range="since_start" aria-pressed="true">Since start</button>
+            <button type="button" class="eg-btn" data-range="3m" aria-pressed="false">3 months</button>
+            <button type="button" class="eg-btn" data-range="1m" aria-pressed="false">1 month</button>
+          </div>
+        </div>
+        <div class="eg-legend">
+          <span><span class="eg-swatch" style="background:#3b8ae3"></span>EasyGrid</span>
+          <span><span class="eg-swatch" style="background:#c97f2e"></span>Core</span>
+          <span><span class="eg-swatch dashed"></span>SPY</span>
+          <span><span class="eg-dot" style="background:#3b8ae3"></span>Holding changed</span>
+        </div>
+        <div class="eg-chart" id="eg-growth-wrap"><canvas id="egGrowth"></canvas></div>
+      </section>
+
+      <section aria-label="Why it holds what it holds" class="eg-panel eg-side" id="eg-why"></section>
+    </div>
+
+    <div class="eg-row">
+      <section aria-label="Below its own peak" class="eg-panel eg-wide">
+        <h2>How far below its own peak</h2>
+        <div class="eg-chart short" id="eg-dd-wrap"><canvas id="egDrawdown"></canvas></div>
+      </section>
+      <section aria-label="This month" class="eg-panel eg-side" id="eg-mtd"></section>
+    </div>
+
+    <section aria-label="Decision history" class="eg-panel">
+      <h2>Decision history</h2>
+      <div class="eg-table-wrap" id="eg-decisions"></div>
+    </section>
+
+    <section aria-label="Engine health" class="eg-health" id="eg-health"></section>
+
+    <section aria-label="Controls" class="eg-panel" id="eg-controls"></section>
+
+    <section aria-label="How C5 decides" class="eg-panel eg-explain">
+      <div>
+        <h2>How C5 decides</h2>
+        <p style="color:#c6ccd8">After the last close of each month it checks two signals: is SPY above its 10-month average, and is the corporate credit spread at or below its 126-day average? Both healthy: 2x the S&amp;P 500. One: the S&amp;P 500. Neither: T-bills. The trade happens at the next day's closing auction.</p>
+        <p class="eg-muted" style="font-size:14px">Trend catches valuation busts like 2000–02; credit catches credit crises like 1990, 1998 and 2008. Neither alone caught both.</p>
+      </div>
+      <div>
+        <h3>Backtest record, 1989–2025</h3>
+        <div class="eg-record">
+          <div class="eg-muted"></div><div class="eg-muted">C5</div><div class="eg-muted">S&amp;P 500</div>
+          <div>Growth per year</div><div class="mono">14.4%</div><div class="mono">11.3%</div>
+          <div>Worst drawdown</div><div class="mono">38.8%</div><div class="mono">55.2%</div>
+        </div>
+        <p class="eg-muted eg-small">Hard years: 2018 (−17%), 2022 (−25%), and lagging strong rallies like 2019 (+8.5% vs +31%). Holding SSO costs about 0.9% a year. A backtest; this account checks it live.</p>
+      </div>
+    </section>
   </main>
+
+  <dialog class="eg-dialog" id="eg-dialog" aria-labelledby="eg-dialog-title">
+    <form method="dialog" id="eg-dialog-form">
+      <h2 id="eg-dialog-title" style="margin:0;font-size:18px">Confirm</h2>
+      <p id="eg-dialog-what" style="margin:0;color:#c6ccd8"></p>
+      <label for="eg-reason" class="eg-small eg-muted">Reason (required)</label>
+      <textarea id="eg-reason" class="eg-input" rows="3" maxlength="500" required></textarea>
+      <label for="eg-confirm" class="eg-small eg-muted" id="eg-confirm-label">Type the confirmation</label>
+      <input id="eg-confirm" class="eg-input" autocomplete="off" spellcheck="false" required />
+      <p class="eg-error" id="eg-dialog-error" role="alert"></p>
+      <div class="eg-controls-actions">
+        <button type="submit" class="eg-btn" value="go" id="eg-dialog-go" style="background:#262c38;color:#e6e8ee">Apply</button>
+        <button type="button" class="eg-btn" id="eg-dialog-cancel">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script src="/app.js" defer></script>
   <script src="/easygrid.js" defer></script>

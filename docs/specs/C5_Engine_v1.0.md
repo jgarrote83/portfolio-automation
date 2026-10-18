@@ -58,8 +58,30 @@ market is open and before the cutoff, otherwise at the next session's.
 
 - **Fail closed.** A missing or stale input (the calendar, the clock, SPY bars, a month-end close, or a `BAA10Y` value older than 7 days)
   means no decision and no trade. The engine logs an ERROR and keeps the current holdings.
-- **Kill switch:** `c5-state/kill-switch.json` `{"tripped": true}` blocks every new order. Azure container names need at least 3
-  characters, so the requested `c5/kill-switch.json` lives in `c5-state`.
+- **Control states** (`c5-state/kill-switch.json`, `{"state", "changed_at", "changed_by", "reason"}`; Azure container names need
+  at least 3 characters, so the originally requested `c5/kill-switch.json` lives in `c5-state`):
+  - `active` trades normally;
+  - `paused` places no orders and keeps the holding;
+  - `paused_to_tbills` sells to BIL at the next close (once, sells first, the same 0.5% buffer), then places nothing.
+
+  Month-end decisions are still **recorded** while paused, never executed. An unknown state value is treated as `paused`, and the legacy
+  `{"tripped": true}` reads as `paused`.
+- **Re-align:** `c5-state/realign-request.json` is a one-shot request. While `active`, it is honoured at the next close: the engine
+  aligns to the latest completed month-end decision exactly as on first enable, supersedes any not-yet-executed monthly decision, then
+  clears the request. While paused it is ignored. Resuming from the portal writes `active` **and** a re-align request.
+- **Change log:** the engine appends every control change (who, when, why) and every action it takes on one to
+  `c5-state/kill-switch-log.jsonl`, exactly once, within one tick.
+- **Holding check:** on every tick when no order set is in flight, the account must hold the target of the last executed state.
+  Otherwise the engine logs the ERROR "C5 HOLDING MISMATCH", at most once a day (App Insights, the same channel as every other ERROR),
+  and `health.json` carries `holding_mismatch {expected, actual}`, which the portal shows in red. There is no automatic retry: re-align
+  from the portal.
+- **Portal controls** (`web/api`, `POST /api/easygrid/controls`):
+  - **Who:** the `owner` role AND a SWA `userId` listed in `EASYGRID_ADMIN_IDS`. An empty list admits nobody.
+  - **Every request** needs a reason, a typed confirmation (`PAUSE`, `PAUSE TO T-BILLS`, `RESUME`, `REALIGN`) and the header
+    `X-EasyGrid-Control: 1` (CSRF).
+  - **What it can write:** only the two control documents, through two blob-scoped SAS URLs signed against the revocable stored access
+    policy `easygrid-controls` (`scripts/seed-c5-control-sas.sh`). SWA managed functions have no managed identity, so an RBAC role is
+    not possible.
 - **Disabled** (`C5_ENABLED` not `true`, the Bicep default): the tick never trades. Hourly, it only refreshes `c5-state/dry-run.json`
   and the preview.
 - **Dry run:** `GET/POST /api/c5` (function key) returns the inputs, the decision and the intended orders without trading.

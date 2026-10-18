@@ -25,6 +25,17 @@ param githubLearningPatSecret string
 @description('Learning Loop: optional SWA user-id pin (SWA\'s own opaque `userId` from /.auth/me AFTER signing in — NOT an Entra object id, see the note on _owner_ok in web/api/function_app.py). The decision/run endpoints require the `owner` role always; this additionally pins to one specific user id when set. Empty string = roles-only mode. Not a secret, but not hardcoded either.')
 param ownerUserId string = ''
 
+@description('EasyGrid Controls card: blob-scoped SAS URL for c5-state/kill-switch.json ONLY (signed against the container\'s stored access policy `easygrid-controls`, so it is revocable in one step). Resolved from Key Vault (swa-c5-killswitch-sas-url) at DEPLOY TIME, like the secrets above. Seed with scripts/seed-c5-control-sas.sh.')
+@secure()
+param c5KillSwitchSasUrl string
+
+@description('EasyGrid Controls card: blob-scoped SAS URL for c5-state/realign-request.json ONLY (same policy). Key Vault secret swa-c5-realign-sas-url.')
+@secure()
+param c5RealignSasUrl string
+
+@description('EasyGrid Controls card allowlist: comma-separated SWA userIds (from /.auth/me AFTER signing in — NOT Entra object ids). Empty = nobody may use the controls (fail closed).')
+param easygridAdminIds string = ''
+
 @description('Learning Loop rollout phase (spec §11): 1 = dry-run (no tab), 2 = tab read-only, 3 = full loop (decisions + PR mechanics). Ships at 1.')
 param learningPhase string = '1'
 
@@ -75,6 +86,9 @@ resource swaSettings 'Microsoft.Web/staticSites/config@2022-03-01' = {
     FUNC_MASTER_KEY: funcMasterKeySecret
     GITHUB_LEARNING_PAT: githubLearningPatSecret
     OWNER_USER_ID: ownerUserId
+    C5_KILL_SWITCH_SAS_URL: c5KillSwitchSasUrl
+    C5_REALIGN_SAS_URL: c5RealignSasUrl
+    EASYGRID_ADMIN_IDS: easygridAdminIds
     LEARNING_PHASE: learningPhase
   }
 }

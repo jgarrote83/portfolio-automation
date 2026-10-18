@@ -10,6 +10,9 @@ param swaLocation string = 'eastus2'
 @description('Learning Loop (FOLLOWUPS #13/#32): optional SWA user-id pin for the decision/run endpoints owner check (spec §7, defense in depth beyond the owner role). This is SWA\'s own opaque `userId` from /.auth/me AFTER signing in — NOT an Entra object id, the two are unrelated identifiers (a 2026-07-12 fix; the wrong value here would silently deny everyone). Empty string = roles-only mode (the owner role check alone). Set via parameters.prod.json — never hardcoded.')
 param ownerUserId string = ''
 
+@description('EasyGrid Controls card allowlist: comma-separated SWA userIds (from /.auth/me AFTER signing in — NOT Entra object ids, see the ownerUserId note). Empty = nobody may use the controls. Set via parameters.prod.json.')
+param easygridAdminIds string = ''
+
 // ── Resource names (match CLAUDE.md naming conventions) ─────────────────────────────
 var storageAccountName = 'stpfauto${environment}'
 var keyVaultName       = 'kv-pfauto-${environment}'
@@ -120,6 +123,11 @@ module swa 'modules/staticwebapp.bicep' = {
     funcMasterKeySecret: keyVaultRef.getSecret('swa-func-master-key')
     githubLearningPatSecret: keyVaultRef.getSecret('github-learning-pat')
     ownerUserId: ownerUserId
+    // EasyGrid Controls: two blob-scoped SAS URLs (c5-state/kill-switch.json and c5-state/realign-request.json only).
+    // SEED THESE FIRST (scripts/seed-c5-control-sas.sh): getSecret() on a missing secret fails the whole infra deploy.
+    c5KillSwitchSasUrl: keyVaultRef.getSecret('swa-c5-killswitch-sas-url')
+    c5RealignSasUrl: keyVaultRef.getSecret('swa-c5-realign-sas-url')
+    easygridAdminIds: easygridAdminIds
   }
   dependsOn: [keyvault]
 }

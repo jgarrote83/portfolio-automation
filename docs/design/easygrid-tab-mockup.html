@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>EasyGrid tab</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap">
+<style>
+body{margin:0;background:#0f1115}
+a{color:#9cc9ff}a:hover{color:#c9e2ff}
+</style>
+</helmet>
+<div style="background: #0f1115; color: #e6e8ee; font-family: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif; font-size: 15px; line-height: 1.45">
+
+<header style="border-bottom: 1px solid #262c38; background: #12151c">
+<nav aria-label="Portal" style="max-width: 1280px; margin: 0 auto; padding: 0 32px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 28px; min-height: 60px">
+<span style="font-weight: 600; letter-spacing: 0.02em; margin-right: 12px">portfolio-automation</span>
+<a href="#" style="color: #9aa3b5; text-decoration: none; padding: 18px 0">Today</a>
+<a href="#" style="color: #9aa3b5; text-decoration: none; padding: 18px 0">History</a>
+<a href="#" style="color: #9aa3b5; text-decoration: none; padding: 18px 0">Portfolio</a>
+<a href="#" style="color: #9aa3b5; text-decoration: none; padding: 18px 0">Performance</a>
+<a href="#" aria-current="page" style="color: #e6e8ee; text-decoration: none; padding: 18px 0 15px; border-bottom: 3px solid {{accent}}; font-weight: 600">EasyGrid</a>
+</nav>
+</header>
+
+<main style="max-width: 1280px; margin: 0 auto; padding: 28px 32px 64px; display: flex; flex-direction: column; gap: 24px">
+
+<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px">
+<div style="display: flex; flex-direction: column; gap: 4px">
+<h1 style="margin: 0; font-size: 26px; font-weight: 600">EasyGrid · C5 forward test</h1>
+<p style="margin: 0; color: #9aa3b5">Paper account, independent of Core. One decision per month, made after the last close.</p>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 8px">
+<span style="border: 1px solid #262c38; border-radius: 999px; padding: 6px 12px; color: #c6ccd8; font-size: 13px">Paper account</span>
+<span style="border: 1px solid #262c38; border-radius: 999px; padding: 6px 12px; color: #c6ccd8; font-size: 13px">Rule: C5 (trend + credit)</span>
+<span style="border: 1px solid #262c38; border-radius: 999px; padding: 6px 12px; color: #c6ccd8; font-size: 13px">Engine: [Enabled]</span>
+</div>
+</div>
+
+<section aria-label="Headline" style="background: #161a22; border: 1px solid #262c38; border-radius: 12px; padding: 24px 28px; display: flex; flex-direction: column; gap: 10px">
+<p style="margin: 0; color: #9aa3b5; font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em">Since the first trade on [date]</p>
+<div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px 40px">
+<div style="display: flex; align-items: baseline; gap: 10px"><span style="font-size: 15px; color: #c6ccd8">EasyGrid</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 40px; font-weight: 500; color: {{accent}}">[+x.x%]</span></div>
+<div style="display: flex; align-items: baseline; gap: 10px"><span style="font-size: 15px; color: #c6ccd8">SPY</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 40px; font-weight: 500; color: #e6e8ee">[+x.x%]</span></div>
+<div style="display: flex; align-items: baseline; gap: 10px"><span style="font-size: 15px; color: #c6ccd8">Core</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 40px; font-weight: 500; color: #f2a65a">[+x.x%]</span></div>
+</div>
+<p style="margin: 0; font-size: 17px">EasyGrid is <strong>[ahead of / behind]</strong> SPY by <strong>[x.x] points</strong>.</p>
+</section>
+
+<section aria-label="Key numbers" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px">
+<div style="background: #161a22; border: 1px solid #262c38; border-radius: 12px; padding: 18px 20px; display: flex; flex-direction: column; gap: 6px">
+<span style="color: #9aa3b5; font-size: 13px">Account value</span>
+<span style="font-family: 'IBM Plex Mono', monospace; font-size: 26px">[$000,000]</span>
+<span style="color: #9aa3b5; font-size: 13px">Started at $100,000</span>
+</div>
+<div style="background: #161a22; border: 1px solid #262c38; border-radius: 12px; padding: 18px 20px; display: flex; flex-direction: column; gap: 6px">
+<span style="color: #9aa3b5; font-size: 13px">Holding now</span>
+<span style="font-size: 22px; font-weight: 600">[SSO · 2x S&amp;P 500]</span>
+<span style="color: #9aa3b5; font-size: 13px">Since [date]</span>
+</div>
+<div style="background: #161a22; border: 1px solid #262c38; border-radius: 12px; padding: 18px 20px; display: flex; flex-direction: column; gap: 6px">
+<span style="color: #9aa3b5; font-size: 13px">Next decision</span>
+<span style="font-size: 22px; font-weight: 600">[Fri, Oct 30]</span>
+<span style="color: #9aa3b5; font-size: 13px">After the close; trades at the next day's close</span>
+</div>
+<div style="background: #161a22; border: 1px solid #262c38; border-radius: 12px; padding: 18px 20px; display: flex; flex-direction: column; gap: 6px">
+<span style="color: #9aa3b5; font-size: 13px">Below its own peak</span>
+<span style="font-family: 'IBM Plex Mono', monospace; font-size: 26px">[−x.x%]</span>
+<span style="color: #9aa3b5; font-size: 13px">SPY: [−x.x%]</span>
+</div>
+</section>
+
+<div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: stretch">
+
+<section aria-label="Growth of 100" style="flex: 999 1 560px; min-width: 0; background: #161a22; border: 1px solid #262c38; border-radius: 12px; padding: 20px 24px; display: flex; flex-direction: column; gap: 14px">
+<div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px">
+<h2 style="margin: 0; font-size: 18px; font-weight: 600">Growth of 100</h2>
+<div role="group" aria-label="Range" style="display: flex; gap: 6px">
+<button type="button" style="min-height: 44px; padding: 0 14px; background: #262c38; color: #e6e8ee; border: 1px solid #343b4a; border-radius: 8px; font: inherit; font-size: 13px">Since start</button>
+<button type="button" style="min-height: 44px; padding: 0 14px; background: transparent; color: #c6ccd8; border: 1px solid #262c38; border-radius: 8px; font: inherit; font-size: 13px">3 months</button>
+<button type="button" style="min-height: 44px; padding: 0 14px; background: transparent; color: #c6ccd8; border: 1px solid #262c38; border-radius: 8px; font: inherit; font-size: 13px">1 month</button>
+</div>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 18px; font-size: 13px; color: #c6ccd8">
+<span style="display: flex; align-items: center; gap: 8px"><span style="width: 22px; height: 3px; background: {{accent}}; border-radius: 2px"></span>EasyGrid</span>
+<span style="display: flex; align-items: center; gap: 8px"><span style="width: 22px; height: 3px; background: #f2a65a; border-radius: 2px"></span>Core</span>
+<span style="display: flex; align-items: center; gap: 8px"><span style="width: 22px; height: 3px; background: #e6e8ee; border-radius: 2px"></span>SPY</span>
+<span style="display: flex; align-items: center; gap: 8px"><span style="width: 9px; height: 9px; border-radius: 50%; background: {{accent}}"></span>Holding changed</span>
+</div>
+<div style="height: 340px; border: 1px dashed #343b4a; border-radius: 8px; display: flex; align-items: center; justify-content: center; padding: 24px; text-align: center; color: #9aa3b5">Three lines indexed to 100 at the first fill. A dot on the EasyGrid line marks each month the holding changed; hovering shows that month's decision.</div>
+</section>
+
+<section aria-label="Why it holds what it holds" style="flex: 1 1 400px; min-width: 0; background: #161a22; border: 1px solid #262c38; border-radius: 12px; padding: 20px 24px; display: flex; flex-direction: column; gap: 16px">
+<div style="display: flex; flex-direction: column; gap: 4px">
+<h2 style="margin: 0; font-size: 18px; font-weight: 600">Why it holds what it holds</h2>
+<p style="margin: 0; color: #9aa3b5; font-size: 13px">Decided [Sep 30] · checked again [Oct 30]</p>
+</div>
+
+<div style="border: 1px solid #262c38; border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px">
+<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px">
+<span style="font-weight: 600">1 · Trend</span>
+<span style="display: flex; align-items: center; gap: 6px; color: #7fd69a; font-size: 13px; font-weight: 600"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3 3 7-7"></path></svg>[Healthy]</span>
+</div>
+<p style="margin: 0; font-size: 14px; color: #c6ccd8">SPY month-end close <span style="font-family: 'IBM Plex Mono', monospace; color: #e6e8ee">[000.00]</span> vs its 10-month average <span style="font-family: 'IBM Plex Mono', monospace; color: #e6e8ee">[000.00]</span></p>
+<div aria-hidden="true" style="position: relative; height: 8px; background: #262c38; border-radius: 4px">
+<div style="position: absolute; left: 50%; top: -4px; width: 2px; height: 16px; background: #9aa3b5"></div>
+<div style="position: absolute; left: 68%; top: -5px; width: 12px; height: 18px; border-radius: 3px; background: {{accent}}"></div>
+</div>
+<p style="margin: 0; font-size: 13px; color: #9aa3b5">[+x.x%] above the average · healthy while above</p>
+</div>
+
+<div style="border: 1px solid #262c38; border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px">
+<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px">
+<span style="font-weight: 600">2 · Credit</span>
+<span style="display: flex; align-items: center; gap: 6px; color: #ff9a8a; font-size: 13px; font-weight: 600"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"></path></svg>[Not healthy]</span>
+</div>
+<p style="margin: 0; font-size: 14px; color: #c6ccd8">Corporate credit spread (prior day) <span style="font-family: 'IBM Plex Mono', monospace; color: #e6e8ee">[x.xx%]</span> vs its 126-day average <span style="font-family: 'IBM Plex Mono', monospace; color: #e6e8ee">[x.xx%]</span></p>
+<div aria-hidden="true" style="position: relative; height: 8px; background: #262c38; border-radius: 4px">
+<div style="position: absolute; left: 50%; top: -4px; width: 2px; height: 16px; background: #9aa3b5"></div>
+<div style="position: absolute; left: 58%; top: -5px; width: 12px; height: 18px; border-radius: 3px; background: #ff9a8a"></div>
+</div>
+<p style="margin: 0; font-size: 13px; color: #9aa3b5">[+0.0x] above the average · healthy at or below (lenders calm)</p>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 6px">
+<span style="font-size: 13px; color: #9aa3b5">The rule</span>
+<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0; border: 1px solid #262c38; border-radius: 10px; overflow: hidden; font-size: 14px">
+<div style="padding: 10px 14px; border-bottom: 1px solid #262c38">Both healthy</div>
+<div style="padding: 10px 14px; border-bottom: 1px solid #262c38; font-weight: 600">SSO · 2x S&amp;P 500</div>
+<div style="padding: 10px 14px; border-bottom: 1px solid #262c38; background: #1d2330; box-shadow: inset 3px 0 0 {{accent}}">One healthy  ← [today]</div>
+<div style="padding: 10px 14px; border-bottom: 1px solid #262c38; background: #1d2330; font-weight: 600">SPY · 1x</div>
+<div style="padding: 10px 14px">Neither</div>
+<div style="padding: 10px 14px; font-weight: 600">T-bills (BIL)</div>
+</div>
+</div>
+
+<div style="border: 1px dashed #4a5366; border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 4px">
+<span style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: #9aa3b5">If the month ended today · preview, not a decision</span>
+<span style="font-size: 14px">Trend [✓] · Credit [✗] → would hold <strong>[SPY · 1x]</strong></span>
+</div>
+</section>
+
+</div>
+
+<div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: stretch">
+<section aria-label="Below its own peak" style="flex: 999 1 560px; min-width: 0; background: #161a22; border: 1px solid #262c38; border-radius: 12px; padding: 20px 24px; display: flex; flex-direction: column; gap: 12px">
+<h2 style="margin: 0; font-size: 18px; font-weight: 600">How far below its own peak</h2>
+<div style="height: 180px; border: 1px dashed #343b4a; border-radius: 8px; display: flex; align-items: center; justify-content: center; padding: 24px; text-align: center; color: #9aa3b5">EasyGrid and SPY, each measured from its own highest value. Shows the painful stretches at a glance.</div>
+</section>
+<section aria-label="This month" style="flex: 1 1 400px; min-width: 0; background: #161a22; border: 1px solid #262c38; border-radius: 12px; padding: 20px 24px; display: flex; flex-direction: column; gap: 12px">
+<h2 style="margin: 0; font-size: 18px; font-weight: 600">This month so far</h2>
+<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px">
+<div style="display: flex; flex-direction: column; gap: 4px"><span style="color: #9aa3b5; font-size: 13px">EasyGrid</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 22px; color: {{accent}}">[+x.x%]</span></div>
+<div style="display: flex; flex-direction: column; gap: 4px"><span style="color: #9aa3b5; font-size: 13px">SPY</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 22px">[+x.x%]</span></div>
+<div style="display: flex; flex-direction: column; gap: 4px"><span style="color: #9aa3b5; font-size: 13px">Core</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 22px; color: #f2a65a">[+x.x%]</span></div>
+</div>
+<p style="margin: 0; color: #9aa3b5; font-size: 13px">Resets at each monthly decision.</p>
+</section>
+</div>
+
+<section aria-label="Decision history" style="background: #161a22; border: 1px solid #262c38; border-radius: 12px; padding: 20px 24px; display: flex; flex-direction: column; gap: 12px">
+<h2 style="margin: 0; font-size: 18px; font-weight: 600">Decision history</h2>
+<div style="overflow-x: auto">
+<table style="width: 100%; min-width: 760px; border-collapse: collapse; font-size: 14px">
+<thead>
+<tr style="color: #9aa3b5; text-align: left">
+<th scope="col" style="padding: 10px 12px; border-bottom: 1px solid #262c38; font-weight: 500">Month</th>
+<th scope="col" style="padding: 10px 12px; border-bottom: 1px solid #262c38; font-weight: 500">Trend</th>
+<th scope="col" style="padding: 10px 12px; border-bottom: 1px solid #262c38; font-weight: 500">Credit</th>
+<th scope="col" style="padding: 10px 12px; border-bottom: 1px solid #262c38; font-weight: 500">Decision</th>
+<th scope="col" style="padding: 10px 12px; border-bottom: 1px solid #262c38; font-weight: 500">Fill vs close</th>
+<th scope="col" style="padding: 10px 12px; border-bottom: 1px solid #262c38; font-weight: 500; text-align: right">EasyGrid</th>
+<th scope="col" style="padding: 10px 12px; border-bottom: 1px solid #262c38; font-weight: 500; text-align: right">SPY</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="padding: 10px 12px; border-bottom: 1px solid #1f2430">[Oct 2026]</td>
+<td style="padding: 10px 12px; border-bottom: 1px solid #1f2430">[✓ +x.x%]</td>
+<td style="padding: 10px 12px; border-bottom: 1px solid #1f2430">[✗ +0.0x]</td>
+<td style="padding: 10px 12px; border-bottom: 1px solid #1f2430; font-weight: 600">[SPY · 1x]</td>
+<td style="padding: 10px 12px; border-bottom: 1px solid #1f2430; font-family: 'IBM Plex Mono', monospace">[+$0.0x]</td>
+<td style="padding: 10px 12px; border-bottom: 1px solid #1f2430; font-family: 'IBM Plex Mono', monospace; text-align: right">[+x.x%]</td>
+<td style="padding: 10px 12px; border-bottom: 1px solid #1f2430; font-family: 'IBM Plex Mono', monospace; text-align: right">[+x.x%]</td>
+</tr>
+<tr>
+<td style="padding: 10px 12px; border-bottom: 1px solid #1f2430">[Sep 2026]</td>
+<td style="padding: 10px 12px; border-bottom: 1px solid #1f2430">[✓ +x.x%]</td>
+<td style="padding: 10px 12px; border-bottom: 1px solid #1f2430">[✓ −0.0x]</td>
+<td style="padding: 10px 12px; border-bottom: 1px solid #1f2430; font-weight: 600">[SSO · 2x]</td>
+<td style="padding: 10px 12px; border-bottom: 1px solid #1f2430; font-family: 'IBM Plex Mono', monospace">[+$0.0x]</td>
+<td style="padding: 10px 12px; border-bottom: 1px solid #1f2430; font-family: 'IBM Plex Mono', monospace; text-align: right">[+x.x%]</td>
+<td style="padding: 10px 12px; border-bottom: 1px solid #1f2430; font-family: 'IBM Plex Mono', monospace; text-align: right">[+x.x%]</td>
+</tr>
+<tr>
+<td style="padding: 10px 12px">[Aug 2026]</td>
+<td style="padding: 10px 12px">[…]</td>
+<td style="padding: 10px 12px">[…]</td>
+<td style="padding: 10px 12px; font-weight: 600">[…]</td>
+<td style="padding: 10px 12px; font-family: 'IBM Plex Mono', monospace">[…]</td>
+<td style="padding: 10px 12px; font-family: 'IBM Plex Mono', monospace; text-align: right">[…]</td>
+<td style="padding: 10px 12px; font-family: 'IBM Plex Mono', monospace; text-align: right">[…]</td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+
+<section aria-label="Engine health" style="background: #12151c; border: 1px solid #262c38; border-radius: 12px; padding: 14px 24px; display: flex; flex-wrap: wrap; gap: 10px 32px; font-size: 13px; color: #c6ccd8">
+<span><span style="color: #9aa3b5">Last engine run</span> [today 16:31 ET]</span>
+<span><span style="color: #9aa3b5">C5 switch</span> [Enabled]</span>
+<span><span style="color: #9aa3b5">Kill switch</span> [Off]</span>
+<span><span style="color: #9aa3b5">Positions match ledger</span> [Yes]</span>
+<span><span style="color: #9aa3b5">Data</span> [SPY ✓ · credit spread ✓]</span>
+</section>
+
+<section aria-label="How C5 decides" style="background: #161a22; border: 1px solid #262c38; border-radius: 12px; padding: 22px 24px; display: flex; flex-wrap: wrap; gap: 24px 48px">
+<div style="flex: 1 1 360px; min-width: 0; display: flex; flex-direction: column; gap: 10px">
+<h2 style="margin: 0; font-size: 18px; font-weight: 600">How C5 decides</h2>
+<p style="margin: 0; color: #c6ccd8">After the last close of each month it checks two signals: is SPY above its 10-month average, and is the corporate credit spread at or below its 126-day average? Both healthy: 2x the S&amp;P 500. One: the S&amp;P 500. Neither: T-bills. The trade happens at the next day's closing auction.</p>
+<p style="margin: 0; color: #9aa3b5; font-size: 14px">Trend catches valuation busts like 2000–02; credit catches credit crises like 1990, 1998 and 2008. Neither alone caught both.</p>
+</div>
+<div style="flex: 1 1 360px; min-width: 0; display: flex; flex-direction: column; gap: 10px">
+<h3 style="margin: 0; font-size: 15px; font-weight: 600">Backtest record, 1989–2025</h3>
+<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; border: 1px solid #262c38; border-radius: 10px; overflow: hidden; font-size: 14px">
+<div style="padding: 9px 12px; color: #9aa3b5; border-bottom: 1px solid #262c38"></div>
+<div style="padding: 9px 12px; color: #9aa3b5; border-bottom: 1px solid #262c38">C5</div>
+<div style="padding: 9px 12px; color: #9aa3b5; border-bottom: 1px solid #262c38">S&amp;P 500</div>
+<div style="padding: 9px 12px; border-bottom: 1px solid #262c38">Growth per year</div>
+<div style="padding: 9px 12px; border-bottom: 1px solid #262c38; font-family: 'IBM Plex Mono', monospace">14.4%</div>
+<div style="padding: 9px 12px; border-bottom: 1px solid #262c38; font-family: 'IBM Plex Mono', monospace">11.3%</div>
+<div style="padding: 9px 12px">Worst drawdown</div>
+<div style="padding: 9px 12px; font-family: 'IBM Plex Mono', monospace">38.8%</div>
+<div style="padding: 9px 12px; font-family: 'IBM Plex Mono', monospace">55.2%</div>
+</div>
+<p style="margin: 0; color: #9aa3b5; font-size: 13px">Hard years: 2018 (−17%), 2022 (−25%), and lagging strong rallies like 2019 (+8.5% vs +31%). Holding SSO costs about 0.9% a year. A backtest; this account checks it live.</p>
+</div>
+</section>
+
+</main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#4ea1ff","options":["#4ea1ff","#3fc1c9","#9b8cff"]},"$preview":{"width":1440,"height":2400}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { accent: this.props.accent ?? '#4ea1ff' };
+  }
+}
+</script>
+</body>
+</html>

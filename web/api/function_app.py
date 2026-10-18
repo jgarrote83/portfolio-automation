@@ -1172,14 +1172,20 @@ def performance(req: func.HttpRequest) -> func.HttpResponse:
 
 
 # ============================================================================ EasyGrid (the C5 paper account)
-# Read-only views over the C5 engine's own blobs (web/api/easygrid.py). The SWA never touches the C5 account itself.
+# Views over the C5 engine's own blobs (web/api/easygrid.py computes every displayed value). The SWA never touches the C5 account.
+# The ONE write path is the Controls card: it may write only c5-state/kill-switch.json and c5-state/realign-request.json, and it does
+# so through two blob-scoped SAS URLs (C5_KILL_SWITCH_SAS_URL / C5_REALIGN_SAS_URL, injected from Key Vault at deploy time), so the
+# credential itself cannot reach any other blob. SWA managed functions have no managed identity, which rules out an RBAC role here.
+
+_EG_WRITE_TARGETS = {"kill_switch": "C5_KILL_SWITCH_SAS_URL", "realign": "C5_REALIGN_SAS_URL"}
+
 
 def _easygrid_states() -> list[dict]:
     out = []
     try:
         for b in _blobs().get_container_client("c5-state").list_blobs():
             stem = b.name.rsplit(".", 1)[0]
-            if len(stem) == 6 and stem.isdigit():
+            if (len(stem) == 6 and stem.isdigit()) or (stem[:2] in ("PT", "RA") and stem[2:].isdigit()):
                 doc = _download_json("c5-state", b.name)
                 if isinstance(doc, dict):
                     out.append(doc)
@@ -1197,12 +1203,34 @@ def _easygrid_blob(container: str, name: str, default=None):
     return default if v is None else v
 
 
+def _easygrid_log() -> list[dict]:
+    text = _download_text("c5-state", "kill-switch-log.jsonl") or ""
+    out = []
+    for line in text.splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
+
+
+def _easygrid_write(which: str, doc: dict) -> None:
+    """Write one of the two control documents through its own blob-scoped SAS URL. Nothing else can be written from here."""
+    from azure.storage.blob import BlobClient
+    url = os.environ.get(_EG_WRITE_TARGETS[which])            # KeyError for anything but the two allowed targets
+    if not url:
+        raise RuntimeError(f"{_EG_WRITE_TARGETS[which]} is not configured")
+    BlobClient.from_blob_url(url).upload_blob(json.dumps(doc, indent=2).encode("utf-8"), overwrite=True)
+
+
 @app.route(route="easygrid/summary", methods=["GET"])
 def easygrid_summary(req: func.HttpRequest) -> func.HttpResponse:
     try:
         return _json(easygrid.summary(_easygrid_states(), _easygrid_blob("c5-equity-series", "series.json", []),
-                                      _easygrid_blob("c5-state", "health.json"), _easygrid_blob("c5-ledger", "ledger.json"),
-                                      _easygrid_blob("c5-state", "dry-run.json")))
+                                      _easygrid_blob("performance", "equity-series.json", []), _easygrid_blob("c5-state", "health.json"),
+                                      _easygrid_blob("c5-ledger", "ledger.json"), _easygrid_blob("c5-state", "dry-run.json")))
     except Exception as e:  # noqa: BLE001
         log.exception("easygrid summary failed")
         return _err(str(e), status=500)
@@ -1211,8 +1239,8 @@ def easygrid_summary(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="easygrid/series", methods=["GET"])
 def easygrid_series(req: func.HttpRequest) -> func.HttpResponse:
     try:
-        return _json(easygrid.series_indexed(_easygrid_states(), _easygrid_blob("c5-equity-series", "series.json", []),
-                                             _easygrid_blob("performance", "equity-series.json", [])))
+        return _json(easygrid.growth(_easygrid_states(), _easygrid_blob("c5-equity-series", "series.json", []),
+                                     _easygrid_blob("performance", "equity-series.json", []), req.params.get("range") or "since_start"))
     except Exception as e:  # noqa: BLE001
         log.exception("easygrid series failed")
         return _err(str(e), status=500)
@@ -1234,3 +1262,34 @@ def easygrid_criteria(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:  # noqa: BLE001
         log.exception("easygrid criteria failed")
         return _err(str(e), status=500)
+
+
+@app.route(route="easygrid/controls", methods=["GET", "POST"])
+def easygrid_controls(req: func.HttpRequest) -> func.HttpResponse:
+    principal = _client_principal(req)
+    admin_ids = os.environ.get("EASYGRID_ADMIN_IDS", "")
+    current = _easygrid_blob("c5-state", "kill-switch.json")
+    if req.method == "GET":
+        try:
+            return _json(easygrid.controls_view(current, _easygrid_log(), easygrid.is_admin(principal, admin_ids),
+                                                _easygrid_blob("c5-state", "realign-request.json")))
+        except Exception as e:  # noqa: BLE001
+            log.exception("easygrid controls read failed")
+            return _err(str(e), status=500)
+    try:
+        body = req.get_json()
+    except ValueError:
+        body = None
+    status, error, writes = easygrid.validate_control(principal, admin_ids, dict(req.headers), req.method, body, current)
+    if error:
+        log.warning("easygrid control rejected (%s): %s", status, error)
+        return _err(error, status=status)
+    try:
+        for which in ("realign", "kill_switch"):              # the request first, so a resume never lands without its re-align
+            if which in writes:
+                _easygrid_write(which, writes[which])
+    except Exception as e:  # noqa: BLE001
+        log.exception("easygrid control write failed")
+        return _err(f"write failed: {type(e).__name__}", status=500)
+    log.info("easygrid control applied: %s by %s", (body or {}).get("action"), (principal or {}).get("userId"))
+    return _json({"ok": True, "written": sorted(writes), "state": (writes.get("kill_switch") or current or {}).get("state")})

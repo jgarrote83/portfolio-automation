@@ -178,8 +178,11 @@ def make(alpaca, now, enabled=True, store=None, fred=None, fred_fail=False):
         if fred_fail:
             raise dec.MissingInput("FRED down")
         return fred if fred is not None else baa()
+    def append(c, n, rec):
+        store.setdefault((c, n), []).append(rec)
     return H.Deps(alpaca=alpaca, fred=fred_fn, read=lambda c, n: store.get((c, n)), write=lambda c, n, o: store.__setitem__((c, n), o),
-                  list_names=lambda c: [n for (cc, n) in store if cc == c], now=lambda: now, enabled=enabled), store
+                  list_names=lambda c: [n for (cc, n) in store if cc == c], now=lambda: now, enabled=enabled,
+                  append=append, read_lines=lambda c, n: list(store.get((c, n)) or [])), store
 
 
 def at(d, hh, mm):
@@ -232,11 +235,11 @@ def test_every_missing_input_fails_closed(fail):
     assert a.submitted == [] and h["error"] and ("c5-state", "health.json") in store
 
 
-def test_kill_switch_blocks_orders():
+def test_legacy_tripped_kill_switch_reads_as_paused_and_blocks_orders():
     a = FakeAlpaca()
     deps, store = make(a, at(date(2026, 7, 6), 10, 0), store={("c5-state", "kill-switch.json"): {"tripped": True}})
     h = H.tick(deps)
-    assert a.submitted == [] and h["kill_switch"] is True and "kill switch tripped: no orders" in h["actions"]
+    assert a.submitted == [] and h["kill_switch"] is True and h["control"] == "paused"
 
 
 def test_disabled_never_trades_and_refreshes_the_dry_run():
@@ -299,3 +302,120 @@ def test_health_carries_the_next_decision_date():
     assert h["next_decision_date"] == "2026-07-31"
     deps2, _ = make(FakeAlpaca(), at(date(2026, 7, 31), 16, 30), enabled=False)
     assert H.tick(deps2)["next_decision_date"] == "2026-08-28"        # 07-31 has settled; August ends on Friday 08-28
+
+
+# --- portal controls: kill-switch states and re-align (engine side) -------------------------------------------------------
+
+def control(state, at_="2026-07-07T10:00:00-04:00", reason="test"):
+    return {"state": state, "changed_at": at_, "changed_by": "jorge", "reason": reason}
+
+
+def running_store(target="SSO", qty=1990.0):
+    """An account already running: last month executed into `target`."""
+    return {("c5-ledger", "ledger.json"): {"holdings": {target: qty}},
+            ("c5-state", "202606.json"): {"month": "202606", "kind": "monthly", "status": "executed", "decision": {"target": target},
+                                          "created_at": "2026-07-01T10:00:00-04:00", "submitted_on": "2026-07-01", "equity_after_close": 100000.0}}
+
+
+def test_paused_places_no_orders_but_still_records_the_month_end_decision():
+    store = running_store()
+    store[("c5-state", "kill-switch.json")] = control("paused")
+    a = FakeAlpaca(positions={"SSO": 1990.0})
+    deps, store = make(a, at(date(2026, 7, 31), 13, 25), store=store)          # the half-day month-end, settled
+    h = H.tick(deps)
+    assert store[("c5-state", "202607.json")]["status"] == "decided" and any("not executed" in x for x in h["actions"])
+    deps.now = lambda: at(date(2026, 8, 3), 9, 45)
+    H.tick(deps)
+    assert a.submitted == [] and store[("c5-state", "202607.json")]["status"] == "decided"
+
+
+def test_paused_to_tbills_sells_to_bil_at_the_next_close_then_stops():
+    store = running_store()
+    store[("c5-state", "kill-switch.json")] = control("paused_to_tbills")
+    a = FakeAlpaca(positions={"SSO": 1990.0})
+    deps, store = make(a, at(date(2026, 7, 7), 10, 5), store=store)            # within one tick of the change
+    H.tick(deps)
+    assert [(x[0], x[1]) for x in a.submitted] == [("sell", "SSO"), ("buy", "BIL")]          # sells first
+    assert all(x[3].startswith("C5-PT202607071000-") for x in a.submitted)
+    a.positions = {"BIL": float(a.submitted[1][2])}
+    deps.now = lambda: at(date(2026, 7, 7), 16, 30)
+    H.tick(deps)
+    pt = [v for (c, n), v in store.items() if c == "c5-state" and n.startswith("PT")][0]
+    assert pt["status"] == "executed"
+    n = len(a.submitted)
+    deps.now = lambda: at(date(2026, 7, 31), 16, 30)                           # a month-end passes: recorded, never executed
+    H.tick(deps)
+    deps.now = lambda: at(date(2026, 8, 3), 10, 0)
+    H.tick(deps)
+    assert len(a.submitted) == n and store[("c5-state", "202607.json")]["status"] == "decided"
+
+
+def test_resume_realigns_to_the_latest_month_end_decision():
+    store = running_store(target="BIL", qty=1080.0)
+    store[("c5-state", "kill-switch.json")] = control("active", at_="2026-07-08T09:40:00-04:00")
+    store[("c5-state", "realign-request.json")] = {"requested_at": "2026-07-08T09:40:00-04:00", "requested_by": "jorge", "reason": "resume"}
+    a = FakeAlpaca(positions={"BIL": 1080.0})
+    deps, store = make(a, at(date(2026, 7, 8), 9, 45), store=store)
+    h = H.tick(deps)
+    ra = [v for (c, n), v in store.items() if c == "c5-state" and n.startswith("RA")][0]
+    assert ra["decision_date"] == "2026-06-30" and ra["decision"]["target"] == "SSO" and ra["status"] == "submitted"
+    assert [(x[0], x[1]) for x in a.submitted] == [("sell", "BIL"), ("buy", "SSO")]
+    assert store[("c5-state", "realign-request.json")]["cleared_at"] and h["realign_pending"] is False
+    H.tick(deps)                                                                # cleared: not honoured twice
+    assert len(a.submitted) == 2
+
+
+def test_realign_is_ignored_while_paused():
+    store = running_store()
+    store[("c5-state", "kill-switch.json")] = control("paused")
+    store[("c5-state", "realign-request.json")] = {"requested_at": "2026-07-08T09:40:00-04:00", "requested_by": "jorge", "reason": "x"}
+    a = FakeAlpaca(positions={"SSO": 1990.0})
+    deps, store = make(a, at(date(2026, 7, 8), 9, 45), store=store)
+    h = H.tick(deps)
+    assert a.submitted == [] and "re-align request ignored while paused" in h["actions"]
+    assert not any(n.startswith("RA") for (c, n) in store if c == "c5-state") and not store[("c5-state", "realign-request.json")].get("cleared_at")
+
+
+def test_every_control_change_is_logged_once():
+    store = running_store()
+    store[("c5-state", "kill-switch.json")] = control("paused")
+    deps, store = make(FakeAlpaca(positions={"SSO": 1990.0}), at(date(2026, 7, 8), 9, 45), store=store)
+    H.tick(deps)
+    H.tick(deps)
+    log = store[("c5-state", "kill-switch-log.jsonl")]
+    assert [e["kind"] for e in log] == ["state"] and log[0]["state"] == "paused" and log[0]["changed_by"] == "jorge" and log[0]["reason"] == "test"
+    store[("c5-state", "kill-switch.json")] = control("active", at_="2026-07-08T11:00:00-04:00")
+    H.tick(deps)
+    assert [e.get("state") for e in store[("c5-state", "kill-switch-log.jsonl")] if e["kind"] == "state"] == ["paused", "active"]
+
+
+def test_an_unknown_control_state_fails_closed_to_paused():
+    store = running_store()
+    store[("c5-state", "kill-switch.json")] = {"state": "yolo", "changed_at": "t"}
+    a = FakeAlpaca(positions={"SSO": 1990.0})
+    deps, _ = make(a, at(date(2026, 7, 8), 9, 45), store=store)
+    h = H.tick(deps)
+    assert h["control"] == "paused" and "treated as paused" in h["error"] and a.submitted == []
+
+
+def test_wrong_holding_raises_the_mismatch_alert_once_a_day(caplog):
+    store = running_store(target="SSO")
+    a = FakeAlpaca(positions={"SPY": 900.0})                                     # something changed the account
+    deps, store = make(a, at(date(2026, 7, 8), 11, 0), store=store)
+    with caplog.at_level("ERROR", logger="c5"):
+        h = H.tick(deps)
+        H.tick(deps)
+    assert h["holding_mismatch"] == {"expected": "SSO", "actual": {"SPY": 900.0}}
+    assert sum("C5 HOLDING MISMATCH" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_disabled_dry_run_reflects_a_pause_within_one_tick():
+    a = FakeAlpaca(positions={"SSO": 1990.0})
+    deps, store = make(a, at(date(2026, 7, 8), 9, 45), enabled=False)
+    H.tick(deps)
+    assert store[("c5-state", "dry-run.json")]["control"] == "active" and store[("c5-state", "dry-run.json")]["intended_orders"]
+    store[("c5-state", "kill-switch.json")] = control("paused")
+    deps.now = lambda: at(date(2026, 7, 8), 10, 0)                              # next tick, inside the hour
+    H.tick(deps)
+    dr = store[("c5-state", "dry-run.json")]
+    assert dr["control"] == "paused" and dr["intended_orders"] == [] and a.submitted == []
