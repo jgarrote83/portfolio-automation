@@ -74,7 +74,7 @@
       `<div class="eg-key"><span class="lab">Holding now</span><span class="word">${started ? esc(s.holding_name || "—") : "Not started"}</span>` +
       `<span class="sub">${started ? `Since ${esc(day(s.holding_since))}` : "No position yet"}</span></div>` +
       `<div class="eg-key"><span class="lab">Next decision</span><span class="word">${esc(day(s.next_decision_date, true))}</span>` +
-      `<span class="sub">After the close; trades at the next day's close</span></div>` +
+      `<span class="sub">After the close; trades shortly before the next day's close</span></div>` +
       `<div class="eg-key"><span class="lab">Below its own peak</span><span class="num">${started ? below(bp.easygrid) : "—"}</span>` +
       `<span class="sub">SPY: ${started ? below(bp.spy) : "—"}</span></div>`;
   }
