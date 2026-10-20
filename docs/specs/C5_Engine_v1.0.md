@@ -35,16 +35,22 @@ Every session's open and close come from Alpaca's `GET /v2/calendar`, which carr
 2. **Decision:** 20 minutes after the close of a month's last session, the daily bar is final and past the free plan's 15-minute SIP
    delay. The engine computes the decision from Alpaca SIP daily bars (`adjustment=all`) and FRED `BAA10Y`, then writes
    `c5-state/<yyyymm>.json` with the inputs, the decision and the target.
-3. **Execution** on the next session, once the market is open and before the cutoff:
-   - **Market-on-close orders** (`time_in_force: cls`), whole shares, **sells first, then buys**, with client ids
+3. **Execution** on the next session, with the market open, on the tick inside the **near-close window**:
+   - **Plain market DAY orders** (`type: market`, `time_in_force: day`), whole shares, **sells first, then buys**, with client ids
      `C5-<session yyyymmdd>-<side>-<symbol>`, keyed on the session the orders execute in. Ids already present at the broker are skipped,
      so the step is idempotent.
-   - **Cutoff:** per Alpaca's "Orders at Alpaca" page, *"CLS orders submitted after 3:50pm but before 7:00pm ET will be rejected."*
-     The page does not cover half-days, so the engine applies the same 10-minute lead to each session's own close (12:50 on a 13:00
-     half-day).
-   - **Sizing:** the target gets 100% of equity less a **0.5% cash buffer** (`orders.CASH_BUFFER_PCT`). An MOC order fills at a closing
-     price unknown at submission, and without a buffer a rising close could leave the account slightly negative in cash. The whole-share
-     remainder stays as cash.
+   - **Window:** `[close − 20 min, close − 2 min)` of each session's own close (`schedule.in_submit_window`). With the 15-minute tick
+     that is exactly one tick: 15:45 on a 16:00 close, 12:45 on a 13:00 half-day. A missed window tick leaves the decision `decided`;
+     it executes in the next session's window and is recorded as `late`.
+   - **Why not market-on-close (changed 2026-10-20).** The engine first sent `time_in_force: cls` orders. Alpaca's paper account has no
+     closing auction: it treats a `cls` order as a market order at the close, and such orders can expire unfilled
+     (https://forum.alpaca.markets/t/paper-moc-orders-partially-fill-remainder-expires-same-setup-on-live-works/19155). The first live
+     order did exactly that: `C5-20261019-buy-SSO`, 1,421 SSO, sent 09:45 ET, expired 16:00:37 ET with 0 filled. The fill is now about
+     15 minutes before the close, not at it; the slippage against that day's close is recorded per fill (step 4), so the difference
+     from the backtest's close-to-close assumption stays measured. Market-on-close remains the natural choice for a future live account.
+   - **Sizing:** the target gets 100% of equity less a **0.5% cash buffer** (`orders.CASH_BUFFER_PCT`). The size comes from the latest
+     SIP price, about 15 minutes old on the free plan, while the order fills at the live price; the buffer absorbs that move. The
+     whole-share remainder stays as cash.
 4. **After that session's settled close:** the engine verifies that the account holds only the target. It then updates the ledger and
    records each fill with its slippage against that day's close, plus the previous period's return against SPY's. A failed
    verification is an ERROR and marks the month `verify_failed`. It is not retried automatically.
@@ -52,8 +58,8 @@ Every session's open and close come from Alpaca's `GET /v2/calendar`, which carr
    `c5-state/preview.json`. The preview shows "if the month ended today": the previous 9 month-end closes plus today's, and today's credit
    test. It is labelled as a preview, never a decision.
 
-**First enable:** when no state exists, the engine decides for the most recent completed month-end. It executes at today's close if the
-market is open and before the cutoff, otherwise at the next session's.
+**First enable:** when no state exists, the engine decides for the most recent completed month-end. It executes in today's near-close
+window if that window has not yet passed, otherwise in the next session's.
 
 ## Safety
 
@@ -78,12 +84,13 @@ market is open and before the cutoff, otherwise at the next session's.
     by looking the order up by client id (`GET /v2/orders:by_client_order_id`, https://docs.alpaca.markets/reference/getorderbyclientorderid;
     the doc lists only 200, and an unknown id was measured to return 404): found → `already_submitted` (WARNING); not found → ERROR.
     The 409/422 error text is only a log hint, never the decision. Nothing is retried.
-- **Pausing with orders in flight:** a change to `paused` or `paused_to_tbills` asks Alpaca to cancel this engine's open MOC orders
-  while it still allows it (before the cutoff) and marks that decision `cancel_requested`; `paused_to_tbills` then places its own BIL
-  orders. Later ticks read each order's final status by id: canceled → `cancelled` (strip: "Pause: cancel confirmed"); filled first →
+- **Pausing with orders in flight:** a change to `paused` or `paused_to_tbills` asks Alpaca to cancel this engine's still-OPEN orders
+  while the session is open and marks that decision `cancel_requested`; `paused_to_tbills` then places its own BIL orders. A market
+  order usually fills within seconds, so there is often nothing open: the decision then stays `submitted` and is verified at the close
+  like any other. "Nothing open" never means "cancelled", which would hide a real fill. Later ticks read each order's final status by id: canceled → `cancelled` (strip: "Pause: cancel confirmed"); filled first →
   the fills are recorded and the decision is `executed`, with the ledger written from the account so no mismatch alert fires (strip:
   "Pause: order filled before cancel; acting next session"); still not final once that session has closed → ERROR, once a day. After
-  the cutoff nothing is cancelled: the orders fill at the close, the engine logs that, and the new state acts from the next session.
+  the close nothing can be cancelled: the engine logs that, verifies the orders as usual, and the new state acts from the next session.
 - **Reconcile** against the ledger runs at the END of each tick, after any verification, so the tick that records a fill reads
   "Positions match ledger: Yes".
 - **Change log:** the engine appends every control change (who, when, why) and every action it takes on one to

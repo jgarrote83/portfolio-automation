@@ -1,10 +1,12 @@
-"""C5 schedule helpers (pure): sessions from Alpaca's calendar, month-ends, the MOC cutoff. Never a hard-coded market hour: every
-session's open and close come from `GET /v2/calendar` (which carries half-days), and the live state from `GET /v2/clock`.
+"""C5 schedule helpers (pure): sessions from Alpaca's calendar, month-ends, the near-close submission window. Never a hard-coded market
+hour: every session's open and close come from `GET /v2/calendar` (which carries half-days), and the live state from `GET /v2/clock`.
 
-MOC cutoff. Alpaca, "Orders at Alpaca" (docs.alpaca.markets/docs/orders-at-alpaca), time in force `cls`: "CLS orders submitted after
-3:50pm but before 7:00pm ET will be rejected." That is ten minutes before a 16:00 close; the page does not address early-close days, so
-the engine applies the same ten-minute lead to each session's own close (12:50 on a 13:00 half-day) and, in practice, submits shortly
-after the open, far from either.
+Submission window (decided 2026-10-20, replacing market-on-close). Alpaca's PAPER account has no closing auction: a `cls` order is
+treated as a market order at the close and can expire unfilled (forum.alpaca.markets/t/paper-moc-orders-partially-fill-remainder-
+expires-same-setup-on-live-works/19155), and the first live C5 order did exactly that (2026-10-19: 1,421 SSO, expired 16:00:37, 0
+filled). The engine now sends a plain market DAY order inside [close - 20 min, close - 2 min) of each session's OWN close. With the
+15-minute tick that is exactly one tick: 15:45 on a 16:00 close, 12:45 on a 13:00 half-day (15:30 / 12:30 fall before the window).
+If that tick is missed, the decision stays `decided` and executes in the next session's window (recorded as late).
 """
 from __future__ import annotations
 
@@ -13,7 +15,8 @@ from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 ET = ZoneInfo("America/New_York")
-MOC_LEAD = timedelta(minutes=10)
+SUBMIT_FROM = timedelta(minutes=20)               # the window opens this long before the session's close ...
+SUBMIT_UNTIL = timedelta(minutes=2)               # ... and shuts this long before it, so a market order still meets an open market
 SETTLE_AFTER_CLOSE = timedelta(minutes=20)        # the daily bar is final and past the free plan's 15-minute SIP delay
 
 
@@ -56,8 +59,17 @@ def is_month_end(ss: list[Session], d: date) -> bool:
     return (nxt.day.year, nxt.day.month) != (d.year, d.month)
 
 
-def moc_cutoff(s: Session) -> datetime:
-    return s.close - MOC_LEAD
+def submit_opens(s: Session) -> datetime:
+    return s.close - SUBMIT_FROM
+
+
+def submit_deadline(s: Session) -> datetime:
+    """After this, today's window is gone: a decision made now executes in the next session's window."""
+    return s.close - SUBMIT_UNTIL
+
+
+def in_submit_window(s: Session, now: datetime) -> bool:
+    return submit_opens(s) <= now < submit_deadline(s)
 
 
 def settled(s: Session, now: datetime) -> bool:

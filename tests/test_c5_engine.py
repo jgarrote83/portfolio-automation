@@ -41,8 +41,18 @@ def test_month_end_handles_half_days_and_holidays():
     assert sch.is_month_end(SS, date(2025, 11, 28))                      # a half-day month-end
     assert sch.is_month_end(SS, date(2026, 8, 28)) and not sch.session_on(SS, date(2026, 8, 31))   # Friday, because Monday 08-31 is a holiday
     assert not sch.is_month_end(SS, date(2026, 8, 27)) and not sch.is_month_end(SS, date(2026, 8, 29))
-    assert sch.moc_cutoff(sch.session_on(SS, date(2025, 11, 28))) == datetime(2025, 11, 28, 12, 50, tzinfo=ET)
-    assert sch.moc_cutoff(sch.session_on(SS, date(2026, 6, 1))) == datetime(2026, 6, 1, 15, 50, tzinfo=ET)
+    half, full = sch.session_on(SS, date(2025, 11, 28)), sch.session_on(SS, date(2026, 6, 1))
+    assert (sch.submit_opens(half), sch.submit_deadline(half)) == (datetime(2025, 11, 28, 12, 40, tzinfo=ET), datetime(2025, 11, 28, 12, 58, tzinfo=ET))
+    assert (sch.submit_opens(full), sch.submit_deadline(full)) == (datetime(2026, 6, 1, 15, 40, tzinfo=ET), datetime(2026, 6, 1, 15, 58, tzinfo=ET))
+
+
+def test_exactly_one_15_minute_tick_falls_in_each_sessions_submit_window():
+    for d, want in [(date(2026, 6, 1), (15, 45)), (date(2025, 11, 28), (12, 45))]:   # a full day, a half-day
+        s = sch.session_on(SS, d)
+        ticks = [datetime(d.year, d.month, d.day, h, m, tzinfo=ET) for h in range(24) for m in (0, 15, 30, 45)]
+        hits = [(t.hour, t.minute) for t in ticks if sch.in_submit_window(s, t)]
+        assert hits == [want]
+        assert sch.in_submit_window(s, datetime(d.year, d.month, d.day, *want, 40, tzinfo=ET))      # a tick that fires late still lands
 
 
 def test_last_completed_month_end_waits_for_the_settled_close():
@@ -117,7 +127,7 @@ def test_plan_sells_first_whole_shares_and_session_keyed_ids():
     tag = ords.session_tag(date(2026, 7, 6))
     o = ords.plan({"SPY": 150.0, "BIL": 3.0}, "SSO", 100_000.0, 99.0, tag)
     assert [x["side"] for x in o] == ["sell", "sell", "buy"]
-    assert o[-1] == {"symbol": "SSO", "side": "buy", "qty": int(100_000 * 0.995 // 99), "type": "market", "time_in_force": "cls",
+    assert o[-1] == {"symbol": "SSO", "side": "buy", "qty": int(100_000 * 0.995 // 99), "type": "market", "time_in_force": "day",
                      "client_order_id": "C5-20260706-buy-SSO"}
     assert {x["client_order_id"] for x in o} == {"C5-20260706-sell-BIL", "C5-20260706-sell-SPY", "C5-20260706-buy-SSO"}
     assert ords.plan({"SSO": 1005.0}, "SSO", 100_000.0, 99.0, tag) == []      # already at target: no order
@@ -192,7 +202,7 @@ class FakeAlpaca:
         return next((dict(o) for o in self.orders if o["client_order_id"] == client_order_id), None)
 
     def submit_order(self, symbol, qty, side, order_type, time_in_force, client_order_id):
-        assert order_type == "market" and time_in_force == "cls"
+        assert order_type == "market" and time_in_force == "day"          # plain market DAY order (was cls)
         self.attempts.append(client_order_id)
         if self.submit_error is not None:
             raise self.submit_error
@@ -224,13 +234,17 @@ def at(d, hh, mm):
 
 def test_full_flow_first_enable_execute_verify():
     a = FakeAlpaca(positions={})
-    deps, store = make(a, at(date(2026, 7, 6), 10, 0))                # Monday 2026-07-06, market open
+    deps, store = make(a, at(date(2026, 7, 6), 10, 0))                # Monday 2026-07-06, market open, morning
     h = H.tick(deps)
     st = store[("c5-state", "202606.json")]
-    assert st["first_enable"] and st["decision_date"] == "2026-06-30" and st["status"] == "submitted"
-    assert [x[0] for x in a.submitted] == ["buy"] and a.submitted[0][1] == st["decision"]["target"]
-    assert h["error"] is None
-    # a second tick the same morning submits nothing new (idempotent)
+    assert st["first_enable"] and st["decision_date"] == "2026-06-30" and st["status"] == "decided"
+    assert a.submitted == [] and h["error"] is None                   # the morning only decides: orders wait for the near-close window
+    deps.now = lambda: at(date(2026, 7, 6), 15, 45)                   # the one tick inside [15:40, 15:58)
+    H.tick(deps)
+    st = store[("c5-state", "202606.json")]
+    assert st["status"] == "submitted" and [x[0] for x in a.submitted] == ["buy"] and a.submitted[0][1] == st["decision"]["target"]
+    # a second tick inside the window submits nothing new (idempotent)
+    deps.now = lambda: at(date(2026, 7, 6), 15, 50)
     H.tick(deps)
     assert len(a.submitted) == 1
     # after the settled close: the position is there -> executed, ledger written, series appended, preview written
@@ -255,6 +269,9 @@ def test_month_end_decision_then_next_session_execution_sells_first():
     st = store[("c5-state", "202607.json")]
     assert st["status"] == "decided" and st["execution_date"] == "2026-08-03" and a.submitted == []
     deps.now = lambda: at(date(2026, 8, 3), 9, 45)
+    H.tick(deps)
+    assert a.submitted == []                                           # not before the near-close window
+    deps.now = lambda: at(date(2026, 8, 3), 15, 45)
     H.tick(deps)
     assert st["decision"]["target"] == "SSO"                           # rising SPY, flat credit (<= its average) -> both healthy
     assert [(x[0], x[1]) for x in a.submitted] == [("sell", "SPY"), ("buy", "SSO")]       # sells first
@@ -286,11 +303,24 @@ def test_disabled_never_trades_and_refreshes_the_dry_run():
     assert a.submitted == []
 
 
-def test_no_orders_after_the_moc_cutoff():
+def test_no_orders_after_the_submit_window_closes():
     a = FakeAlpaca()
-    deps, store = make(a, at(date(2026, 7, 6), 15, 55))
+    deps, store = make(a, at(date(2026, 7, 6), 15, 59))                 # past 15:58: today's window is gone
     H.tick(deps)
     assert a.submitted == [] and store[("c5-state", "202606.json")]["execution_date"] == "2026-07-07"
+
+
+def test_a_missed_window_tick_executes_in_the_next_sessions_window_as_late():
+    a = FakeAlpaca()
+    deps, store = make(a, at(date(2026, 7, 6), 10, 0))
+    H.tick(deps)                                                        # decided for 07-06; the 15:45 tick never runs that day
+    deps.now = lambda: at(date(2026, 7, 7), 10, 0)
+    H.tick(deps)
+    assert a.submitted == []
+    deps.now = lambda: at(date(2026, 7, 7), 15, 45)
+    H.tick(deps)
+    st = store[("c5-state", "202606.json")]
+    assert len(a.submitted) == 1 and a.submitted[0][3] == "C5-20260707-buy-SSO" and st["late"] is True
 
 
 def test_reconcile_mismatch_is_reported():
@@ -358,7 +388,7 @@ def test_paused_places_no_orders_but_still_records_the_month_end_decision():
     deps, store = make(a, at(date(2026, 7, 31), 13, 25), store=store)          # the half-day month-end, settled
     h = H.tick(deps)
     assert store[("c5-state", "202607.json")]["status"] == "decided" and any("not executed" in x for x in h["actions"])
-    deps.now = lambda: at(date(2026, 8, 3), 9, 45)
+    deps.now = lambda: at(date(2026, 8, 3), 15, 45)                            # inside the window, but paused
     H.tick(deps)
     assert a.submitted == [] and store[("c5-state", "202607.json")]["status"] == "decided"
 
@@ -367,7 +397,10 @@ def test_paused_to_tbills_sells_to_bil_at_the_next_close_then_stops():
     store = running_store()
     store[("c5-state", "kill-switch.json")] = control("paused_to_tbills")
     a = FakeAlpaca(positions={"SSO": 1990.0})
-    deps, store = make(a, at(date(2026, 7, 7), 10, 5), store=store)            # within one tick of the change
+    deps, store = make(a, at(date(2026, 7, 7), 10, 5), store=store)            # within one tick of the change: scheduled ...
+    H.tick(deps)
+    assert a.submitted == [] and [v for (c, n), v in store.items() if c == "c5-state" and n.startswith("PT")][0]["execution_date"] == "2026-07-07"
+    deps.now = lambda: at(date(2026, 7, 7), 15, 45)                            # ... and sent in that session's near-close window
     H.tick(deps)
     assert [(x[0], x[1]) for x in a.submitted] == [("sell", "SSO"), ("buy", "BIL")]          # sells first
     assert all(x[3].startswith("C5-20260707-") for x in a.submitted)
@@ -379,7 +412,7 @@ def test_paused_to_tbills_sells_to_bil_at_the_next_close_then_stops():
     n = len(a.submitted)
     deps.now = lambda: at(date(2026, 7, 31), 16, 30)                           # a month-end passes: recorded, never executed
     H.tick(deps)
-    deps.now = lambda: at(date(2026, 8, 3), 10, 0)
+    deps.now = lambda: at(date(2026, 8, 3), 15, 45)
     H.tick(deps)
     assert len(a.submitted) == n and store[("c5-state", "202607.json")]["status"] == "decided"
 
@@ -392,9 +425,12 @@ def test_resume_realigns_to_the_latest_month_end_decision():
     deps, store = make(a, at(date(2026, 7, 8), 9, 45), store=store)
     h = H.tick(deps)
     ra = [v for (c, n), v in store.items() if c == "c5-state" and n.startswith("RA")][0]
-    assert ra["decision_date"] == "2026-06-30" and ra["decision"]["target"] == "SSO" and ra["status"] == "submitted"
+    assert ra["decision_date"] == "2026-06-30" and ra["decision"]["target"] == "SSO" and ra["status"] == "decided"
+    assert store[("c5-state", "realign-request.json")]["cleared_at"] and h["realign_pending"] is False and a.submitted == []
+    deps.now = lambda: at(date(2026, 7, 8), 15, 45)
+    H.tick(deps)
     assert [(x[0], x[1]) for x in a.submitted] == [("sell", "BIL"), ("buy", "SSO")]
-    assert store[("c5-state", "realign-request.json")]["cleared_at"] and h["realign_pending"] is False
+    deps.now = lambda: at(date(2026, 7, 8), 15, 50)
     H.tick(deps)                                                                # cleared: not honoured twice
     assert len(a.submitted) == 2
 
@@ -455,15 +491,18 @@ def test_disabled_dry_run_reflects_a_pause_within_one_tick():
     assert dr["control"] == "paused" and dr["intended_orders"] == [] and a.submitted == []
 
 
-# --- in-flight orders: re-align, duplicate ids, pause cancels (fix/c5-realign-inflight) ------------------------------------
+# --- in-flight orders: re-align, duplicate ids, pause cancels (fix/c5-realign-inflight; window times since 2026-10-20) ----------
 
-MON = date(2026, 7, 6)                                                          # a full session; MOC cutoff 15:50
+MON = date(2026, 7, 6)                                                          # a full session; submit window [15:40, 15:58)
 
 
-def first_enabled(now=None):
-    """First enable at 10:00 on MON: one MOC buy submitted and resting at Alpaca."""
+def first_enabled():
+    """First enable on MON: decided at 10:00, one market buy sent at the 15:45 tick and (in the fake) still open."""
     a = FakeAlpaca(positions={})
-    deps, store = make(a, now or at(MON, 10, 0))
+    deps, store = make(a, at(MON, 10, 0))
+    H.tick(deps)
+    assert a.submitted == []
+    deps.now = lambda: at(MON, 15, 45)
     H.tick(deps)
     assert len(a.submitted) == 1 and a.submitted[0][3] == "C5-20260706-buy-SSO"
     return a, deps, store
@@ -477,9 +516,9 @@ def fill(a, i=0):
 
 def test_realign_arriving_mid_window_places_no_second_order():
     a, deps, store = first_enabled()
-    store[("c5-state", "kill-switch.json")] = control("active", at_="2026-07-06T15:40:00-04:00", reason="resume")
-    store[("c5-state", "realign-request.json")] = {"requested_at": "2026-07-06T15:40:00-04:00", "requested_by": "jorge", "reason": "resume"}
-    deps.now = lambda: at(MON, 15, 45)                                          # after submit, before the cutoff and the close
+    store[("c5-state", "kill-switch.json")] = control("active", at_="2026-07-06T15:46:00-04:00", reason="resume")
+    store[("c5-state", "realign-request.json")] = {"requested_at": "2026-07-06T15:46:00-04:00", "requested_by": "jorge", "reason": "resume"}
+    deps.now = lambda: at(MON, 15, 48)                                          # after submit, still inside the window, before the close
     h = H.tick(deps)
     assert len(a.submitted) == 1 and a.attempts == ["C5-20260706-buy-SSO"]       # no second order, not even an attempt
     assert any("re-align deferred" in x for x in h["actions"]) and h["realign_pending"] is True
@@ -493,7 +532,7 @@ def test_realign_arriving_mid_window_places_no_second_order():
     H.tick(deps)
     ra = [v for (c, n), v in store.items() if c == "c5-state" and n.startswith("RA")][0]
     assert ra["execution_date"] == "2026-07-07" and store[("c5-state", "realign-request.json")]["cleared_at"]
-    deps.now = lambda: at(date(2026, 7, 7), 10, 0)                              # planned from the FILLED position: a trim, never a re-buy
+    deps.now = lambda: at(date(2026, 7, 7), 15, 45)                             # planned from the FILLED position: a trim, never a re-buy
     H.tick(deps)
     assert len(a.submitted) <= 2 and all(q < 20 for (_, _, q, _) in a.submitted[1:])
 
@@ -502,13 +541,13 @@ def test_first_enable_plus_pending_realign_on_the_same_tick_buys_exactly_once():
     store = {("c5-state", "kill-switch.json"): control("active", at_="2026-07-06T09:40:00-04:00"),
              ("c5-state", "realign-request.json"): {"requested_at": "2026-07-06T09:40:00-04:00", "requested_by": "jorge", "reason": "resume"}}
     a = FakeAlpaca(positions={})
-    deps, store = make(a, at(MON, 10, 0), store=store)
+    deps, store = make(a, at(MON, 0, 0), store=store)                           # Monday's first tick, as in production
     H.tick(deps)
+    assert a.submitted == [] and store[("c5-state", "202606.json")]["status"] == "superseded"
+    for hh, mm in [(9, 45), (15, 30), (15, 45), (15, 50), (16, 0)]:
+        deps.now = lambda hh=hh, mm=mm: at(MON, hh, mm)
+        H.tick(deps)
     assert [(s, sym, cid) for (s, sym, _, cid) in a.submitted] == [("buy", "SSO", "C5-20260706-buy-SSO")]
-    assert store[("c5-state", "202606.json")]["status"] == "superseded"
-    deps.now = lambda: at(MON, 10, 15)
-    H.tick(deps)
-    assert len(a.submitted) == 1
 
 
 @pytest.mark.parametrize("error", ["duplicate_422", "timeout"])
@@ -518,7 +557,7 @@ def test_a_submit_error_whose_order_is_found_by_client_id_is_already_submitted(e
     a.known_ids = {"C5-20260706-buy-SSO"}                                       # Alpaca has it; the order list did not show it
     if error == "timeout":
         a.submit_error = requests.Timeout("read timed out")
-    deps, store = make(a, at(MON, 10, 0))
+    deps, store = make(a, at(MON, 15, 45))
     with caplog.at_level("WARNING", logger="c5"):
         h = H.tick(deps)
     st = store[("c5-state", "202606.json")]
@@ -527,7 +566,7 @@ def test_a_submit_error_whose_order_is_found_by_client_id_is_already_submitted(e
     assert st["status"] == "submitted" and o["status"] == "already_submitted" and o["order_id"] == "known-C5-20260706-buy-SSO"
     assert h["error"] is None and not [r for r in caplog.records if r.levelname == "ERROR"]
     assert any("already submitted" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
-    deps.now = lambda: at(MON, 10, 15)
+    deps.now = lambda: at(MON, 15, 50)
     H.tick(deps)
     assert a.attempts == ["C5-20260706-buy-SSO"]                                # never retried
 
@@ -542,14 +581,14 @@ def test_a_submit_error_whose_order_is_not_found_is_a_genuine_error_never_retrie
         r = requests.Response()
         r.status_code, r._content = 500, b"internal error"
         a.submit_error = requests.HTTPError("500 Server Error", response=r)
-    deps, store = make(a, at(MON, 10, 0))
+    deps, store = make(a, at(MON, 15, 45))
     with caplog.at_level("WARNING", logger="c5"):
         H.tick(deps)
     o = store[("c5-state", "202606.json")]["orders"][0]
     assert o["status"] == "error: HTTPError" and "not found" in o["note"] and a.lookups == ["C5-20260706-buy-SSO"]
     errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
     assert errors and ("looks like a duplicate" in errors[0]) == (error == "duplicate_422")
-    deps.now = lambda: at(MON, 10, 15)
+    deps.now = lambda: at(MON, 15, 50)
     H.tick(deps)
     assert a.attempts == ["C5-20260706-buy-SSO"]                                # never retried
 
@@ -557,16 +596,16 @@ def test_a_submit_error_whose_order_is_not_found_is_a_genuine_error_never_retrie
 def test_submit_never_buys_a_symbol_with_an_open_engine_order():
     a = FakeAlpaca(positions={})
     a.orders.append({"id": "old", "client_order_id": "C5-20260702-buy-SSO", "status": "accepted", "symbol": "SSO"})
-    deps, store = make(a, at(MON, 10, 0))
+    deps, store = make(a, at(MON, 15, 45))
     H.tick(deps)
     assert a.submitted == [] and store[("c5-state", "202606.json")]["orders"][0]["status"] == "skipped_open_order"
 
 
-def paused_before_cutoff(state, cancel_takes_effect=True):
+def paused_before_close(state, cancel_takes_effect=True):
     a, deps, store = first_enabled()
     a.cancel_takes_effect = cancel_takes_effect
-    store[("c5-state", "kill-switch.json")] = control(state, at_="2026-07-06T11:00:00-04:00")
-    deps.now = lambda: at(MON, 11, 5)
+    store[("c5-state", "kill-switch.json")] = control(state, at_="2026-07-06T15:47:00-04:00")
+    deps.now = lambda: at(MON, 15, 48)
     h = H.tick(deps)
     st = store[("c5-state", "202606.json")]
     assert a.cancelled == ["id-0"] and st["status"] == "cancel_requested"       # accepted by Alpaca is NOT yet cancelled
@@ -576,13 +615,13 @@ def paused_before_cutoff(state, cancel_takes_effect=True):
 
 
 @pytest.mark.parametrize("state", ["paused", "paused_to_tbills"])
-def test_a_pause_before_the_cutoff_cancels_the_open_buy_and_confirms_it(state):
-    a, deps, store = paused_before_cutoff(state)
+def test_a_pause_before_the_close_cancels_the_open_buy_and_confirms_it(state):
+    a, deps, store = paused_before_close(state)
     if state == "paused":
         assert len(a.submitted) == 1                                            # nothing new
     else:
         assert a.submitted[1][:2] == ("buy", "BIL") and a.submitted[1][3] == "C5-20260706-buy-BIL"   # straight to T-bills, not SSO+BIL
-    deps.now = lambda: at(MON, 11, 20)                                          # next tick: the final status is read by id -> canceled
+    deps.now = lambda: at(MON, 15, 52)                                          # next tick: the final status is read by id -> canceled
     h = H.tick(deps)
     st = store[("c5-state", "202606.json")]
     assert st["status"] == "cancelled" and st["pause_outcome"] == "cancel_confirmed" and h["pause"] == "Pause: cancel confirmed"
@@ -593,12 +632,25 @@ def test_a_pause_before_the_cutoff_cancels_the_open_buy_and_confirms_it(state):
     assert store[("c5-state", "202606.json")]["status"] == "cancelled" and h["holding_mismatch"] is None
 
 
-def test_a_cancel_that_loses_the_race_to_the_close_records_the_fill_as_executed(caplog):
-    a, deps, store = paused_before_cutoff("paused", cancel_takes_effect=False)
-    deps.now = lambda: at(MON, 11, 20)
+def test_a_pause_after_the_market_order_already_filled_is_verified_not_cancelled():
+    a, deps, store = first_enabled()
+    fill(a)                                                                     # a market order fills within seconds
+    store[("c5-state", "kill-switch.json")] = control("paused", at_="2026-07-06T15:47:00-04:00")
+    deps.now = lambda: at(MON, 15, 48)
+    h = H.tick(deps)
+    st = store[("c5-state", "202606.json")]
+    assert a.cancelled == [] and st["status"] == "submitted" and any("no open order" in x for x in h["actions"])
+    deps.now = lambda: at(MON, 16, 30)
+    h = H.tick(deps)
+    assert store[("c5-state", "202606.json")]["status"] == "executed" and h["holding_mismatch"] is None and h["reconcile"] == "ok"
+
+
+def test_a_cancel_that_loses_the_race_records_the_fill_as_executed(caplog):
+    a, deps, store = paused_before_close("paused", cancel_takes_effect=False)
+    deps.now = lambda: at(MON, 15, 52)
     H.tick(deps)
     assert store[("c5-state", "202606.json")]["status"] == "cancel_requested"   # still live before the close: wait, no alarm
-    fill(a)                                                                     # the close filled it
+    fill(a)                                                                     # it filled anyway
     deps.now = lambda: at(MON, 16, 30)
     with caplog.at_level("WARNING", logger="c5"):
         h = H.tick(deps)
@@ -614,7 +666,7 @@ def test_a_cancel_that_loses_the_race_to_the_close_records_the_fill_as_executed(
 
 
 def test_a_cancel_still_pending_past_the_close_is_an_error_once_a_day(caplog):
-    a, deps, store = paused_before_cutoff("paused", cancel_takes_effect=False)
+    a, deps, store = paused_before_close("paused", cancel_takes_effect=False)
     deps.now = lambda: at(MON, 16, 30)                                          # settled close, order neither canceled nor filled
     with caplog.at_level("ERROR", logger="c5"):
         h = H.tick(deps)
@@ -627,18 +679,18 @@ def test_a_cancel_still_pending_past_the_close_is_an_error_once_a_day(caplog):
 
 
 @pytest.mark.parametrize("state", ["paused", "paused_to_tbills"])
-def test_a_pause_after_the_cutoff_does_not_cancel_and_acts_next_session(state):
+def test_a_pause_after_the_close_does_not_cancel_and_acts_next_session(state):
     a, deps, store = first_enabled()
-    store[("c5-state", "kill-switch.json")] = control(state, at_="2026-07-06T15:52:00-04:00")
-    deps.now = lambda: at(MON, 15, 55)
+    store[("c5-state", "kill-switch.json")] = control(state, at_="2026-07-06T16:02:00-04:00")
+    deps.now = lambda: at(MON, 16, 5)                                           # after the close, before it settles
     h = H.tick(deps)
     assert a.cancelled == [] and len(a.submitted) == 1 and store[("c5-state", "202606.json")]["status"] == "submitted"
-    assert any("after the MOC cutoff" in x for x in h["actions"])
-    assert any(e.get("action") == f"{state} after the MOC cutoff" for e in store[("c5-state", "kill-switch-log.jsonl")])
+    assert any("after the close" in x for x in h["actions"])
+    assert any(e.get("action") == f"{state} after the close" for e in store[("c5-state", "kill-switch-log.jsonl")])
     if state == "paused_to_tbills":
         pt = [v for (c, n), v in store.items() if c == "c5-state" and n.startswith("PT")][0]
         assert pt["execution_date"] == "2026-07-07" and pt["status"] == "decided"
     fill(a)
-    deps.now = lambda: at(MON, 16, 30)                                          # the order filled at the close: verified normally
+    deps.now = lambda: at(MON, 16, 30)                                          # verified normally
     H.tick(deps)
     assert store[("c5-state", "202606.json")]["status"] == "executed"

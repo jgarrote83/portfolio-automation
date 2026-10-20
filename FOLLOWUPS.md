@@ -663,6 +663,31 @@ wiped them.
 
 ## Open
 
+### 131. C5's first order expired unfilled (paper market-on-close); engine switched to a near-close market order (OPEN until the re-align fills)
+**What happened (2026-10-19, C5's first live day).**
+- The engine behaved as designed: the decision was for 2026-09-30 → SSO, and the pending re-align was honoured at 00:00 ET. Exactly
+  one order went out at 09:45 ET: `C5-20261019-buy-SSO`, 1,421 SSO, `time_in_force: cls`.
+- Alpaca expired it at 16:00:37 ET with 0 filled. Its paper account has no closing auction; a `cls` order is a market order at the
+  close and can lapse. Source:
+  https://forum.alpaca.markets/t/paper-moc-orders-partially-fill-remainder-expires-same-setup-on-live-works/19155
+- Verification marked `RA202610182219` as `verify_failed`. The daily "C5 HOLDING MISMATCH" ERROR went to App Insights only (#130).
+  The account is still flat, $100,000 cash.
+
+**Fix (Option A, branch `fix/c5-paper-market-order`).**
+- Orders are now plain market DAY orders, sent on the one 15-minute tick inside `[close − 20 min, close − 2 min)`: 15:45 ET, or 12:45
+  on a half-day.
+- A pause that finds nothing open (the market order already filled) leaves the decision `submitted` for verification, never
+  `cancelled`.
+- Fills land about 15 minutes before the close; per-fill slippage against the close is recorded.
+
+**Still to do.**
+- Deploy.
+- One **Re-align** from the EasyGrid tab, so the account aligns in the next session's window (replayed: one buy,
+  `C5-<session>-buy-SSO`).
+- Check that fill the evening after.
+
+---
+
 ### 130. C5 ERRORs email nobody: no alert rule exists (MEDIUM — accepted for enable on 2026-10-18; build it next)
 **What happens today.**
 - Every C5 ERROR goes only to App Insights as a `logger.error` trace from func-pfauto. That covers a holding mismatch, a failed

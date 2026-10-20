@@ -1,10 +1,12 @@
 """C5 orders, reconciliation and verification (pure).
 
-Orders are market-on-close (`time_in_force: cls`), whole shares, sells first then buys, with client order ids
+Orders are plain market DAY orders sent in the near-close window (`c5.schedule.in_submit_window`; market-on-close was dropped on
+2026-10-20 because Alpaca's paper account lets `cls` orders expire unfilled), whole shares, sells first then buys, with client order ids
 `C5-<session yyyymmdd>-<side>-<symbol>`. The id is keyed on the SESSION the order executes in, not on the decision that produced it, so
 two decisions acting on the same session (first enable plus a re-align, a pause and a resume) produce the same id and Alpaca itself
-rejects the second as a duplicate. The target gets 100% of equity less a small cash buffer (`CASH_BUFFER_PCT`, because an MOC order fills
-at a closing price not known at submission); whatever whole shares leave over stays as cash.
+rejects the second as a duplicate. The target gets 100% of equity less a small cash buffer (`CASH_BUFFER_PCT`, because the order is
+sized from a price about 15 minutes old, the free plan's SIP delay, and fills at the live price); whatever whole shares leave over
+stays as cash.
 """
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ import math
 from datetime import date
 
 CASH_BUFFER_PCT = 0.5
+TIME_IN_FORCE = "day"                             # a plain market order in the near-close window (was "cls" until 2026-10-20)
 ID_PREFIX = "C5-"
 OPEN_STATUSES = ("new", "accepted", "pending_new", "partially_filled", "held", "accepted_for_bidding", "pending_replace")
 
@@ -50,7 +53,7 @@ def plan(positions: dict[str, float], target: str, equity: float, price: float, 
         sells.append({"symbol": target, "side": "sell", "qty": have - want})
     out = sells + buys
     for o in out:
-        o.update({"type": "market", "time_in_force": "cls", "client_order_id": client_id(tag, o["side"], o["symbol"])})
+        o.update({"type": "market", "time_in_force": TIME_IN_FORCE, "client_order_id": client_id(tag, o["side"], o["symbol"])})
     return out
 
 

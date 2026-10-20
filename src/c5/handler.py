@@ -11,7 +11,9 @@ Every 15 minutes (`c5_tick`, gated by Alpaca's clock and calendar; no hard-coded
      ERROR "C5 HOLDING MISMATCH" in App Insights, once a day, and a red "Holding mismatch" in the portal);
   3. after the settled close of the LAST session of a month: decide (c5.decision / c5.signals) and write `c5-state/<yyyymm>.json`
      (recorded in every control state; executed only while `active`);
-  4. on the next session, while the market is open and before the MOC cutoff: submit market-on-close orders, sells first;
+  4. on the next session, while the market is open, on the tick inside the near-close window (`schedule.in_submit_window`, about 15
+     minutes before that session's own close): submit plain market DAY orders, sells first. (Market-on-close until 2026-10-20: Alpaca's
+     paper account let the first `cls` order expire unfilled.);
   5. after that session's settled close: verify the account holds the target, update the ledger, record fills and slippage;
   6. after every settled close: append `c5-equity-series/series.json` and write `c5-state/preview.json` (a preview, never a decision).
 
@@ -27,10 +29,11 @@ IN-FLIGHT ORDERS (three independent layers; each alone prevents a duplicate buy)
   (c) client ids are keyed on the execution SESSION (`C5-<yyyymmdd>-<side>-<symbol>`), so Alpaca rejects a same-day duplicate. ANY
       submission error is resolved by looking the order up by client id: found -> `already_submitted` (WARNING); not found -> ERROR.
       The error text is only a log hint, never the decision. Never retried.
-A change to `paused` / `paused_to_tbills` asks Alpaca to cancel this engine's open MOC orders while it still allows it (before the MOC
-cutoff) and marks that decision `cancel_requested`. Later ticks read each order's final status: canceled -> `cancelled`; filled first
-(the close won the race) -> fills recorded, `executed`, no mismatch alert; still not final after the close -> ERROR. After the cutoff
-nothing is cancelled: the orders fill at the close, which is logged, and the pause acts from the next session.
+A change to `paused` / `paused_to_tbills` asks Alpaca to cancel this engine's still-OPEN orders while the session is open, and marks that
+decision `cancel_requested`. Later ticks read each order's final status: canceled -> `cancelled`; filled first (the race) -> fills
+recorded, `executed`, no mismatch alert; still not final after the close -> ERROR. If nothing is open (a market order usually fills in
+seconds) the decision is left `submitted` and verified at the close as usual: "nothing open" never means "cancelled". After the close
+nothing can be cancelled, which is logged, and the pause acts from the next session.
 First enable (no state at all, `active`): decide for the most recent completed month-end and execute at the next close.
 Fail closed: any missing input -> no trade, an ERROR log, holdings kept. `C5_ENABLED` != "true" -> no trading at all; the tick only
 refreshes the dry run (which shows the control state's effect), the preview, the control log and the health record.
@@ -226,7 +229,7 @@ def _new_state(tag: str, kind: str, decision_day: date | None, execution: sch.Se
 
 
 def _exec_session(ss, today, now) -> sch.Session:
-    return today if (today and now < sch.moc_cutoff(today)) else sch.next_session(ss, now.date())
+    return today if (today and now < sch.submit_deadline(today)) else sch.next_session(ss, now.date())
 
 
 def _may_execute(st: dict, control: str) -> bool:
@@ -322,7 +325,7 @@ def tick(d: Deps | None = None) -> dict:
             d.write(STATE, REALIGN, {"cleared_at": now.isoformat(), "handled_by": tag, "last_request": realign})
             _log(d, {"key": f"engine:{tag}", "logged_at": now.isoformat(), "kind": "engine", "action": "realign honoured",
                      "target": st["decision"]["target"], "execution_date": st["execution_date"]})
-            health["actions"].append(f"re-align to the {me.day} decision ({st['decision']['target']}) at {ex.day}'s close")
+            health["actions"].append(f"re-align to the {me.day} decision ({st['decision']['target']}) in {ex.day}'s near-close window")
             health["realign_pending"] = False
         elif realign:
             health["actions"].append(f"re-align request ignored while {cstate}")
@@ -330,7 +333,7 @@ def tick(d: Deps | None = None) -> dict:
         # execution
         live = [s for s in states if s.get("status") in ("decided", "submitted")]
         pending = live[-1] if live else None
-        if (pending and pending["status"] == "decided" and today and clock.get("is_open") and today.open <= now < sch.moc_cutoff(today)
+        if (pending and pending["status"] == "decided" and today and clock.get("is_open") and sch.in_submit_window(today, now)
                 and today.day >= date.fromisoformat(pending["execution_date"])):
             if _may_execute(pending, cstate):
                 _submit(d, pending, positions, raws, today, open_orders, health)
@@ -422,19 +425,19 @@ def _resolve_submit_error(d: Deps, o: dict, e: Exception) -> dict:
 
 def _cancel_inflight(d: Deps, states: list[dict], cstate: str, open_orders: list[dict], today: sch.Session | None, now: datetime,
                      health: dict) -> list[dict]:
-    """Paused / paused to T-bills: cancel the open MOC orders of every submitted decision the new state may not execute (the
-    to-T-bills set itself is kept), while Alpaca still allows it. Returns the open orders still left."""
+    """Paused / paused to T-bills: cancel the still-OPEN orders of every submitted decision the new state may not execute (the
+    to-T-bills set itself is kept), while the session is open. Returns the open orders still left."""
     inflight = [s for s in states if s.get("status") == "submitted" and not _may_execute(s, cstate)]
     if not inflight:
         return open_orders
-    if not (today and now < sch.moc_cutoff(today)):
-        key = f"engine:after-cutoff:{cstate}:{now.date().isoformat()}"
+    if not (today and now < today.close):
+        key = f"engine:after-close:{cstate}:{now.date().isoformat()}"
         if key not in {e.get("key") for e in (d.read_lines(STATE, CONTROL_LOG) if d.read_lines else [])}:
-            _log(d, {"key": key, "logged_at": now.isoformat(), "kind": "engine", "action": f"{cstate} after the MOC cutoff",
-                     "note": "today's orders can no longer be cancelled and will fill at the close; the new state acts from the next session"})
-        logger.warning("C5 %s after the MOC cutoff: %s will fill at the close; acting from the next session", cstate,
+            _log(d, {"key": key, "logged_at": now.isoformat(), "kind": "engine", "action": f"{cstate} after the close",
+                     "note": "today's orders can no longer be cancelled; they are verified at the close and the new state acts from the next session"})
+        logger.warning("C5 %s after the close: %s can no longer be cancelled; acting from the next session", cstate,
                        [s["month"] for s in inflight])
-        health["actions"].append(f"{cstate} after the MOC cutoff: today's orders will fill at the close; acting from the next session")
+        health["actions"].append(f"{cstate} after the close: today's orders can no longer be cancelled; acting from the next session")
         return open_orders
     by_cid = {o.get("client_order_id"): o for o in open_orders}
     gone: set[str] = set()
@@ -443,7 +446,7 @@ def _cancel_inflight(d: Deps, states: list[dict], cstate: str, open_orders: list
         for o in s.get("orders", []):
             b = by_cid.get(o.get("client_order_id"))
             if not b:
-                continue                                      # no longer open at Alpaca (rejected, or never placed)
+                continue                                      # no longer open at Alpaca: filled (usual for a market order), or rejected
             try:
                 d.alpaca.cancel_order(b["id"])
                 requested.append({"client_order_id": o["client_order_id"], "order_id": b["id"]})
@@ -454,13 +457,17 @@ def _cancel_inflight(d: Deps, states: list[dict], cstate: str, open_orders: list
         if failed:
             health["actions"].append(f"{cstate}: cancel FAILED for {failed}; {s['month']} left submitted")
             continue
+        if not requested:
+            # nothing open: the orders most likely FILLED already. Never mark that `cancelled` (it would hide a real fill from the
+            # holding check); leave it `submitted` and let the close verify it like any other order set
+            health["actions"].append(f"{cstate}: no open order of {s['month']} to cancel (already filled or done); verified at the close")
+            continue
         # accepted by Alpaca is not the same as cancelled: later ticks read each order's final status (`_confirm_cancels`)
-        s.update({"status": "cancel_requested" if requested else "cancelled", "cancel_requested_at": now.isoformat(), "cancelled_because": cstate,
-                  "cancel_orders": requested, **({} if requested else {"pause_outcome": "nothing_open"})})
+        s.update({"status": "cancel_requested", "cancel_requested_at": now.isoformat(), "cancelled_because": cstate, "cancel_orders": requested})
         _write_state(d, s)
         _log(d, {"key": f"engine:cancel:{s['month']}", "logged_at": now.isoformat(), "kind": "engine", "action": f"{cstate}: cancel requested",
                  "decision": s["month"], "orders": [c["client_order_id"] for c in requested]})
-        health["actions"].append(f"{cstate}: cancel requested for {len(requested)} open MOC orders of {s['month']}")
+        health["actions"].append(f"{cstate}: cancel requested for {len(requested)} open orders of {s['month']}")
     return [o for o in open_orders if o.get("client_order_id") not in gone]
 
 
@@ -480,8 +487,10 @@ def _confirm_cancels(d: Deps, states: list[dict], raws: dict, closes: dict, toda
                 logger.error("C5 status read of %s failed: %s", c["client_order_id"], type(e).__name__)
                 orders.append({})
         sts = [str(b.get("status") or "").lower() for b in orders]
-        filled = any(float(b.get("filled_qty") or 0) > 0 for b in orders)
         final = all(x in UNFILLED_TERMINAL + ("filled",) for x in sts)
+        filled = any(float(b.get("filled_qty") or 0) > 0 for b in orders)
+        if final and not filled:                      # an order of the set that was NOT open to cancel may have filled already
+            filled = any(f["filled_qty"] > 0 for f in _fill_records(d, s, raws, date.fromisoformat(s["submitted_on"])))
         if final and not filled:
             s.update({"status": "cancelled", "cancel_confirmed_at": now.isoformat(), "pause_outcome": "cancel_confirmed"})
             _write_state(d, s)
@@ -507,7 +516,7 @@ def _confirm_cancels(d: Deps, states: list[dict], raws: dict, closes: dict, toda
 
 
 PAUSE_TEXT = {"cancel_requested": "Pause: cancel requested, awaiting confirmation", "cancel_confirmed": "Pause: cancel confirmed",
-              "nothing_open": "Pause: no open order to cancel", "filled_before_cancel": "Pause: order filled before cancel; acting next session"}
+              "filled_before_cancel": "Pause: order filled before cancel; acting next session"}
 
 
 def _pause_line(states: list[dict], cstate: str, now: datetime) -> str | None:
@@ -539,14 +548,15 @@ def _submit(d: Deps, st: dict, positions: dict, raws: dict, today: sch.Session, 
             logger.warning("C5 buy %s skipped: this engine already has an open order on %s", o["client_order_id"], o["symbol"])
             continue
         try:
-            r = d.alpaca.submit_order(o["symbol"], o["qty"], o["side"], order_type="market", time_in_force="cls", client_order_id=o["client_order_id"])
+            r = d.alpaca.submit_order(o["symbol"], o["qty"], o["side"], order_type=o["type"], time_in_force=o["time_in_force"],
+                                      client_order_id=o["client_order_id"])
             placed.append({**o, "order_id": r.get("id"), "status": r.get("status")})
         except Exception as e:  # noqa: BLE001
             placed.append(_resolve_submit_error(d, o, e))           # layer (c): decided by a lookup at Alpaca, never by the error text
     st.update({"status": "submitted", "submitted_on": today.day.isoformat(), "equity_at_submit": equity, "orders": placed,
                "late": today.day > date.fromisoformat(st["execution_date"])})
     _write_state(d, st)
-    health["actions"].append(f"submitted {len(placed)} MOC orders for {st['month']} -> {target}")
+    health["actions"].append(f"submitted {len(placed)} market orders for {st['month']} -> {target}")
 
 
 def _fill_records(d: Deps, st: dict, raws: dict, day: date) -> list[dict]:
