@@ -166,12 +166,13 @@
     const st = c.state || "active";
     const icon = st === "active" ? `<span class="eg-status ok">${ICON_OK}${STATE_WORD[st]}</span>` : `<span class="eg-status bad">${ICON_BAD}${esc(STATE_WORD[st] || st)}</span>`;
     const since = c.changed_at ? ` <span class="eg-muted eg-small">since ${esc(String(c.changed_at).replace("T", " ").slice(0, 16))}${c.reason ? ` · “${esc(c.reason)}”` : ""}</span>` : "";
+    const btn = (action, label) => `<button type="button" class="eg-btn" data-action="${action}" title="${esc(ACTION_TEXT[action].what)}">${esc(label)}</button>`;
     const buttons = c.is_admin
       ? `<div class="eg-controls-actions">` +
-        (st !== "paused" ? `<button type="button" class="eg-btn" data-action="pause">Pause</button>` : "") +
-        (st !== "paused_to_tbills" ? `<button type="button" class="eg-btn" data-action="pause_to_tbills">Pause to T-bills</button>` : "") +
-        (st !== "active" ? `<button type="button" class="eg-btn" data-action="resume">Resume</button>` : "") +
-        (st === "active" ? `<button type="button" class="eg-btn" data-action="realign">Re-align at next close</button>` : "") +
+        (st !== "paused" ? btn("pause", "Pause") : "") +
+        (st !== "paused_to_tbills" ? btn("pause_to_tbills", "Pause to T-bills") : "") +
+        (st !== "active" ? btn("resume", "Resume") : "") +
+        (st === "active" ? btn("realign", "Re-align at next close") : "") +
         `</div>`
       : "";
     const log = (c.log || []).map((e) => `<li><span class="mono eg-muted">${esc(String(e.changed_at || e.logged_at || "").replace("T", " ").slice(0, 16))}</span> ` +
